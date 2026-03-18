@@ -39,6 +39,11 @@ final class DB
         'trust_user_verifications' => 'bcc_trust_user_verifications_table',
         'trust_user_risk'          => 'bcc_trust_user_risk_table',
         'trust_edges'              => 'bcc_trust_edges_table',
+        'trust_page_composites'    => 'bcc_trust_page_composites_table',
+        'trust_page_verifications' => 'bcc_trust_page_verifications_table',
+        'trust_page_metrics'       => 'bcc_trust_page_metrics_table',
+        'trust_page_identities'    => 'bcc_trust_page_identities_table',
+        'trust_endorsement_types'  => 'bcc_trust_endorsement_types_table',
     ];
 
     /**
