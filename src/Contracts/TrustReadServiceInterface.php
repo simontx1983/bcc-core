@@ -33,6 +33,26 @@ interface TrustReadServiceInterface
     public function getActiveVotesForPage(int $pageId): array;
 
     /**
+     * Return vote snapshots for a batch of vote IDs, keyed by vote_id.
+     *
+     * Unlike getVoteById(), this does NOT filter on vote status — it returns
+     * votes regardless of whether they are active, deleted, or disputed.
+     * This is required for admin views that display historical dispute data.
+     *
+     * Each entry contains:
+     * - vote_type   (int)
+     * - weight      (float)
+     * - reason      (string)
+     * - created_at  (string|null)
+     *
+     * Missing vote IDs are omitted from the result.
+     *
+     * @param int[] $voteIds
+     * @return array<int, array{vote_type: int, weight: float, reason: string, created_at: ?string}>
+     */
+    public function getVotesByIds(array $voteIds): array;
+
+    /**
      * Return canonical wp_user_id values eligible to serve as dispute panelists.
      *
      * @param array<int, int> $excludedUserIds
