@@ -1,0 +1,10 @@
+{
+  "name": "bcc/core",
+  "description": "BCC Core Plugin",
+  "type": "wordpress-plugin",
+  "autoload": {
+    "psr-4": {
+      "BCC\\Core\\": "src/"
+    }
+  }
+}
