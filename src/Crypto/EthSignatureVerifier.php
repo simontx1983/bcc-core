@@ -1,0 +1,172 @@
+<?php
+/**
+ * Ethereum Signature Verifier
+ *
+ * Recovers the signer address from an Ethereum personal_sign signature.
+ * Uses pure GMP for secp256k1 ecrecover (no external libraries required).
+ *
+ * Requires: GMP extension.
+ *
+ * @package BCC\Core\Crypto
+ */
+
+namespace BCC\Core\Crypto;
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+class EthSignatureVerifier {
+
+    private const P  = 'fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f';
+    private const N  = 'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141';
+    private const GX = '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
+    private const GY = '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8';
+
+    public static function verify(string $message, string $signature, string $address): bool {
+        $recovered = self::recoverAddress($message, $signature);
+        if ($recovered === null) {
+            return false;
+        }
+        return strtolower($recovered) === strtolower($address);
+    }
+
+    public static function recoverAddress(string $message, string $signature): ?string {
+        if (!extension_loaded('gmp')) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error('[bcc-core] EthVerifier: GMP extension required', []);
+            }
+            return null;
+        }
+
+        $sig = trim($signature);
+        if (substr($sig, 0, 2) === '0x' || substr($sig, 0, 2) === '0X') {
+            $sig = substr($sig, 2);
+        }
+
+        if (strlen($sig) !== 130) {
+            return null;
+        }
+
+        $r = substr($sig, 0, 64);
+        $s = substr($sig, 64, 64);
+        $v = hexdec(substr($sig, 128, 2));
+
+        if ($v >= 27) {
+            $v -= 27;
+        }
+        if ($v !== 0 && $v !== 1) {
+            return null;
+        }
+
+        $msgHash = self::hashMessage($message);
+
+        $pubKey = self::ecrecover($msgHash, $v, $r, $s);
+        if ($pubKey === null) {
+            return null;
+        }
+
+        $hash    = Keccak256::hash(hex2bin($pubKey), false);
+        $address = '0x' . substr($hash, 24);
+
+        return $address;
+    }
+
+    private static function hashMessage(string $message): string {
+        $prefix  = "\x19Ethereum Signed Message:\n" . strlen($message);
+        return Keccak256::hash($prefix . $message, false);
+    }
+
+    private static function ecrecover(string $msgHash, int $v, string $r, string $s): ?string {
+        $p  = gmp_init(self::P,  16);
+        $n  = gmp_init(self::N,  16);
+        $gx = gmp_init(self::GX, 16);
+        $gy = gmp_init(self::GY, 16);
+
+        $rGmp = gmp_init($r, 16);
+        $sGmp = gmp_init($s, 16);
+        $zGmp = gmp_init($msgHash, 16);
+
+        $x = gmp_add($rGmp, gmp_mul(gmp_init($v), $n));
+        if (gmp_cmp($x, $p) >= 0) {
+            return null;
+        }
+
+        $y = self::recoverY($x, $p, $v);
+        if ($y === null) {
+            return null;
+        }
+
+        $rInv = gmp_invert($rGmp, $n);
+        if ($rInv === false) {
+            return null;
+        }
+
+        $negZ = gmp_mod(gmp_neg($zGmp), $n);
+
+        $sR    = self::pointMul([$x, $y], $sGmp, $p, $n);
+        $negZG = self::pointMul([$gx, $gy], $negZ, $p, $n);
+        $sum   = self::pointAdd($sR, $negZG, $p);
+        $pub   = self::pointMul($sum, $rInv, $p, $n);
+
+        if ($pub === null) {
+            return null;
+        }
+
+        return str_pad(gmp_strval($pub[0], 16), 64, '0', STR_PAD_LEFT)
+             . str_pad(gmp_strval($pub[1], 16), 64, '0', STR_PAD_LEFT);
+    }
+
+    private static function recoverY(\GMP $x, \GMP $p, int $v): ?\GMP {
+        $rhs = gmp_mod(gmp_add(gmp_powm($x, gmp_init(3), $p), gmp_init(7)), $p);
+        $exp = gmp_div_q(gmp_add($p, gmp_init(1)), gmp_init(4));
+        $y   = gmp_powm($rhs, $exp, $p);
+        if (gmp_cmp(gmp_powm($y, gmp_init(2), $p), $rhs) !== 0) {
+            return null;
+        }
+        $yParity = gmp_intval(gmp_mod($y, gmp_init(2)));
+        if ($yParity !== $v) {
+            $y = gmp_mod(gmp_neg($y), $p);
+        }
+        return $y;
+    }
+
+    private static function pointAdd(array $p1, array $p2, \GMP $mod): array {
+        [$x1, $y1] = $p1;
+        [$x2, $y2] = $p2;
+        if (gmp_cmp($x1, $x2) === 0 && gmp_cmp($y1, $y2) === 0) {
+            $lam = gmp_mod(
+                gmp_mul(
+                    gmp_mul(gmp_init(3), gmp_powm($x1, gmp_init(2), $mod)),
+                    gmp_invert(gmp_mod(gmp_mul(gmp_init(2), $y1), $mod), $mod)
+                ),
+                $mod
+            );
+        } else {
+            $dy  = gmp_mod(gmp_sub($y2, $y1), $mod);
+            $dx  = gmp_mod(gmp_sub($x2, $x1), $mod);
+            $inv = gmp_invert(gmp_mod($dx, $mod), $mod);
+            $lam = gmp_mod(gmp_mul($dy, $inv), $mod);
+        }
+        $x3 = gmp_mod(gmp_sub(gmp_sub(gmp_powm($lam, gmp_init(2), $mod), $x1), $x2), $mod);
+        $y3 = gmp_mod(gmp_sub(gmp_mul($lam, gmp_sub($x1, $x3)), $y1), $mod);
+        return [gmp_mod($x3, $mod), gmp_mod($y3, $mod)];
+    }
+
+    private static function pointMul(array $point, \GMP $k, \GMP $p, \GMP $n): ?array {
+        $k = gmp_mod($k, $n);
+        if (gmp_cmp($k, gmp_init(0)) === 0) {
+            return null;
+        }
+        $result = null;
+        $addend = $point;
+        $bits = gmp_strval($k, 2);
+        for ($i = strlen($bits) - 1; $i >= 0; $i--) {
+            if ($bits[$i] === '1') {
+                $result = ($result === null) ? $addend : self::pointAdd($result, $addend, $p);
+            }
+            $addend = self::pointAdd($addend, $addend, $p);
+        }
+        return $result;
+    }
+}
