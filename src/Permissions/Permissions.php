@@ -33,11 +33,10 @@ final class Permissions
             return $owner_id === $user_id;
         }
 
-        // Fallback: WP post author for peepso-page post type.
+        // Fallback: WP post author (any post type — covers PeepSo pages
+        // and shadow CPTs like validators, builder, dao, nft).
         $post = get_post($page_id);
 
-        return $post
-            && $post->post_type === 'peepso-page'
-            && (int) $post->post_author === $user_id;
+        return $post && (int) $post->post_author === $user_id;
     }
 }

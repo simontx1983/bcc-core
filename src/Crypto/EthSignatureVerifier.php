@@ -5,7 +5,7 @@
  * Recovers the signer address from an Ethereum personal_sign signature.
  * Uses pure GMP for secp256k1 ecrecover (no external libraries required).
  *
- * Requires: GMP extension.
+ * Requires: GMP extension (BCMath is NOT needed — we use GMP throughout).
  *
  * @package BCC\Core\Crypto
  */
@@ -39,6 +39,8 @@ class EthSignatureVerifier {
             return null;
         }
 
+        // Strip 0x prefix (use substr, NOT ltrim — ltrim strips chars from a set,
+        // so '0x00abc...' would incorrectly eat the leading zero byte of r).
         $sig = trim($signature);
         if (substr($sig, 0, 2) === '0x' || substr($sig, 0, 2) === '0X') {
             $sig = substr($sig, 2);
@@ -77,6 +79,18 @@ class EthSignatureVerifier {
         return Keccak256::hash($prefix . $message, false);
     }
 
+    /**
+     * secp256k1 ecrecover.
+     *
+     * Recovers the uncompressed public key (128 hex chars, no 04 prefix)
+     * from (msgHash, v, r, s).
+     *
+     * @param string $msgHash 32-byte hash as 64-char hex string
+     * @param int    $v       Recovery id (0 or 1)
+     * @param string $r       64-char hex
+     * @param string $s       64-char hex
+     * @return string|null    128-char hex (x‖y of uncompressed pubkey) or null
+     */
     private static function ecrecover(string $msgHash, int $v, string $r, string $s): ?string {
         $p  = gmp_init(self::P,  16);
         $n  = gmp_init(self::N,  16);
@@ -87,6 +101,7 @@ class EthSignatureVerifier {
         $sGmp = gmp_init($s, 16);
         $zGmp = gmp_init($msgHash, 16);
 
+        // x = r + v*n  (for most signatures v*n < p so x == r)
         $x = gmp_add($rGmp, gmp_mul(gmp_init($v), $n));
         if (gmp_cmp($x, $p) >= 0) {
             return null;
@@ -97,6 +112,7 @@ class EthSignatureVerifier {
             return null;
         }
 
+        // rInv = modular inverse of r mod n
         $rInv = gmp_invert($rGmp, $n);
         if ($rInv === false) {
             return null;
@@ -104,6 +120,8 @@ class EthSignatureVerifier {
 
         $negZ = gmp_mod(gmp_neg($zGmp), $n);
 
+        // pubKey = rInv * (s*R - z*G)
+        //        = rInv * s * R + rInv * (-z) * G
         $sR    = self::pointMul([$x, $y], $sGmp, $p, $n);
         $negZG = self::pointMul([$gx, $gy], $negZ, $p, $n);
         $sum   = self::pointAdd($sR, $negZG, $p);
@@ -113,12 +131,18 @@ class EthSignatureVerifier {
             return null;
         }
 
+        // Return as 128-char hex (x || y, each zero-padded to 32 bytes)
         return str_pad(gmp_strval($pub[0], 16), 64, '0', STR_PAD_LEFT)
              . str_pad(gmp_strval($pub[1], 16), 64, '0', STR_PAD_LEFT);
     }
 
+    /**
+     * Recover y from x on secp256k1: y² = x³ + 7 (mod p).
+     * Choose the y whose parity matches $v (even y ↔ v=0, odd y ↔ v=1).
+     */
     private static function recoverY(\GMP $x, \GMP $p, int $v): ?\GMP {
         $rhs = gmp_mod(gmp_add(gmp_powm($x, gmp_init(3), $p), gmp_init(7)), $p);
+        // p ≡ 3 (mod 4) so sqrt = rhs^((p+1)/4) mod p
         $exp = gmp_div_q(gmp_add($p, gmp_init(1)), gmp_init(4));
         $y   = gmp_powm($rhs, $exp, $p);
         if (gmp_cmp(gmp_powm($y, gmp_init(2), $p), $rhs) !== 0) {
@@ -131,10 +155,18 @@ class EthSignatureVerifier {
         return $y;
     }
 
+    /**
+     * Elliptic curve point addition on secp256k1 (affine coordinates).
+     *
+     * @param  array{\GMP, \GMP} $p1  [x, y]
+     * @param  array{\GMP, \GMP} $p2  [x, y]
+     * @param  \GMP              $mod Field prime p
+     * @return array{\GMP, \GMP}      [x, y]
+     */
     private static function pointAdd(array $p1, array $p2, \GMP $mod): array {
         [$x1, $y1] = $p1;
         [$x2, $y2] = $p2;
-        if (gmp_cmp($x1, $x2) === 0 && gmp_cmp($y1, $y2) === 0) {
+        if (gmp_cmp($x1, $x2) === 0 && gmp_cmp($y1, $y2) === 0) { // Point doubling
             $lam = gmp_mod(
                 gmp_mul(
                     gmp_mul(gmp_init(3), gmp_powm($x1, gmp_init(2), $mod)),
@@ -153,6 +185,15 @@ class EthSignatureVerifier {
         return [gmp_mod($x3, $mod), gmp_mod($y3, $mod)];
     }
 
+    /**
+     * Elliptic curve scalar multiplication using double-and-add.
+     *
+     * @param  array{\GMP, \GMP}      $point [x, y]
+     * @param  \GMP                   $k     Scalar
+     * @param  \GMP                   $p     Field prime
+     * @param  \GMP                   $n     Curve order (used for k mod n)
+     * @return array{\GMP, \GMP}|null        [x, y] or null if k == 0
+     */
     private static function pointMul(array $point, \GMP $k, \GMP $p, \GMP $n): ?array {
         $k = gmp_mod($k, $n);
         if (gmp_cmp($k, gmp_init(0)) === 0) {

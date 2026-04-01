@@ -18,6 +18,17 @@ if (!defined('ABSPATH')) {
 
 class SolanaSignatureVerifier {
 
+    /**
+     * Verify a Solana wallet signature.
+     *
+     * Phantom's signMessage() signs the raw UTF-8 bytes of the message
+     * with Ed25519 and returns base58-encoded signature + public key.
+     *
+     * @param string $message   Plain-text nonce that was signed
+     * @param string $signature Base58-encoded 64-byte Ed25519 signature
+     * @param string $address   Base58-encoded Solana public key (wallet address)
+     * @return bool
+     */
     public static function verify(string $message, string $signature, string $address): bool {
         if (!function_exists('sodium_crypto_sign_verify_detached')) {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
@@ -33,11 +44,11 @@ class SolanaSignatureVerifier {
             return false;
         }
 
-        if (strlen($sigBytes) !== SODIUM_CRYPTO_SIGN_BYTES) {
+        if (strlen($sigBytes) !== SODIUM_CRYPTO_SIGN_BYTES) { // 64 bytes
             return false;
         }
 
-        if (strlen($pubBytes) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
+        if (strlen($pubBytes) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) { // 32 bytes
             return false;
         }
 
@@ -51,6 +62,15 @@ class SolanaSignatureVerifier {
         }
     }
 
+    /**
+     * Decode a Base58 string to raw binary.
+     *
+     * Uses the Bitcoin/Solana alphabet:
+     *   123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+     *
+     * @param  string      $input Base58 string
+     * @return string|null Raw binary bytes, or null on invalid input
+     */
     public static function base58Decode(string $input): ?string {
         $alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
         $base     = strlen($alphabet);
@@ -72,6 +92,7 @@ class SolanaSignatureVerifier {
         }
         $bytes = strlen($hex) > 0 ? hex2bin($hex) : '';
 
+        // Prepend zero bytes for leading '1' characters in input
         $leadingZeros = 0;
         for ($i = 0; $i < $len && $input[$i] === '1'; $i++) {
             $leadingZeros++;

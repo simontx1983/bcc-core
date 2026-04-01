@@ -31,16 +31,11 @@ final class PeepSo
             return self::$cache[$page_id];
         }
 
+        // NullPageOwnerResolver falls back to WP post_author internally,
+        // so no separate fallback path is needed here.
         $resolver = ServiceLocator::resolvePageOwnerResolver();
+        $owner    = $resolver->getPageOwner($page_id);
 
-        if ($resolver) {
-            $owner = $resolver->getPageOwner($page_id);
-            return self::$cache[$page_id] = $owner ?: null;
-        }
-
-        // Fallback: WP post author.
-        $post = get_post($page_id);
-
-        return self::$cache[$page_id] = ($post && $post->post_author ? (int) $post->post_author : null);
+        return self::$cache[$page_id] = $owner ?: null;
     }
 }

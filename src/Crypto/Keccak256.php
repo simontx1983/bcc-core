@@ -47,6 +47,7 @@ class Keccak256 {
         }
     }
 
+    /** Rotate a 64-bit GMP integer left by $n bits. */
     private static function rotl64(\GMP $x, int $n): \GMP {
         $mask = self::$mask64;
         $left  = gmp_and(gmp_mul($x, gmp_pow(gmp_init(2), $n)), $mask);
@@ -54,11 +55,13 @@ class Keccak256 {
         return gmp_and(gmp_or($left, $right), $mask);
     }
 
+    /** Apply the Keccak-f[1600] permutation to the 5×5 state. */
     private static function keccakF(array &$A): void {
         self::init();
         $mask = self::$mask64;
 
         for ($round = 0; $round < 24; $round++) {
+            // θ step
             $C = [];
             for ($x = 0; $x < 5; $x++) {
                 $C[$x] = gmp_xor(gmp_xor(gmp_xor(gmp_xor($A[$x][0], $A[$x][1]), $A[$x][2]), $A[$x][3]), $A[$x][4]);
@@ -73,6 +76,7 @@ class Keccak256 {
                 }
             }
 
+            // ρ and π steps combined
             $B = array_fill(0, 5, array_fill(0, 5, gmp_init(0)));
             for ($x = 0; $x < 5; $x++) {
                 for ($y = 0; $y < 5; $y++) {
@@ -80,6 +84,7 @@ class Keccak256 {
                 }
             }
 
+            // χ step
             for ($x = 0; $x < 5; $x++) {
                 for ($y = 0; $y < 5; $y++) {
                     $A[$x][$y] = gmp_and(
@@ -89,6 +94,7 @@ class Keccak256 {
                 }
             }
 
+            // ι step
             $A[0][0] = gmp_and(gmp_xor($A[0][0], gmp_init(self::RC[$round], 16)), $mask);
         }
     }
@@ -105,16 +111,20 @@ class Keccak256 {
         self::init();
         $mask = self::$mask64;
 
+        // Parameters for Keccak-256: rate = 1088 bits = 136 bytes, output = 256 bits
         $rate     = 136;
         $outputLen = 32;
 
+        // Padding: append 0x01, then zeros, then set high bit of last byte
         $inputLen = strlen($input);
         $padLen   = $rate - ($inputLen % $rate);
         $input   .= "\x01" . str_repeat("\x00", $padLen - 1);
         $input[$inputLen + $padLen - 1] = chr(ord($input[$inputLen + $padLen - 1]) | 0x80);
 
+        // Initialise 5×5 state of 64-bit lanes to zero
         $A = array_fill(0, 5, array_fill(0, 5, gmp_init(0)));
 
+        // Absorb
         for ($block = 0; $block < strlen($input); $block += $rate) {
             for ($i = 0; $i < $rate / 8; $i++) {
                 $word = gmp_init(0);
@@ -129,6 +139,7 @@ class Keccak256 {
             self::keccakF($A);
         }
 
+        // Squeeze — collect output bytes in little-endian lane order
         $output = '';
         $needed = $outputLen;
         $laneIdx = 0;
