@@ -40,7 +40,7 @@ final class DB
 
         $resolved = apply_filters('bcc.resolve.table_name', null, $name);
 
-        if (is_string($resolved) && $resolved !== '') {
+        if (is_string($resolved) && $resolved !== '' && preg_match('/^[a-zA-Z0-9_]+$/', $resolved)) {
             self::$cache[$name] = $resolved;
             return $resolved;
         }

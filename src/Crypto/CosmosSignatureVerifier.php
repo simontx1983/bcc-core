@@ -52,7 +52,7 @@ class CosmosSignatureVerifier {
                 }
                 return false;
             }
-            if (($doc['memo'] ?? '') !== $message) {
+            if (!hash_equals($message, (string) ($doc['memo'] ?? ''))) {
                 if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                     \BCC\Core\Log\Logger::error('[bcc-core] CosmosVerifier: nonce mismatch in signed_doc memo', []);
                 }

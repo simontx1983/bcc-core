@@ -28,7 +28,7 @@ class EthSignatureVerifier {
         if ($recovered === null) {
             return false;
         }
-        return strtolower($recovered) === strtolower($address);
+        return hash_equals(strtolower($recovered), strtolower($address));
     }
 
     private static function recoverAddress(string $message, string $signature): ?string {
