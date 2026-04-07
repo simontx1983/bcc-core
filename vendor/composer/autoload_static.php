@@ -22,8 +22,8 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
 
     public static $classMap = array (
         'BCC\\Core\\Contracts\\DisputeAdjudicationInterface' => __DIR__ . '/../..' . '/src/Contracts/DisputeAdjudicationInterface.php',
+        'BCC\\Core\\Contracts\\OnchainDataReadInterface' => __DIR__ . '/../..' . '/src/Contracts/OnchainDataReadInterface.php',
         'BCC\\Core\\Contracts\\PageOwnerResolverInterface' => __DIR__ . '/../..' . '/src/Contracts/PageOwnerResolverInterface.php',
-        'BCC\\Core\\Contracts\\QuestProgressReadInterface' => __DIR__ . '/../..' . '/src/Contracts/QuestProgressReadInterface.php',
         'BCC\\Core\\Contracts\\ScoreContributorInterface' => __DIR__ . '/../..' . '/src/Contracts/ScoreContributorInterface.php',
         'BCC\\Core\\Contracts\\ScoreReadServiceInterface' => __DIR__ . '/../..' . '/src/Contracts/ScoreReadServiceInterface.php',
         'BCC\\Core\\Contracts\\TrustHeaderDataInterface' => __DIR__ . '/../..' . '/src/Contracts/TrustHeaderDataInterface.php',
@@ -35,12 +35,13 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
         'BCC\\Core\\Crypto\\EthSignatureVerifier' => __DIR__ . '/../..' . '/src/Crypto/EthSignatureVerifier.php',
         'BCC\\Core\\Crypto\\Keccak256' => __DIR__ . '/../..' . '/src/Crypto/Keccak256.php',
         'BCC\\Core\\Crypto\\SolanaSignatureVerifier' => __DIR__ . '/../..' . '/src/Crypto/SolanaSignatureVerifier.php',
+        'BCC\\Core\\Crypto\\WalletChallenge' => __DIR__ . '/../..' . '/src/Crypto/WalletChallenge.php',
         'BCC\\Core\\Crypto\\WalletVerifier' => __DIR__ . '/../..' . '/src/Crypto/WalletVerifier.php',
         'BCC\\Core\\DB\\DB' => __DIR__ . '/../..' . '/src/DB/DB.php',
         'BCC\\Core\\Log\\Logger' => __DIR__ . '/../..' . '/src/Log/Logger.php',
         'BCC\\Core\\NullServices\\NullDisputeAdjudication' => __DIR__ . '/../..' . '/src/NullServices/NullDisputeAdjudication.php',
+        'BCC\\Core\\NullServices\\NullOnchainDataRead' => __DIR__ . '/../..' . '/src/NullServices/NullOnchainDataRead.php',
         'BCC\\Core\\NullServices\\NullPageOwnerResolver' => __DIR__ . '/../..' . '/src/NullServices/NullPageOwnerResolver.php',
-        'BCC\\Core\\NullServices\\NullQuestProgressRead' => __DIR__ . '/../..' . '/src/NullServices/NullQuestProgressRead.php',
         'BCC\\Core\\NullServices\\NullScoreContributor' => __DIR__ . '/../..' . '/src/NullServices/NullScoreContributor.php',
         'BCC\\Core\\NullServices\\NullScoreReadService' => __DIR__ . '/../..' . '/src/NullServices/NullScoreReadService.php',
         'BCC\\Core\\NullServices\\NullTrustHeaderData' => __DIR__ . '/../..' . '/src/NullServices/NullTrustHeaderData.php',
@@ -51,6 +52,7 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
         'BCC\\Core\\PeepSo\\PeepSo' => __DIR__ . '/../..' . '/src/PeepSo/PeepSo.php',
         'BCC\\Core\\Permissions\\Permissions' => __DIR__ . '/../..' . '/src/Permissions/Permissions.php',
         'BCC\\Core\\ServiceLocator' => __DIR__ . '/../..' . '/src/ServiceLocator.php',
+        'BCC\\Core\\Wallet\\WalletIdentityService' => __DIR__ . '/../..' . '/src/Wallet/WalletIdentityService.php',
         'Composer\\InstalledVersions' => __DIR__ . '/..' . '/composer/InstalledVersions.php',
     );
 

@@ -7,8 +7,8 @@ $baseDir = dirname($vendorDir);
 
 return array(
     'BCC\\Core\\Contracts\\DisputeAdjudicationInterface' => $baseDir . '/src/Contracts/DisputeAdjudicationInterface.php',
+    'BCC\\Core\\Contracts\\OnchainDataReadInterface' => $baseDir . '/src/Contracts/OnchainDataReadInterface.php',
     'BCC\\Core\\Contracts\\PageOwnerResolverInterface' => $baseDir . '/src/Contracts/PageOwnerResolverInterface.php',
-    'BCC\\Core\\Contracts\\QuestProgressReadInterface' => $baseDir . '/src/Contracts/QuestProgressReadInterface.php',
     'BCC\\Core\\Contracts\\ScoreContributorInterface' => $baseDir . '/src/Contracts/ScoreContributorInterface.php',
     'BCC\\Core\\Contracts\\ScoreReadServiceInterface' => $baseDir . '/src/Contracts/ScoreReadServiceInterface.php',
     'BCC\\Core\\Contracts\\TrustHeaderDataInterface' => $baseDir . '/src/Contracts/TrustHeaderDataInterface.php',
@@ -20,12 +20,13 @@ return array(
     'BCC\\Core\\Crypto\\EthSignatureVerifier' => $baseDir . '/src/Crypto/EthSignatureVerifier.php',
     'BCC\\Core\\Crypto\\Keccak256' => $baseDir . '/src/Crypto/Keccak256.php',
     'BCC\\Core\\Crypto\\SolanaSignatureVerifier' => $baseDir . '/src/Crypto/SolanaSignatureVerifier.php',
+    'BCC\\Core\\Crypto\\WalletChallenge' => $baseDir . '/src/Crypto/WalletChallenge.php',
     'BCC\\Core\\Crypto\\WalletVerifier' => $baseDir . '/src/Crypto/WalletVerifier.php',
     'BCC\\Core\\DB\\DB' => $baseDir . '/src/DB/DB.php',
     'BCC\\Core\\Log\\Logger' => $baseDir . '/src/Log/Logger.php',
     'BCC\\Core\\NullServices\\NullDisputeAdjudication' => $baseDir . '/src/NullServices/NullDisputeAdjudication.php',
+    'BCC\\Core\\NullServices\\NullOnchainDataRead' => $baseDir . '/src/NullServices/NullOnchainDataRead.php',
     'BCC\\Core\\NullServices\\NullPageOwnerResolver' => $baseDir . '/src/NullServices/NullPageOwnerResolver.php',
-    'BCC\\Core\\NullServices\\NullQuestProgressRead' => $baseDir . '/src/NullServices/NullQuestProgressRead.php',
     'BCC\\Core\\NullServices\\NullScoreContributor' => $baseDir . '/src/NullServices/NullScoreContributor.php',
     'BCC\\Core\\NullServices\\NullScoreReadService' => $baseDir . '/src/NullServices/NullScoreReadService.php',
     'BCC\\Core\\NullServices\\NullTrustHeaderData' => $baseDir . '/src/NullServices/NullTrustHeaderData.php',
@@ -36,5 +37,6 @@ return array(
     'BCC\\Core\\PeepSo\\PeepSo' => $baseDir . '/src/PeepSo/PeepSo.php',
     'BCC\\Core\\Permissions\\Permissions' => $baseDir . '/src/Permissions/Permissions.php',
     'BCC\\Core\\ServiceLocator' => $baseDir . '/src/ServiceLocator.php',
+    'BCC\\Core\\Wallet\\WalletIdentityService' => $baseDir . '/src/Wallet/WalletIdentityService.php',
     'Composer\\InstalledVersions' => $vendorDir . '/composer/InstalledVersions.php',
 );
