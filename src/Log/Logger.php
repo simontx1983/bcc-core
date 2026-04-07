@@ -37,6 +37,14 @@ final class Logger
         self::write('ERROR', $message, $context);
     }
 
+    /**
+     * Log a security-relevant audit event.
+     */
+    public static function audit(string $message, array $context = []): void
+    {
+        self::write('AUDIT', $message, $context);
+    }
+
     // ── Internal ────────────────────────────────────────────────────────────
 
     private static function ensureInit(): void

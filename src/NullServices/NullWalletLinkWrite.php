@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
  */
 final class NullWalletLinkWrite implements WalletLinkWriteInterface
 {
-    public function linkWallet(int $userId, string $chainSlug, string $walletAddress, int $postId = 0, string $walletType = 'user'): int
+    public function linkWallet(int $userId, string $chainSlug, string $walletAddress, int $postId = 0, string $walletType = 'user', string $label = ''): int
     {
         return 0;
     }

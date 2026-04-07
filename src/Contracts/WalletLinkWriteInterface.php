@@ -26,6 +26,7 @@ interface WalletLinkWriteInterface
      * @param string $walletAddress Wallet address.
      * @param int    $postId        Associated post/page ID (0 if none).
      * @param string $walletType    'user' | 'treasury' | 'validator' etc.
+     * @param string $label         Optional human-readable label for this wallet.
      * @return int   wallet_link_id or 0 on failure.
      */
     public function linkWallet(
@@ -33,7 +34,8 @@ interface WalletLinkWriteInterface
         string $chainSlug,
         string $walletAddress,
         int $postId = 0,
-        string $walletType = 'user'
+        string $walletType = 'user',
+        string $label = ''
     ): int;
 
     /**

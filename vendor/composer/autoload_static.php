@@ -51,8 +51,10 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
         'BCC\\Core\\NullServices\\NullWalletVerificationRead' => __DIR__ . '/../..' . '/src/NullServices/NullWalletVerificationRead.php',
         'BCC\\Core\\PeepSo\\PeepSo' => __DIR__ . '/../..' . '/src/PeepSo/PeepSo.php',
         'BCC\\Core\\Permissions\\Permissions' => __DIR__ . '/../..' . '/src/Permissions/Permissions.php',
+        'BCC\\Core\\Security\\Throttle' => __DIR__ . '/../..' . '/src/Security/Throttle.php',
         'BCC\\Core\\ServiceLocator' => __DIR__ . '/../..' . '/src/ServiceLocator.php',
         'BCC\\Core\\Wallet\\WalletIdentityService' => __DIR__ . '/../..' . '/src/Wallet/WalletIdentityService.php',
+        'BCC\\Core\\Wallet\\WalletVerificationRequest' => __DIR__ . '/../..' . '/src/Wallet/WalletVerificationRequest.php',
         'Composer\\InstalledVersions' => __DIR__ . '/..' . '/composer/InstalledVersions.php',
     );
 

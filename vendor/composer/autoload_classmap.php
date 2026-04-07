@@ -36,7 +36,9 @@ return array(
     'BCC\\Core\\NullServices\\NullWalletVerificationRead' => $baseDir . '/src/NullServices/NullWalletVerificationRead.php',
     'BCC\\Core\\PeepSo\\PeepSo' => $baseDir . '/src/PeepSo/PeepSo.php',
     'BCC\\Core\\Permissions\\Permissions' => $baseDir . '/src/Permissions/Permissions.php',
+    'BCC\\Core\\Security\\Throttle' => $baseDir . '/src/Security/Throttle.php',
     'BCC\\Core\\ServiceLocator' => $baseDir . '/src/ServiceLocator.php',
     'BCC\\Core\\Wallet\\WalletIdentityService' => $baseDir . '/src/Wallet/WalletIdentityService.php',
+    'BCC\\Core\\Wallet\\WalletVerificationRequest' => $baseDir . '/src/Wallet/WalletVerificationRequest.php',
     'Composer\\InstalledVersions' => $vendorDir . '/composer/InstalledVersions.php',
 );
