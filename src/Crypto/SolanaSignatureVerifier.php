@@ -71,7 +71,7 @@ class SolanaSignatureVerifier {
      * @param  string      $input Base58 string
      * @return string|null Raw binary bytes, or null on invalid input
      */
-    public static function base58Decode(string $input): ?string {
+    private static function base58Decode(string $input): ?string {
         $alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
         $base     = strlen($alphabet);
 

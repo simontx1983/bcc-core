@@ -31,7 +31,7 @@ class EthSignatureVerifier {
         return strtolower($recovered) === strtolower($address);
     }
 
-    public static function recoverAddress(string $message, string $signature): ?string {
+    private static function recoverAddress(string $message, string $signature): ?string {
         if (!extension_loaded('gmp')) {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[bcc-core] EthVerifier: GMP extension required', []);

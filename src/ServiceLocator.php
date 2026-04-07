@@ -10,7 +10,7 @@ use BCC\Core\Contracts\TrustHeaderDataInterface;
 use BCC\Core\Contracts\TrustReadServiceInterface;
 use BCC\Core\Contracts\WalletLinkReadInterface;
 use BCC\Core\Contracts\WalletLinkWriteInterface;
-use BCC\Core\Contracts\QuestProgressReadInterface;
+use BCC\Core\Contracts\OnchainDataReadInterface;
 use BCC\Core\Contracts\WalletVerificationReadInterface;
 
 if (!defined('ABSPATH')) {
@@ -42,7 +42,7 @@ final class ServiceLocator
         WalletVerificationReadInterface::class => \BCC\Core\NullServices\NullWalletVerificationRead::class,
         WalletLinkReadInterface::class         => \BCC\Core\NullServices\NullWalletLinkRead::class,
         WalletLinkWriteInterface::class        => \BCC\Core\NullServices\NullWalletLinkWrite::class,
-        QuestProgressReadInterface::class      => \BCC\Core\NullServices\NullQuestProgressRead::class,
+        OnchainDataReadInterface::class        => \BCC\Core\NullServices\NullOnchainDataRead::class,
     ];
 
     public static function resolveDisputeAdjudication(): DisputeAdjudicationInterface
@@ -90,9 +90,9 @@ final class ServiceLocator
         return self::resolveOnce('bcc.resolve.wallet_link_write', WalletLinkWriteInterface::class);
     }
 
-    public static function resolveQuestProgressRead(): QuestProgressReadInterface
+    public static function resolveOnchainDataRead(): OnchainDataReadInterface
     {
-        return self::resolveOnce('bcc.resolve.quest_progress_read', QuestProgressReadInterface::class);
+        return self::resolveOnce('bcc.resolve.onchain_data_read', OnchainDataReadInterface::class);
     }
 
     /**
@@ -111,7 +111,7 @@ final class ServiceLocator
         WalletVerificationReadInterface::class => 'bcc.resolve.wallet_verification_read',
         WalletLinkReadInterface::class         => 'bcc.resolve.wallet_link_read',
         WalletLinkWriteInterface::class        => 'bcc.resolve.wallet_link_write',
-        QuestProgressReadInterface::class      => 'bcc.resolve.quest_progress_read',
+        OnchainDataReadInterface::class        => 'bcc.resolve.onchain_data_read',
     ];
 
     /**
@@ -190,12 +190,4 @@ final class ServiceLocator
         return null;
     }
 
-    /**
-     * Flush the resolved-service cache. Useful in unit tests or
-     * long-running processes that need to re-resolve services.
-     */
-    public static function flush(): void
-    {
-        self::$cache = [];
-    }
 }

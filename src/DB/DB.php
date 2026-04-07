@@ -51,13 +51,4 @@ final class DB
         return self::$cache[$name];
     }
 
-    /**
-     * Flush the table-name cache.
-     *
-     * Useful in unit tests or after table creation during activation.
-     */
-    public static function flush(): void
-    {
-        self::$cache = [];
-    }
 }

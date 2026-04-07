@@ -23,37 +23,3 @@ if (file_exists(__DIR__ . '/vendor/autoload.php')) {
     require_once __DIR__ . '/vendor/autoload.php';
 }
 
-// ── PSR-4 Autoloader ────────────────────────────────────────────────────────
-
-spl_autoload_register(function (string $class): void {
-    $prefix = 'BCC\\Core\\';
-
-    if (strpos($class, $prefix) !== 0) {
-        return;
-    }
-
-    $relative = substr($class, strlen($prefix));
-    $file     = BCC_CORE_PATH . 'src/' . str_replace('\\', '/', $relative) . '.php';
-
-    if (file_exists($file)) {
-        require_once $file;
-    }
-});
-
-// ── Bootstrap ──────────────────────────────────────────────────────────────────
-
-add_action('plugins_loaded', function (): void {
-    /**
-     * Fires after BCC Core is fully loaded.
-     * Other BCC plugins should hook here instead of plugins_loaded
-     * to guarantee core utilities are available.
-     */
-    do_action('bcc_core_loaded');
-}, 5);
-
-// ── Activation / Uninstall ─────────────────────────────────────────────────────
-
-register_activation_hook(__FILE__, function (): void {
-    update_option('bcc_core_version', BCC_CORE_VERSION);
-});
-
