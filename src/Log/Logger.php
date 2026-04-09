@@ -38,6 +38,14 @@ final class Logger
     }
 
     /**
+     * Log a warning message.
+     */
+    public static function warning(string $message, array $context = []): void
+    {
+        self::write('WARNING', $message, $context);
+    }
+
+    /**
      * Log a security-relevant audit event.
      */
     public static function audit(string $message, array $context = []): void
