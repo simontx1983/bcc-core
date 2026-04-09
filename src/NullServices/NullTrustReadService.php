@@ -21,9 +21,14 @@ final class NullTrustReadService implements TrustReadServiceInterface
         return null;
     }
 
-    public function getActiveVotesForPage(int $pageId): array
+    public function getActiveVotesForPage(int $pageId, int $limit = 50, int $offset = 0): array
     {
         return [];
+    }
+
+    public function countActiveVotesForPage(int $pageId): int
+    {
+        return 0;
     }
 
     public function getVotesByIds(array $voteIds): array

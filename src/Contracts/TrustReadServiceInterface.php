@@ -28,9 +28,16 @@ interface TrustReadServiceInterface
     /**
      * Return active vote snapshots for a page, newest first.
      *
+     * @param int $limit  Maximum rows to return (default 50, max 500).
+     * @param int $offset Starting offset for pagination.
      * @return array<int, array<string, mixed>>
      */
-    public function getActiveVotesForPage(int $pageId): array;
+    public function getActiveVotesForPage(int $pageId, int $limit = 50, int $offset = 0): array;
+
+    /**
+     * Count active votes for a page.
+     */
+    public function countActiveVotesForPage(int $pageId): int;
 
     /**
      * Return vote snapshots for a batch of vote IDs, keyed by vote_id.
