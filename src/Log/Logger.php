@@ -62,7 +62,26 @@ final class Logger
         }
 
         self::$initialised = true;
-        self::$log_file    = WP_CONTENT_DIR . '/bcc.log';
+
+        $log_dir = WP_CONTENT_DIR . '/bcc-logs';
+
+        if (!is_dir($log_dir)) {
+            wp_mkdir_p($log_dir);
+        }
+
+        // Protect log directory from web access (Apache + Nginx + fallback).
+        $htaccess = $log_dir . '/.htaccess';
+        if (!file_exists($htaccess)) {
+            @file_put_contents($htaccess, "deny from all\n");
+        }
+
+        // Prevent directory listing and direct access on non-Apache servers.
+        $index = $log_dir . '/index.php';
+        if (!file_exists($index)) {
+            @file_put_contents($index, "<?php\n// Silence is golden.\n");
+        }
+
+        self::$log_file = $log_dir . '/bcc.log';
     }
 
     private static function write(string $level, string $message, array $context): void
@@ -78,8 +97,15 @@ final class Logger
 
         $entry .= PHP_EOL;
 
-        if (self::$log_file && @file_put_contents(self::$log_file, $entry, FILE_APPEND | LOCK_EX) !== false) {
-            return;
+        if (self::$log_file) {
+            // Rotate log file if it exceeds 5 MB.
+            if (file_exists(self::$log_file) && filesize(self::$log_file) > 5 * 1024 * 1024) {
+                @rename(self::$log_file, self::$log_file . '.old');
+            }
+
+            if (@file_put_contents(self::$log_file, $entry, FILE_APPEND | LOCK_EX) !== false) {
+                return;
+            }
         }
 
         // Fallback.
