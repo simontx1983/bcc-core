@@ -23,12 +23,6 @@ final class NullPageOwnerResolver implements PageOwnerResolverInterface
 
     public function getPageForOwner(int $userId): int
     {
-        global $wpdb;
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT ID FROM {$wpdb->posts}
-             WHERE post_author = %d AND post_type = 'peepso-page' AND post_status = 'publish'
-             LIMIT 1",
-            $userId
-        ));
+        return 0;
     }
 }

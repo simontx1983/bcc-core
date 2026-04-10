@@ -40,4 +40,9 @@ final class NullTrustReadService implements TrustReadServiceInterface
     {
         return [];
     }
+
+    public function isSuspended(int $userId): bool
+    {
+        return false;
+    }
 }

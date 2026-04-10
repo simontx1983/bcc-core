@@ -66,4 +66,13 @@ interface TrustReadServiceInterface
      * @return array<int, int>
      */
     public function getEligiblePanelistUserIds(array $excludedUserIds, int $limit): array;
+
+    /**
+     * Whether the given user is currently suspended.
+     *
+     * Implementations should query the trust-engine user info table.
+     * The NullTrustReadService returns false (not suspended) so that
+     * consumers degrade gracefully when trust-engine is inactive.
+     */
+    public function isSuspended(int $userId): bool;
 }

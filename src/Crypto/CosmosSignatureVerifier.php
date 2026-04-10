@@ -18,7 +18,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-class CosmosSignatureVerifier {
+final class CosmosSignatureVerifier {
 
     /**
      * Verify a Keplr signAmino signature.

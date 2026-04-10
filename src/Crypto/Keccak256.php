@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-class Keccak256 {
+final class Keccak256 {
 
     // Round constants (64-bit, stored as hex strings for GMP)
     private const RC = [
@@ -39,10 +39,10 @@ class Keccak256 {
         [27,20, 39,  8, 14],
     ];
 
-    private static \GMP $mask64;
+    private static ?\GMP $mask64 = null;
 
     private static function init(): void {
-        if (!isset(self::$mask64)) {
+        if (self::$mask64 === null) {
             self::$mask64 = gmp_init('ffffffffffffffff', 16);
         }
     }

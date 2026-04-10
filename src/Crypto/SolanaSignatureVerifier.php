@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-class SolanaSignatureVerifier {
+final class SolanaSignatureVerifier {
 
     /**
      * Verify a Solana wallet signature.

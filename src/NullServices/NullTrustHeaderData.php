@@ -21,7 +21,7 @@ final class NullTrustHeaderData implements TrustHeaderDataInterface
         return [
             'page_id'          => $pageId,
             'mode'             => $mode,
-            'total'            => 50,
+            'total'            => 0,
             'confidence'       => 0,
             'endorsements'     => 0,
             'grade'            => 'N/A',

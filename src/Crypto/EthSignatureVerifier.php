@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-class EthSignatureVerifier {
+final class EthSignatureVerifier {
 
     private const P  = 'fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f';
     private const N  = 'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141';

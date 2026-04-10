@@ -3,6 +3,7 @@
 namespace BCC\Core\Permissions;
 
 use BCC\Core\PeepSo\PeepSo;
+use BCC\Core\ServiceLocator;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -15,11 +16,6 @@ if (!defined('ABSPATH')) {
  */
 final class Permissions
 {
-    /**
-     * Whether the given user owns a PeepSo page.
-     *
-     * Uses the PeepSo adapter for lookup, then falls back to WP post author.
-     */
     /**
      * Whether the current user has the manage_options capability.
      */
@@ -41,19 +37,15 @@ final class Permissions
             return false;
         }
 
-        if (!class_exists('\\BCC\\Trust\\Plugin')) {
-            return true;
-        }
-
         $cacheKey = "bcc_user_suspended_{$user_id}";
         $cached = wp_cache_get($cacheKey, 'bcc_trust');
         if ($cached !== false) {
             return !$cached;
         }
 
-        $repo = \BCC\Trust\Plugin::instance()->userInfoRepository();
-        $userInfo = $repo->getByUserId($user_id);
-        $isSuspended = $userInfo ? (bool) $userInfo->is_suspended : false;
+        // Delegates to the trust-engine implementation (or NullTrustReadService
+        // which returns false) — no concrete coupling required.
+        $isSuspended = ServiceLocator::resolveTrustReadService()->isSuspended($user_id);
         wp_cache_set($cacheKey, $isSuspended, 'bcc_trust', 60);
 
         return !$isSuspended;
@@ -77,16 +69,11 @@ final class Permissions
             return false;
         }
 
+        // PeepSo::get_page_owner() delegates to the PageOwnerResolverInterface.
+        // NullPageOwnerResolver already falls back to WP post_author, so no
+        // additional fallback is needed here.
         $owner_id = PeepSo::get_page_owner($page_id);
 
-        if ($owner_id !== null) {
-            return $owner_id === $user_id;
-        }
-
-        // Fallback: WP post author (any post type — covers PeepSo pages
-        // and shadow CPTs like validators, builder, dao, nft).
-        $post = get_post($page_id);
-
-        return $post && (int) $post->post_author === $user_id;
+        return $owner_id === $user_id;
     }
 }
