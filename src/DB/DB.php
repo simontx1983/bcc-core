@@ -38,13 +38,14 @@ final class DB
             return self::$cache[$name];
         }
 
-        $resolved = apply_filters('bcc.resolve.table_name', null, $name);
-
-        if (is_string($resolved) && $resolved !== '' && preg_match('/^[a-zA-Z0-9_]+$/', $resolved)) {
-            self::$cache[$name] = $resolved;
-            return $resolved;
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $name)) {
+            throw new \InvalidArgumentException("Invalid table name segment: {$name}");
         }
 
+        // SECURITY: Table names are resolved via convention only.
+        // The bcc.resolve.table_name filter was removed because it allowed
+        // any co-installed plugin to redirect BCC queries to arbitrary
+        // tables (wp_users, wp_options) — a site-breaking injection surface.
         global $wpdb;
         self::$cache[$name] = $wpdb->prefix . 'bcc_' . $name;
 

@@ -22,6 +22,34 @@ final class ServiceLocator
     /** @var array<string, mixed> Memoized service instances, keyed by filter name. */
     private static array $cache = [];
 
+    /** @var bool Whether the service cache is frozen (after plugins_loaded). */
+    private static bool $frozen = false;
+
+    /**
+     * Allowlist of concrete classes permitted to provide each contract.
+     *
+     * Only classes listed here will be accepted from apply_filters().
+     * Any other class — even if it implements the interface — is rejected
+     * and logged. This prevents rogue plugins from hijacking trust services.
+     *
+     * To add a new legitimate provider, add its FQCN to the appropriate
+     * contract key below AND register the filter in the provider plugin.
+     *
+     * @var array<class-string, list<class-string>>
+     */
+    private static array $allowedProviders = [
+        DisputeAdjudicationInterface::class    => ['BCC\\Trust\\Application\\Disputes\\DisputeAdjudicationService'],
+        TrustReadServiceInterface::class       => ['BCC\\Trust\\Application\\TrustReadService'],
+        ScoreContributorInterface::class       => ['BCC\\Trust\\Application\\ScoreContributorService'],
+        ScoreReadServiceInterface::class       => ['BCC\\Trust\\Application\\ScoreReadService'],
+        TrustHeaderDataInterface::class        => ['BCC\\Trust\\Integration\\PeepSoIntegration'],
+        PageOwnerResolverInterface::class      => ['BCC\\Trust\\Services\\PageOwnerResolver'],
+        WalletVerificationReadInterface::class => ['BCC\\Trust\\Application\\WalletVerificationReadService'],
+        WalletLinkReadInterface::class         => ['BCC\\Onchain\\Services\\WalletLinkReadService'],
+        WalletLinkWriteInterface::class        => ['BCC\\Onchain\\Services\\WalletLinkWriteService'],
+        OnchainDataReadInterface::class        => ['BCC\\Onchain\\Services\\OnchainDataReadService'],
+    ];
+
     /**
      * Map of contract interface → NullObject class for safe fallback.
      *
@@ -143,19 +171,60 @@ final class ServiceLocator
     }
 
     /**
+     * Freeze the service cache after plugins_loaded.
+     *
+     * Once frozen, resolved real services are locked in and cannot be
+     * replaced by late-registered filters. NullObject fallbacks can
+     * still be promoted to real services until frozen.
+     *
+     * Call this from the main plugin boot:
+     *   add_action('plugins_loaded', [ServiceLocator::class, 'freeze'], PHP_INT_MAX);
+     */
+    public static function freeze(): void
+    {
+        self::$frozen = true;
+    }
+
+    /**
+     * Verify that a resolved service is from an allowed provider class.
+     *
+     * @param object       $service  The resolved service instance.
+     * @param class-string $contract The contract it claims to implement.
+     * @return bool True if the service class is in the allowlist.
+     */
+    private static function isAllowedProvider(object $service, string $contract): bool
+    {
+        $allowed = self::$allowedProviders[$contract] ?? [];
+        $class   = get_class($service);
+
+        // SECURITY: Exact class match only — subclasses are NOT accepted.
+        // Accepting subclasses would allow a rogue plugin to extend an
+        // allowed class and override trust-critical methods (e.g.,
+        // isSuspended, getEligiblePanelistUserIds) while passing the
+        // allowlist check. Only the explicitly registered class names
+        // from trusted BCC plugins are permitted.
+        foreach ($allowed as $fqcn) {
+            if ($class === $fqcn) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Resolve a service via its filter hook, caching the result for the
      * lifetime of the request.
      *
-     * If no plugin provides an implementation, returns the NullObject
-     * fallback for the contract. This is safe:
-     *   - NullObjects implement the full contract interface
-     *   - They return empty/false/zero values (never throw)
-     *   - Callers that need to detect "no real provider" can use
-     *     hasRealService() or check the return value of write operations
+     * Security: After apply_filters(), the resolved service is checked
+     * against the $allowedProviders allowlist. Unrecognised implementations
+     * are rejected with a logged warning and the NullObject fallback is
+     * returned instead. This prevents rogue plugins from hijacking
+     * trust-critical services.
      *
      * The cache is NOT populated with the NullObject so that a late-
      * loading plugin's filter can still provide the real implementation
-     * on the next call within the same request.
+     * on the next call within the same request (until freeze() is called).
      *
      * @template T
      * @param string $filter   The filter hook name.
@@ -168,11 +237,36 @@ final class ServiceLocator
             return self::$cache[$filter];
         }
 
-        $service = apply_filters($filter, null);
+        // After freeze, skip filter calls — use NullObject if not cached.
+        if (!self::$frozen) {
+            $service = apply_filters($filter, null);
+        } else {
+            $service = null;
+        }
 
         if ($service instanceof $contract) {
-            self::$cache[$filter] = $service;
-            return $service;
+            // Enforce allowlist: reject unknown implementation classes.
+            if (!self::isAllowedProvider($service, $contract)) {
+                $class = get_class($service);
+                Log\Logger::error('[ServiceLocator] REJECTED unrecognised provider', [
+                    'filter'   => $filter,
+                    'contract' => $contract,
+                    'class'    => $class,
+                ]);
+
+                // Fall through to NullObject — do NOT cache the rogue service.
+                $service = null;
+            } else {
+                self::$cache[$filter] = $service;
+                return $service;
+            }
+        } elseif ($service !== null) {
+            // Non-null but wrong type — log and reject.
+            Log\Logger::error('[ServiceLocator] Filter returned wrong type', [
+                'filter'   => $filter,
+                'contract' => $contract,
+                'type'     => is_object($service) ? get_class($service) : gettype($service),
+            ]);
         }
 
         // No real provider available. Return NullObject fallback but do NOT
@@ -185,9 +279,9 @@ final class ServiceLocator
         }
 
         // Unreachable if $nullObjects is kept in sync with contracts.
-        // Defensive: cache null to avoid repeated filter calls.
-        self::$cache[$filter] = null;
-        return null;
+        throw new \LogicException(
+            "[ServiceLocator] No NullObject registered for contract: {$contract}"
+        );
     }
 
 }

@@ -27,7 +27,11 @@ final class Permissions
     /**
      * Whether the given user is NOT suspended.
      *
-     * Soft-depends on bcc-trust-engine: returns true if trust-engine inactive.
+     * When the trust engine is unavailable, the NullTrustReadService
+     * returns isSuspended()=true (fail-closed). Admins with
+     * manage_options capability bypass this gate so they can still
+     * administer the site during trust-engine downtime.
+     *
      * Result is cached for 60 seconds per user.
      */
     public static function is_not_suspended(?int $user_id = null): bool
@@ -37,14 +41,22 @@ final class Permissions
             return false;
         }
 
-        $cacheKey = "bcc_user_suspended_{$user_id}";
+        // Admins always bypass suspension — critical for maintaining the
+        // site when the trust engine is down (fail-closed NullObject).
+        if (user_can($user_id, 'manage_options')) {
+            return true;
+        }
+
+        // SECURITY: Cache key includes an HMAC so co-installed plugins cannot
+        // predict or construct valid keys to poison the suspension cache.
+        $cacheKey = 'bcc_susp_' . hash_hmac('sha256', (string) $user_id, NONCE_SALT);
         $cached = wp_cache_get($cacheKey, 'bcc_trust');
         if ($cached !== false) {
             return !$cached;
         }
 
         // Delegates to the trust-engine implementation (or NullTrustReadService
-        // which returns false) — no concrete coupling required.
+        // which returns true — fail-closed) — no concrete coupling required.
         $isSuspended = ServiceLocator::resolveTrustReadService()->isSuspended($user_id);
         wp_cache_set($cacheKey, $isSuspended, 'bcc_trust', 60);
 
