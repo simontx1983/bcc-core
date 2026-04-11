@@ -41,27 +41,14 @@ final class CosmosSignatureVerifier {
         string $signedDocJson = ''
     ): bool {
 
-        // 1. Determine the canonical JSON that was signed.
-        //    Use the exact doc Keplr returned (signed.signed) when available,
-        //    because Keplr may normalise fields before signing.
-        if ($signedDocJson !== '') {
-            $doc = json_decode($signedDocJson, true);
-            if (!is_array($doc)) {
-                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                    \BCC\Core\Log\Logger::error('[bcc-core] CosmosVerifier: could not decode signed_doc JSON', []);
-                }
-                return false;
-            }
-            if (!hash_equals($message, (string) ($doc['memo'] ?? ''))) {
-                if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                    \BCC\Core\Log\Logger::error('[bcc-core] CosmosVerifier: nonce mismatch in signed_doc memo', []);
-                }
-                return false;
-            }
-            $signDoc = self::canonicalJson($doc);
-        } else {
-            $signDoc = self::buildSignDoc($message, $address, $chainId);
-        }
+        // 1. Build the canonical JSON from SERVER-KNOWN fields only.
+        //    SECURITY: We NEVER use the client-submitted signed_doc as the
+        //    canonical message. A client who controls their private key can
+        //    forge any signed_doc with the right memo, and the server would
+        //    verify against the attacker's document — not the server's.
+        //    The server always builds the doc from: nonce (from transient),
+        //    address (from POST param), chainId (from DB chain row).
+        $signDoc = self::buildSignDoc($message, $address, $chainId);
 
         // 2. Decode the signature (base64 → 64 raw bytes r||s)
         $sigRaw = base64_decode($signature, true);
