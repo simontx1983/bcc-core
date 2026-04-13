@@ -23,6 +23,14 @@ final class NullPageOwnerResolver implements PageOwnerResolverInterface
 
     public function getPageForOwner(int $userId): int
     {
-        return 0;
+        $pages = get_posts([
+            'author'         => $userId,
+            'post_type'      => 'peepso-page',
+            'posts_per_page' => 1,
+            'fields'         => 'ids',
+            'post_status'    => 'publish',
+        ]);
+
+        return !empty($pages) ? (int) $pages[0] : 0;
     }
 }

@@ -51,7 +51,7 @@ final class WalletVerifier
      * @param string $message   Plain-text message/nonce that was signed
      * @param string $signature Chain-specific encoded signature
      * @param string $address   Wallet address
-     * @param array  $extra     Chain-specific extra params:
+     * @param array<string, string>  $extra     Chain-specific extra params:
      *                          Cosmos: ['pub_key' => base64, 'chain_id' => string, 'signed_doc' => json]
      * @return bool
      */
@@ -73,8 +73,7 @@ final class WalletVerifier
                 $signature,
                 $address,
                 $extra['pub_key']    ?? '',
-                $extra['chain_id']   ?? 'cosmoshub-4',
-                $extra['signed_doc'] ?? ''
+                $extra['chain_id']   ?? 'cosmoshub-4'
             ),
             default => false,
         };

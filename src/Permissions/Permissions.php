@@ -49,7 +49,8 @@ final class Permissions
 
         // SECURITY: Cache key includes an HMAC so co-installed plugins cannot
         // predict or construct valid keys to poison the suspension cache.
-        $cacheKey = 'bcc_susp_' . hash_hmac('sha256', (string) $user_id, NONCE_SALT);
+        $salt = defined('NONCE_SALT') ? NONCE_SALT : 'bcc-fallback-salt';
+        $cacheKey = 'bcc_susp_' . hash_hmac('sha256', (string) $user_id, $salt);
         $cached = wp_cache_get($cacheKey, 'bcc_trust');
         if ($cached !== false) {
             return !$cached;
@@ -63,13 +64,9 @@ final class Permissions
         return !$isSuspended;
     }
 
-    /**
-     * Whether the user can edit the given post (delegates to owns_page).
-     */
-    public static function can_edit_post(int $post_id, ?int $user_id = null): bool
-    {
-        return self::owns_page($post_id, $user_id ?: get_current_user_id());
-    }
+    // can_edit_post() removed — misleadingly named (checks PeepSo
+    // ownership, not WP edit_post capability). Zero callers found.
+    // Use owns_page() directly.
 
     /**
      * Whether the given user owns a PeepSo page.

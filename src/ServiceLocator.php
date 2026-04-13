@@ -11,6 +11,7 @@ use BCC\Core\Contracts\TrustReadServiceInterface;
 use BCC\Core\Contracts\WalletLinkReadInterface;
 use BCC\Core\Contracts\WalletLinkWriteInterface;
 use BCC\Core\Contracts\OnchainDataReadInterface;
+use BCC\Core\Contracts\TrendingDataInterface;
 use BCC\Core\Contracts\WalletVerificationReadInterface;
 
 if (!defined('ABSPATH')) {
@@ -35,7 +36,7 @@ final class ServiceLocator
      * To add a new legitimate provider, add its FQCN to the appropriate
      * contract key below AND register the filter in the provider plugin.
      *
-     * @var array<class-string, list<class-string>>
+     * @var array<class-string, list<string>>
      */
     private static array $allowedProviders = [
         DisputeAdjudicationInterface::class    => ['BCC\\Trust\\Application\\Disputes\\DisputeAdjudicationService'],
@@ -71,6 +72,7 @@ final class ServiceLocator
         WalletLinkReadInterface::class         => \BCC\Core\NullServices\NullWalletLinkRead::class,
         WalletLinkWriteInterface::class        => \BCC\Core\NullServices\NullWalletLinkWrite::class,
         OnchainDataReadInterface::class        => \BCC\Core\NullServices\NullOnchainDataRead::class,
+        TrendingDataInterface::class           => \BCC\Core\NullServices\NullTrendingData::class,
     ];
 
     public static function resolveDisputeAdjudication(): DisputeAdjudicationInterface
@@ -123,9 +125,17 @@ final class ServiceLocator
         return self::resolveOnce('bcc.resolve.onchain_data_read', OnchainDataReadInterface::class);
     }
 
+    public static function resolveTrendingData(): TrendingDataInterface
+    {
+        return self::resolveOnce('bcc.resolve.trending_data', TrendingDataInterface::class);
+    }
+
     /**
-     * Map of contract class → filter name, built from the resolve methods.
-     * Used by hasRealService() to look up cached instances by contract.
+     * Map of contract class → filter name.
+     *
+     * MAINTENANCE NOTE: this map MUST stay in sync with the resolve*()
+     * methods above. If you add/rename a resolve method, update this
+     * map too. Used by hasRealService() to look up cached instances.
      *
      * @var array<class-string, string>
      */
@@ -140,6 +150,7 @@ final class ServiceLocator
         WalletLinkReadInterface::class         => 'bcc.resolve.wallet_link_read',
         WalletLinkWriteInterface::class        => 'bcc.resolve.wallet_link_write',
         OnchainDataReadInterface::class        => 'bcc.resolve.onchain_data_read',
+        TrendingDataInterface::class           => 'bcc.resolve.trending_data',
     ];
 
     /**
@@ -186,6 +197,19 @@ final class ServiceLocator
     }
 
     /**
+     * Reset the service cache. For test isolation only — prevents state
+     * leaking between PHPUnit test cases when the same PHP process is reused.
+     */
+    public static function reset(): void
+    {
+        if (!defined('WP_TESTS_DIR') && !defined('WP_PHPUNIT__DIR')) {
+            return; // No-op in production to prevent accidental misuse.
+        }
+        self::$cache = [];
+        self::$frozen = false;
+    }
+
+    /**
      * Verify that a resolved service is from an allowed provider class.
      *
      * @param object       $service  The resolved service instance.
@@ -226,7 +250,7 @@ final class ServiceLocator
      * loading plugin's filter can still provide the real implementation
      * on the next call within the same request (until freeze() is called).
      *
-     * @template T
+     * @template T of object
      * @param string $filter   The filter hook name.
      * @param class-string<T> $contract The interface the resolved service must implement.
      * @return T

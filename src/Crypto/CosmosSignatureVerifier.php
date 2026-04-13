@@ -27,9 +27,7 @@ final class CosmosSignatureVerifier {
      * @param string $signature     Base64-encoded 64-byte compact (r||s) secp256k1 signature
      * @param string $address       Bech32 Cosmos address (e.g. cosmos1abc…)
      * @param string $pubKeyB64     Base64-encoded 33-byte compressed secp256k1 public key
-     * @param string $chainId       Chain ID (fallback if signedDocJson not provided)
-     * @param string $signedDocJson The exact JSON Keplr signed (signed.signed from JS).
-     *                              Preferred over rebuilding the doc from scratch.
+     * @param string $chainId       Chain ID used to build the canonical sign doc.
      * @return bool
      */
     public static function verify(
@@ -37,8 +35,7 @@ final class CosmosSignatureVerifier {
         string $signature,
         string $address,
         string $pubKeyB64,
-        string $chainId = 'cosmoshub-4',
-        string $signedDocJson = ''
+        string $chainId = 'cosmoshub-4'
     ): bool {
 
         // 1. Build the canonical JSON from SERVER-KNOWN fields only.
@@ -102,7 +99,11 @@ final class CosmosSignatureVerifier {
         return self::canonicalJson($doc);
     }
 
-    /** Produce canonical (sorted-keys, no-spaces) JSON recursively. */
+    /**
+     * Produce canonical (sorted-keys, no-spaces) JSON recursively.
+     *
+     * @param array<string, mixed> $data
+     */
     private static function canonicalJson(array $data): string {
         ksort($data);
         $parts = [];

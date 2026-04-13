@@ -52,7 +52,7 @@ final class WalletIdentityService
         int $chainId,
         string $walletAddress
     ): array {
-        $challenge = WalletChallenge::generate();
+        $challenge = WalletChallenge::generate($chainSlug);
 
         $payload = [
             'nonce'          => $challenge['nonce'],
@@ -64,7 +64,7 @@ final class WalletIdentityService
         ];
 
         $key = self::challengeKey($userId, $walletAddress);
-        set_transient($key, $payload, self::CHALLENGE_TTL);
+        ChallengeRepository::store($key, $payload, self::CHALLENGE_TTL);
 
         return $payload;
     }
@@ -72,28 +72,29 @@ final class WalletIdentityService
     /**
      * Retrieve and consume a stored challenge (one-time use).
      *
+     * Uses a MySQL advisory lock to make the get+delete atomic, preventing
+     * two concurrent requests from both consuming the same challenge.
+     *
      * Returns null if the challenge does not exist, has expired, or the
      * address does not match the one used at generation time.
      *
-     * @return array|null The challenge payload, or null.
+     * @return array<string, mixed>|null The challenge payload, or null.
      */
     public static function consumeChallenge(int $userId, string $walletAddress): ?array
     {
-        $key       = self::challengeKey($userId, $walletAddress);
-        $challenge = get_transient($key);
+        $key = self::challengeKey($userId, $walletAddress);
 
-        if (!$challenge || !is_array($challenge)) {
+        // Atomic get+delete via repository (SELECT … FOR UPDATE in a transaction).
+        $challenge = ChallengeRepository::consume($key);
+
+        if ($challenge === null) {
             return null;
         }
 
-        // Expired (belt-and-suspenders — transient TTL should handle this)
+        // Expired (belt-and-suspenders — transient TTL should handle this).
         if (time() > ($challenge['expires_at'] ?? 0)) {
-            delete_transient($key);
             return null;
         }
-
-        // Consume: delete immediately so it cannot be replayed.
-        delete_transient($key);
 
         return $challenge;
     }
