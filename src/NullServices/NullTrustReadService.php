@@ -9,10 +9,15 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * No-op implementation returned when bcc-trust-engine is not active.
+ * Fail-safe implementation returned when bcc-trust-engine is not active.
  *
- * All methods return safe empty/null values so that consumer plugins
- * (bcc-disputes, bcc-search) never need to null-check the service.
+ * SECURITY: Methods that gate access return RESTRICTIVE defaults
+ * (fail-closed). Methods that return data return empty values.
+ *
+ * This ensures that when the trust engine is down:
+ *   - isSuspended() returns TRUE → all non-admin users are blocked
+ *   - getEligiblePanelistUserIds() returns [] → no panelists available
+ *   - Data queries return empty results (no false data)
  */
 final class NullTrustReadService implements TrustReadServiceInterface
 {
@@ -41,8 +46,13 @@ final class NullTrustReadService implements TrustReadServiceInterface
         return [];
     }
 
+    /**
+     * Fail-closed: when the trust engine is unavailable, treat every
+     * user as suspended. Prevents suspended users from acting during
+     * maintenance windows. Admins bypass via Permissions::is_not_suspended().
+     */
     public function isSuspended(int $userId): bool
     {
-        return false;
+        return true;
     }
 }

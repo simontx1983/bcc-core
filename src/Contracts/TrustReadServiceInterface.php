@@ -71,8 +71,9 @@ interface TrustReadServiceInterface
      * Whether the given user is currently suspended.
      *
      * Implementations should query the trust-engine user info table.
-     * The NullTrustReadService returns false (not suspended) so that
-     * consumers degrade gracefully when trust-engine is inactive.
+     * The NullTrustReadService returns true (suspended) as a fail-closed
+     * safety default when trust-engine is inactive. Admins bypass this
+     * via Permissions::is_not_suspended().
      */
     public function isSuspended(int $userId): bool;
 }

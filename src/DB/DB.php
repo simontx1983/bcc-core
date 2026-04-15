@@ -34,8 +34,13 @@ final class DB
      */
     public static function table(string $name): string
     {
-        if (isset(self::$cache[$name])) {
-            return self::$cache[$name];
+        // Cache key includes $wpdb->prefix so multisite blog-switches
+        // don't return a stale table name from a different blog's prefix.
+        global $wpdb;
+        $cacheKey = $wpdb->prefix . $name;
+
+        if (isset(self::$cache[$cacheKey])) {
+            return self::$cache[$cacheKey];
         }
 
         if (!preg_match('/^[a-zA-Z0-9_]+$/', $name)) {
@@ -46,10 +51,9 @@ final class DB
         // The bcc.resolve.table_name filter was removed because it allowed
         // any co-installed plugin to redirect BCC queries to arbitrary
         // tables (wp_users, wp_options) — a site-breaking injection surface.
-        global $wpdb;
-        self::$cache[$name] = $wpdb->prefix . 'bcc_' . $name;
+        self::$cache[$cacheKey] = $wpdb->prefix . 'bcc_' . $name;
 
-        return self::$cache[$name];
+        return self::$cache[$cacheKey];
     }
 
 }

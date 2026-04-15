@@ -27,12 +27,15 @@ final class WalletChallenge
     /**
      * Generate a challenge message for wallet signing.
      *
+     * @param string $chainSlug Chain identifier embedded in the message
+     *                          to prevent cross-chain signature replay.
      * @return array{nonce: string, message: string}
      */
-    public static function generate(): array
+    public static function generate(string $chainSlug = ''): array
     {
-        $nonce   = wp_generate_uuid4();
-        $message = self::PREFIX . $nonce;
+        $nonce   = bin2hex(random_bytes(16));
+        $chain   = $chainSlug !== '' ? " [{$chainSlug}]" : '';
+        $message = self::PREFIX . $nonce . $chain;
 
         return [
             'nonce'   => $nonce,

@@ -48,59 +48,67 @@ final class ChallengeRepository
         $optionName = '_transient_' . $key;
         $timeoutKey = '_transient_timeout_' . $key;
 
-        $wpdb->query('START TRANSACTION');
+        $wpdb->query('SAVEPOINT bcc_challenge_consume');
 
-        /** @var string|null $serialized */
-        $serialized = $wpdb->get_var($wpdb->prepare(
-            "SELECT option_value FROM {$wpdb->options}
-             WHERE option_name = %s
-             FOR UPDATE",
-            $optionName
-        ));
+        $released = false;
 
-        if ($serialized === null) {
-            $wpdb->query('COMMIT');
-            return null;
+        try {
+            /** @var string|null $serialized */
+            $serialized = $wpdb->get_var($wpdb->prepare(
+                "SELECT option_value FROM {$wpdb->options}
+                 WHERE option_name = %s
+                 FOR UPDATE",
+                $optionName
+            ));
+
+            if ($serialized === null) {
+                $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+                $released = true;
+                return null;
+            }
+
+            /** @var array<string, mixed>|false $challenge */
+            $challenge = maybe_unserialize($serialized);
+
+            if (!is_array($challenge)) {
+                // Corrupted challenge — delete it to prevent replay, then
+                // release so the DELETE persists.
+                $wpdb->query($wpdb->prepare(
+                    "DELETE FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
+                    $optionName,
+                    $timeoutKey
+                ));
+                $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
+                $released = true;
+                return null;
+            }
+
+            // Delete both the value and timeout rows atomically.
+            $deleted = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
+                $optionName,
+                $timeoutKey
+            ));
+
+            if ($deleted === false) {
+                $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+                $released = true;
+                return null;
+            }
+
+            $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
+            $released = true;
+
+            return $challenge;
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+            $released = true;
+            throw $e;
+        } finally {
+            if (!$released) {
+                $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+            }
         }
-
-        /** @var array<string, mixed>|false $challenge */
-        $challenge = maybe_unserialize($serialized);
-
-        if (!is_array($challenge)) {
-            $wpdb->query('COMMIT');
-            return null;
-        }
-
-        // Delete both the value and timeout rows atomically.
-        $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
-            $optionName,
-            $timeoutKey
-        ));
-
-        $wpdb->query('COMMIT');
-
-        return $challenge;
     }
 
-    /**
-     * Delete a challenge's transient rows from wp_options.
-     *
-     * Used to clean up expired challenges within an existing transaction.
-     *
-     * @param string $key Transient key (without the `_transient_` prefix).
-     */
-    public static function delete(string $key): void
-    {
-        global $wpdb;
-
-        $optionName = '_transient_' . $key;
-        $timeoutKey = '_transient_timeout_' . $key;
-
-        $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
-            $optionName,
-            $timeoutKey
-        ));
-    }
 }

@@ -16,6 +16,9 @@ if (!defined('ABSPATH')) {
  */
 final class Permissions
 {
+    private const CACHE_GROUP = 'bcc_trust';
+    private const CACHE_TTL   = 60;
+
     /**
      * Whether the current user has the manage_options capability.
      */
@@ -49,9 +52,8 @@ final class Permissions
 
         // SECURITY: Cache key includes an HMAC so co-installed plugins cannot
         // predict or construct valid keys to poison the suspension cache.
-        $salt = defined('NONCE_SALT') ? NONCE_SALT : 'bcc-fallback-salt';
-        $cacheKey = 'bcc_susp_' . hash_hmac('sha256', (string) $user_id, $salt);
-        $cached = wp_cache_get($cacheKey, 'bcc_trust');
+        $cacheKey = self::buildSuspensionCacheKey($user_id);
+        $cached = wp_cache_get($cacheKey, self::CACHE_GROUP);
         if ($cached !== false) {
             return !$cached;
         }
@@ -59,14 +61,53 @@ final class Permissions
         // Delegates to the trust-engine implementation (or NullTrustReadService
         // which returns true — fail-closed) — no concrete coupling required.
         $isSuspended = ServiceLocator::resolveTrustReadService()->isSuspended($user_id);
-        wp_cache_set($cacheKey, $isSuspended, 'bcc_trust', 60);
+        wp_cache_set($cacheKey, $isSuspended, self::CACHE_GROUP, self::CACHE_TTL);
 
         return !$isSuspended;
     }
 
-    // can_edit_post() removed — misleadingly named (checks PeepSo
-    // ownership, not WP edit_post capability). Zero callers found.
-    // Use owns_page() directly.
+    /**
+     * Flush the suspension cache for a specific user.
+     *
+     * Call this (or fire the `bcc_user_suspension_changed` action with the
+     * user ID) whenever a user's suspension status changes so that
+     * is_not_suspended() picks up the new value immediately.
+     */
+    public static function flushSuspensionCache(int $userId): void
+    {
+        $key = self::buildSuspensionCacheKey($userId);
+        wp_cache_delete($key, self::CACHE_GROUP);
+    }
+
+    /**
+     * Register hook listeners for cross-plugin cache invalidation.
+     *
+     * Should be called once during plugin boot (e.g. from the main plugin file).
+     */
+    public static function registerHooks(): void
+    {
+        add_action('bcc_user_suspension_changed', [self::class, 'flushSuspensionCache']);
+    }
+
+    /**
+     * Build the HMAC-secured cache key for a user's suspension status.
+     */
+    private static function buildSuspensionCacheKey(int $userId): string
+    {
+        $salt = defined('NONCE_SALT') ? NONCE_SALT : 'bcc-fallback-salt';
+        return 'bcc_susp_' . hash_hmac('sha256', (string) $userId, $salt);
+    }
+
+    /**
+     * Standard REST permission callback: logged-in + not suspended.
+     *
+     * Use as 'permission_callback' => [Permissions::class, 'restCallback']
+     * instead of duplicating the check in each controller.
+     */
+    public static function restCallback(): bool
+    {
+        return is_user_logged_in() && self::is_not_suspended();
+    }
 
     /**
      * Whether the given user owns a PeepSo page.

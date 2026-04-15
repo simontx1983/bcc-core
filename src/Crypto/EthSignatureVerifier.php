@@ -23,7 +23,13 @@ final class EthSignatureVerifier {
     private const GX = '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
     private const GY = '483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8';
 
+    /** Maximum message length to prevent DoS via Keccak256 hash flooding. */
+    private const MAX_MESSAGE_LENGTH = 1024;
+
     public static function verify(string $message, string $signature, string $address): bool {
+        if (strlen($message) > self::MAX_MESSAGE_LENGTH) {
+            return false;
+        }
         $recovered = self::recoverAddress($message, $signature);
         if ($recovered === null) {
             return false;
@@ -163,9 +169,15 @@ final class EthSignatureVerifier {
      * @param  \GMP              $mod Field prime p
      * @return array{\GMP, \GMP}      [x, y]
      */
-    private static function pointAdd(array $p1, array $p2, \GMP $mod): array {
+    private static function pointAdd(array $p1, array $p2, \GMP $mod): ?array {
         [$x1, $y1] = $p1;
         [$x2, $y2] = $p2;
+
+        // P + (-P) = point at infinity
+        if (gmp_cmp($x1, $x2) === 0 && gmp_cmp($y1, $y2) !== 0) {
+            return null;
+        }
+
         if (gmp_cmp($x1, $x2) === 0 && gmp_cmp($y1, $y2) === 0) { // Point doubling
             $lam = gmp_mod(
                 gmp_mul(
@@ -204,9 +216,19 @@ final class EthSignatureVerifier {
         $bits = gmp_strval($k, 2);
         for ($i = strlen($bits) - 1; $i >= 0; $i--) {
             if ($bits[$i] === '1') {
-                $result = ($result === null) ? $addend : self::pointAdd($result, $addend, $p);
+                if ($result === null) {
+                    $result = $addend;
+                } else {
+                    $result = self::pointAdd($result, $addend, $p);
+                    if ($result === null) {
+                        return null; // Point at infinity
+                    }
+                }
             }
             $addend = self::pointAdd($addend, $addend, $p);
+            if ($addend === null) {
+                return $result; // Addend reached infinity
+            }
         }
         return $result;
     }

@@ -22,7 +22,7 @@ interface OnchainDataReadInterface
      * @param int    $page       Page number (1-based).
      * @param int    $perPage    Items per page.
      * @param string $orderBy    Column to sort by (implementation validates).
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: array<int, object>, total: int, pages: int}
      */
     public function getValidatorsForProject(int $projectId, int $page = 1, int $perPage = 8, string $orderBy = 'total_stake'): array;
 
@@ -34,7 +34,7 @@ interface OnchainDataReadInterface
      * @param int    $perPage       Items per page.
      * @param string $orderBy       Column to sort by.
      * @param bool   $includeHidden If true, includes hidden collections (for owner view).
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: array<int, object>, total: int, pages: int}
      */
     public function getCollectionsForProject(int $projectId, int $page = 1, int $perPage = 8, string $orderBy = 'total_volume', bool $includeHidden = false): array;
 
@@ -50,26 +50,26 @@ interface OnchainDataReadInterface
      * Return all collections for a project (visible only, for aggregation).
      *
      * @param int $projectId Shadow CPT post_id.
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: array<int, object>, total: int, pages: int}
      */
     public function getAllCollectionsForProject(int $projectId): array;
 
     /**
      * Enrich collection items with badge flags (creator/holder).
      *
-     * @param array $items    Collection items from getCollectionsForProject().
+     * @param array<int, object> $items    Collection items from getCollectionsForProject().
      * @param int   $ownerId  Page owner user ID.
      * @param int   $viewerId Current viewer user ID (0 = logged out).
-     * @return array Same items with is_creator and viewer_holds flags.
+     * @return array<int, object> Same items with is_creator and viewer_holds flags.
      */
     public function enrichCollectionsWithBadges(array $items, int $ownerId, int $viewerId = 0): array;
 
     /**
      * Merge on-chain collections with manual ACF repeater rows.
      *
-     * @param array $onchainItems Items from getCollectionsForProject().
-     * @param array $manualRows   ACF repeater rows.
-     * @return array Merged, deduplicated list.
+     * @param array<int, object> $onchainItems Items from getCollectionsForProject().
+     * @param array<int, array<string, mixed>> $manualRows   ACF repeater rows.
+     * @return array<int, object> Merged, deduplicated list.
      */
     public function mergeCollectionsWithManual(array $onchainItems, array $manualRows): array;
 }

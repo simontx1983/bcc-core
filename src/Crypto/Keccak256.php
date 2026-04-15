@@ -55,7 +55,11 @@ final class Keccak256 {
         return gmp_and(gmp_or($left, $right), $mask);
     }
 
-    /** Apply the Keccak-f[1600] permutation to the 5×5 state. */
+    /**
+     * Apply the Keccak-f[1600] permutation to the 5x5 state.
+     *
+     * @param array<int, array<int, \GMP>> $A
+     */
     private static function keccakF(array &$A): void {
         self::init();
         $mask = self::$mask64;

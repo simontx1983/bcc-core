@@ -8,7 +8,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-class NullTrendingData implements TrendingDataInterface
+final class NullTrendingData implements TrendingDataInterface
 {
     public function getTrendingPages(int $limit): array
     {

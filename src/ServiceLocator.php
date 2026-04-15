@@ -49,6 +49,7 @@ final class ServiceLocator
         WalletLinkReadInterface::class         => ['BCC\\Onchain\\Services\\WalletLinkReadService'],
         WalletLinkWriteInterface::class        => ['BCC\\Onchain\\Services\\WalletLinkWriteService'],
         OnchainDataReadInterface::class        => ['BCC\\Onchain\\Services\\OnchainDataReadService'],
+        TrendingDataInterface::class           => ['BCC\\Trust\\Application\\TrendingDataService'],
     ];
 
     /**
@@ -197,19 +198,6 @@ final class ServiceLocator
     }
 
     /**
-     * Reset the service cache. For test isolation only — prevents state
-     * leaking between PHPUnit test cases when the same PHP process is reused.
-     */
-    public static function reset(): void
-    {
-        if (!defined('WP_TESTS_DIR') && !defined('WP_PHPUNIT__DIR')) {
-            return; // No-op in production to prevent accidental misuse.
-        }
-        self::$cache = [];
-        self::$frozen = false;
-    }
-
-    /**
      * Verify that a resolved service is from an allowed provider class.
      *
      * @param object       $service  The resolved service instance.
@@ -261,12 +249,19 @@ final class ServiceLocator
             return self::$cache[$filter];
         }
 
-        // After freeze, skip filter calls — use NullObject if not cached.
-        if (!self::$frozen) {
-            $service = apply_filters($filter, null);
-        } else {
-            $service = null;
+        if (self::$frozen) {
+            // Frozen: no real service was registered before plugins_loaded.
+            // Return NullObject — do NOT call apply_filters() again.
+            $nullClass = self::$nullObjects[$contract] ?? null;
+            if ($nullClass) {
+                $null = new $nullClass();
+                self::$cache[$filter] = $null;
+                return $null;
+            }
+            throw new \LogicException("No NullObject registered for contract: {$contract}");
         }
+
+        $service = apply_filters($filter, null);
 
         if ($service instanceof $contract) {
             // Enforce allowlist: reject unknown implementation classes.

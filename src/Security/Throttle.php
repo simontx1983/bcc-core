@@ -14,6 +14,23 @@ if (!defined('ABSPATH')) {
  */
 final class Throttle
 {
+    /** @var bool Whether the system has detected a Redis/object-cache failure this request. */
+    private static bool $degraded = false;
+
+    /**
+     * Whether the rate limiter is operating in degraded mode this request.
+     *
+     * Other plugins can check this to tighten their own behavior:
+     *   if (Throttle::isDegraded()) { // reduce batch sizes, skip optional cache reads }
+     *
+     * Set the first time wp_cache_incr/add fails within allow().
+     * Persists for the remainder of the PHP request (process-level).
+     */
+    public static function isDegraded(): bool
+    {
+        return self::$degraded;
+    }
+
     /**
      * Check if an action should be allowed under rate limits.
      *
@@ -26,6 +43,17 @@ final class Throttle
     public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
     {
         $user_id = get_current_user_id();
+        if ($user_id === 0 && $key === null) {
+            // Fallback to IP for anonymous users to avoid shared bucket.
+            // Normalize to /24 (IPv4) or /64 (IPv6) subnet to bound cardinality.
+            // A /24 covers 256 IPs → one bucket per household/office, preventing
+            // unbounded DB growth from rotating IPs (mobile, VPN, Tor).
+            $ip  = class_exists('\\BCC\\Trust\\Security\\IpResolver')
+                ? \BCC\Trust\Security\IpResolver::resolve()
+                : self::getClientIp();
+            $subnet = self::normalizeIpToSubnet($ip);
+            $key = "bcc_throttle_{$action}_ip_" . md5($subnet);
+        }
         $key = $key ?? "bcc_throttle_{$action}_{$user_id}";
 
         // Prefer trust-engine's atomic RateLimiter when available.
@@ -42,85 +70,192 @@ final class Throttle
             }
             $hits = wp_cache_incr($cache_key, 1, 'bcc_throttle');
             if ($hits === false) {
-                return true;
+                self::$degraded = true;
+                // Cache backend broken (Redis outage, connection reset, etc.).
+                // Differentiate by action criticality:
+                //   - Mutating/abuse-prone actions → deny (fail-closed)
+                //   - Read-only/low-risk actions   → allow with process-level backstop
+                $critical = in_array($action, [
+                    'vote', 'endorse', 'wallet_verify', 'report',
+                    'flag', 'verify', 'report_user',
+                    'dispute_submit', 'panel_vote',
+                ], true);
+
+                if ($critical) {
+                    if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                        \BCC\Core\Log\Logger::error('[Throttle] Redis down — mutating action denied', [
+                            'action' => $action, 'key' => $cache_key,
+                        ]);
+                    }
+                    return false;
+                }
+
+                // Non-critical reads: allow up to a per-process cap to prevent
+                // a single PHP worker from hammering the DB when Redis is down.
+                // This caps damage per-worker; nginx/CDN handles global rate.
+                return self::processLevelBackstop($action, $limit);
             }
             return $hits <= $limit;
         }
 
-        // Fallback: atomic DB-based counter (works without Redis).
-        // Uses INSERT … ON DUPLICATE KEY UPDATE to avoid the TOCTOU race
-        // that the old transient approach suffered from under concurrency.
-        // Value format: "count|expires_at" — same convention as RateLimiter.
+        // Fallback: bucketed sliding-window rate limiter (works without Redis).
+        //
+        // Keys are bucketed by time window: hash(key + floor(now/window)).
+        // Each bucket stores "count|bucket_expiry". The expiry lets the
+        // cleanup cron garbage-collect old buckets.
+        //
+        // Sliding window: effective_count = current_count + prev_count * weight
+        // where weight = fraction of previous window still overlapping.
+        // This prevents boundary-edge spikes (2x limit over 2 seconds).
         global $wpdb;
 
-        $option_name = '_bcc_rl_' . md5($key);
-        $now         = time();
-        $expires     = $now + $window;
+        $now    = time();
+        $window = max(1, $window);
+        $bucket = (int) floor($now / $window);
 
-        // Atomic increment — succeeds only when window is still active
-        // AND count is below the limit.
-        $updated = $wpdb->query($wpdb->prepare(
-            "UPDATE {$wpdb->options}
-             SET option_value = CONCAT(
+        $curKey  = '_bcc_rl_' . md5($key . '_b' . $bucket);
+        $prevKey = '_bcc_rl_' . md5($key . '_b' . ($bucket - 1));
+        // Bucket expires after 2 windows (sliding window lookback + cleanup buffer).
+        $bucketExpires = ($bucket + 2) * $window;
+        $freshVal      = "1|{$bucketExpires}";
+
+        // Atomic increment current bucket.
+        $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
+             VALUES (%s, %s, 'no')
+             ON DUPLICATE KEY UPDATE
+               option_value = CONCAT(
                  CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) + 1,
                  '|',
                  SUBSTRING_INDEX(option_value, '|', -1)
-             )
-             WHERE option_name = %s
-               AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) > %d
-               AND CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) < %d",
-            $option_name,
-            $now,
-            $limit
+               )",
+            $curKey,
+            $freshVal
         ));
 
-        if ($updated > 0) {
-            return true;
+        // Read current + previous bucket in one query.
+        /** @var array<int, object{option_name: string, option_value: string}> $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
+            $curKey,
+            $prevKey
+        ));
+
+        $curCount  = 0;
+        $prevCount = 0;
+        foreach ($rows as $row) {
+            $parts = explode('|', $row->option_value, 2);
+            $cnt   = (int) ($parts[0] ?? 0);
+            if ($row->option_name === $curKey) {
+                $curCount = $cnt;
+            } else {
+                $prevCount = $cnt;
+            }
         }
 
-        // Row missing or window expired — try to insert a fresh window.
-        $inserted = $wpdb->query($wpdb->prepare(
-            "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload)
-             VALUES (%s, %s, 'no')",
-            $option_name,
-            "1|{$expires}"
-        ));
+        // Sliding window approximation using integer arithmetic.
+        // weight_pct = 100 - (elapsed * 100 / window), clamped to [0, 100].
+        // effective = current + prev * weight_pct / 100, clamped to [0, 2*limit].
+        $elapsed   = $now - ($bucket * $window);
+        $weightPct = max(0, min(100, 100 - (int) (($elapsed * 100) / $window)));
+        $effective = $curCount + (int) (($prevCount * $weightPct) / 100);
+        $effective = max(0, min($limit * 2, $effective));
 
-        if ($inserted > 0) {
-            return true;
+        return $effective <= $limit;
+    }
+
+    /**
+     * Normalize an IP address to its subnet to bound key cardinality.
+     *
+     * IPv4 → /24 (e.g., 1.2.3.4 → 1.2.3.0)
+     * IPv6 → /64 (e.g., 2001:db8::1 → 2001:0db8:0000:0000::)
+     * Invalid → returned as-is (md5 still hashes it safely)
+     */
+    /**
+     * Process-level rate limit backstop when Redis is unavailable.
+     *
+     * Each PHP-FPM worker tracks how many times a given action was allowed
+     * within the current request. Prevents a single worker from executing
+     * unlimited expensive queries during a Redis outage.
+     *
+     * NOT a replacement for Redis-based rate limiting — this caps damage
+     * per-worker, not per-user. Global rate limiting requires nginx or CDN.
+     *
+     * @param string $action Action identifier.
+     * @param int    $limit  Per-request cap (same as normal rate limit).
+     * @return bool
+     */
+    private static function processLevelBackstop(string $action, int $limit): bool
+    {
+        /** @var array<string, int> */
+        static $counts = [];
+
+        $counts[$action] = ($counts[$action] ?? 0) + 1;
+
+        // Per-process cap: allow up to $limit calls per action per request.
+        // Most requests only trigger 1-3 throttle checks per action, so
+        // this only blocks genuine abuse (bot loops, scrapers).
+        if ($counts[$action] > $limit) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[Throttle] Process-level backstop triggered (Redis down)', [
+                    'action' => $action,
+                    'count'  => $counts[$action],
+                    'limit'  => $limit,
+                ]);
+            }
+            return false;
         }
 
-        // Lost the INSERT race — row exists. Reset if expired.
-        $reset = $wpdb->query($wpdb->prepare(
-            "UPDATE {$wpdb->options}
-             SET option_value = %s
-             WHERE option_name = %s
-               AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) <= %d",
-            "1|{$expires}",
-            $option_name,
-            $now
-        ));
+        // Degraded mode: rate limiter is using the process-level backstop.
+        // Previously sent an X-Degraded-Mode header, but that leaked
+        // infrastructure state to attackers (signals Redis is down).
 
-        if ($reset > 0) {
-            return true;
+        return true;
+    }
+
+    /**
+     * Extract the real client IP behind reverse proxies.
+     *
+     * Checks common proxy headers (Cloudflare, AWS ALB, nginx) in order
+     * of trust before falling back to REMOTE_ADDR.
+     */
+    private static function getClientIp(): string
+    {
+        $headers = ['HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP'];
+        foreach ($headers as $header) {
+            if (!empty($_SERVER[$header])) {
+                // X-Forwarded-For can contain multiple IPs; take the first (client).
+                $ip = trim(explode(',', $_SERVER[$header])[0]);
+                if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                    return $ip;
+                }
+            }
+        }
+        return $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    }
+
+    private static function normalizeIpToSubnet(string $ip): string
+    {
+        // IPv4: mask to /24
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            $parts = explode('.', $ip);
+            $parts[3] = '0';
+            return implode('.', $parts);
         }
 
-        // Another thread already reset — try one more atomic increment.
-        $retry = $wpdb->query($wpdb->prepare(
-            "UPDATE {$wpdb->options}
-             SET option_value = CONCAT(
-                 CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) + 1,
-                 '|',
-                 SUBSTRING_INDEX(option_value, '|', -1)
-             )
-             WHERE option_name = %s
-               AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) > %d
-               AND CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) < %d",
-            $option_name,
-            $now,
-            $limit
-        ));
+        // IPv6: mask to /64 (first 4 groups)
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $expanded = (string) inet_ntop(inet_pton($ip));
+            // inet_ntop may return compressed form; expand to full groups
+            $full = implode(':', array_map(
+                fn(string $g): string => str_pad($g, 4, '0', STR_PAD_LEFT),
+                explode(':', str_replace('::', str_repeat(':0000', 8 - substr_count($expanded, ':')) . ':', $expanded))
+            ));
+            $groups = explode(':', $full);
+            // Keep first 4 groups (/64), zero out the rest
+            return implode(':', array_slice($groups, 0, 4)) . ':0:0:0:0';
+        }
 
-        return $retry > 0;
+        return $ip;
     }
 }

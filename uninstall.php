@@ -11,12 +11,17 @@ if (!defined('WP_UNINSTALL_PLUGIN')) {
 
 // Clean up rate-limit rows stored as options.
 global $wpdb;
-$wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '\_bcc\_rl\_%'");
+$wpdb->query($wpdb->prepare(
+    "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s",
+    $wpdb->esc_like('_bcc_rl_') . '%'
+));
 
 // Clean up wallet-challenge transients.
-$wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '\_transient\_bcc\_wc\_%'");
+$wpdb->query($wpdb->prepare(
+    "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s",
+    $wpdb->esc_like('_transient_bcc_wc_') . '%'
+));
 
 // Remove scheduled cron events.
 wp_clear_scheduled_hook('bcc_core_rl_cleanup');
-wp_clear_scheduled_hook('bcc_core_daily_cleanup');
 

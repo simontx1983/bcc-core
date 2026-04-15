@@ -23,6 +23,7 @@ final class WalletVerificationRequest
     public string $walletAddress;
     public string $signature;
     public string $challengeMessage;
+    /** @var array<string, mixed> */
     public array $extra;
     public int $postId;
     public string $walletType;
@@ -41,7 +42,7 @@ final class WalletVerificationRequest
      *     walletAddress: string,
      *     signature: string,
      *     challengeMessage: string,
-     *     extra?: array,
+     *     extra?: array<string, mixed>,
      *     postId?: int,
      *     walletType?: string,
      *     label?: string,

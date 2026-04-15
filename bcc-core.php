@@ -51,11 +51,11 @@ add_action('admin_notices', function () {
     if (defined('WP_DEBUG') && WP_DEBUG) {
         return;
     }
-    echo '<div class="notice notice-warning"><p>';
-    echo '<strong>Blue Collar Crypto:</strong> No persistent object cache detected. ';
-    echo 'Rate limiting and search caching are operating in degraded mode (per-request only). ';
-    echo 'Install Redis or Memcached for production use.';
-    echo '</p></div>';
+    printf(
+        '<div class="notice notice-warning"><p><strong>%s</strong> %s</p></div>',
+        esc_html('Blue Collar Crypto:'),
+        esc_html('No persistent object cache detected. Rate limiting and search caching are operating in degraded mode (per-request only). Install Redis or Memcached for production use.')
+    );
 });
 
 // ── ServiceLocator freeze ───────────────────────────────────────
@@ -63,6 +63,12 @@ add_action('admin_notices', function () {
 // late-registered filters cannot replace already-resolved services.
 
 add_action('plugins_loaded', [\BCC\Core\ServiceLocator::class, 'freeze'], PHP_INT_MAX);
+
+// ── Cross-plugin suspension cache invalidation ─────────────────
+// Trust-engine fires `bcc_user_suspension_changed` when a user's
+// suspension status changes. This ensures Permissions picks it up
+// immediately instead of waiting for the 60-second cache TTL.
+\BCC\Core\Permissions\Permissions::registerHooks();
 
 // ── Rate-limit row cleanup ──────────────────────────────────────
 // Throttle's DB fallback and RateLimiter write rows to wp_options
@@ -73,20 +79,25 @@ add_action('bcc_core_rl_cleanup', function () {
     global $wpdb;
 
     // Clean both prefixes: _bcc_rl_ (Throttle) and _transient_bcc_rl_ (RateLimiter).
-    // Use LIMIT to prevent table-lock on large wp_options tables.
+    // Use range scan instead of LIKE wildcards to avoid full table scan.
     // Loop up to 10 times (10000 rows max per cron tick).
-    $patterns = ["'\\_bcc\\_rl\\_%'", "'\\_transient\\_bcc\\_rl\\_%'"];
+    $ranges = [
+        ['_bcc_rl_',           '_bcc_rl_~'],
+        ['_transient_bcc_rl_', '_transient_bcc_rl_~'],
+    ];
 
-    foreach ($patterns as $pattern) {
+    foreach ($ranges as [$rangeStart, $rangeEnd]) {
         $deleted = 0;
         $iterations = 0;
         do {
-            $deleted = (int) $wpdb->query(
+            $deleted = (int) $wpdb->query( $wpdb->prepare(
                 "DELETE FROM {$wpdb->options}
-                 WHERE option_name LIKE {$pattern}
+                 WHERE option_name >= %s AND option_name < %s
                    AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) < UNIX_TIMESTAMP()
-                 LIMIT 1000"
-            );
+                 LIMIT 1000",
+                $rangeStart,
+                $rangeEnd
+            ) );
             $iterations++;
         } while ($deleted >= 1000 && $iterations < 10);
     }
@@ -104,17 +115,8 @@ add_filter('cron_schedules', function (array $schedules): array {
 
 add_action('init', function () {
     // Run every 30 minutes — prevents row accumulation during traffic spikes.
-    // Reschedule if still on old hourly cadence.
-    $existing = wp_get_schedule('bcc_core_rl_cleanup');
-    if ($existing === 'hourly') {
-        wp_clear_scheduled_hook('bcc_core_rl_cleanup');
-    }
     if (!wp_next_scheduled('bcc_core_rl_cleanup')) {
         wp_schedule_event(time(), 'bcc_thirty_minutes', 'bcc_core_rl_cleanup');
-    }
-    // Remove the old daily event if it exists.
-    if (wp_next_scheduled('bcc_core_daily_cleanup')) {
-        wp_clear_scheduled_hook('bcc_core_daily_cleanup');
     }
 }, 99);
 
@@ -137,10 +139,11 @@ add_action('rest_api_init', function () {
             wp_cache_delete($cacheTestKey, 'bcc_health');
 
             // ── Rate-limit row count in wp_options ──────────────────────
+            // Use range scan instead of LIKE wildcards to avoid full table scan.
             global $wpdb;
-            $rlRowCount = (int) $wpdb->get_var(
-                "SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name LIKE '\\_bcc\\_rl\\_%' OR option_name LIKE '\\_transient\\_bcc\\_rl\\_%'"
-            );
+            $rlRowCount1 = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name >= '_bcc_rl_' AND option_name < '_bcc_rl_~'");
+            $rlRowCount2 = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name >= '_transient_bcc_rl_' AND option_name < '_transient_bcc_rl_~'");
+            $rlRowCount  = $rlRowCount1 + $rlRowCount2;
 
             // ── Service availability ────────────────────────────────────
             $services = [];
@@ -186,12 +189,31 @@ add_action('rest_api_init', function () {
             // ── Plugin-specific health (pulled via filter) ──────────────
             $pluginHealth = apply_filters('bcc_system_health', []);
 
-            return rest_ensure_response([
-                'status'    => 'ok',
+            // ── Trust subsystem readiness ────────────────────────────────
+            // These checks detect the "plugin active but system inert" state
+            // that occurs when BCC_ENCRYPTION_KEY is missing or the trust
+            // engine fails to register its ServiceLocator providers.
+            $trustSubsystem = [
+                'encryption_key_defined'   => defined('BCC_ENCRYPTION_KEY'),
+                'trust_read_service_real'  => $services['TrustReadService'] ?? false,
+                'dispute_adjudicator_real' => $services['DisputeAdjudicator'] ?? false,
+            ];
+
+            // System is degraded if any critical trust subsystem check fails.
+            // NullTrustReadService::isSuspended() returns true, which locks
+            // out all non-admin users — this is a platform-wide outage.
+            $trustHealthy = $trustSubsystem['encryption_key_defined']
+                         && $trustSubsystem['trust_read_service_real'];
+
+            $overallStatus = $trustHealthy ? 'ok' : 'degraded';
+
+            $response = rest_ensure_response([
+                'status'    => $overallStatus,
                 'timestamp' => gmdate('c'),
                 'cache'     => [
                     'persistent_object_cache' => $hasRedis,
                     'cache_writable'          => $cacheWritable,
+                    'rate_limiter_degraded'   => \BCC\Core\Security\Throttle::isDegraded(),
                     'rate_limit_rows'         => $rlRowCount,
                 ],
                 'read_model' => [
@@ -210,11 +232,14 @@ add_action('rest_api_init', function () {
                         : 0,
                 ],
                 'services'  => $services,
+                'trust_subsystem' => $trustSubsystem,
                 'wp_cron'   => [
                     'disabled'  => defined('DISABLE_WP_CRON') && DISABLE_WP_CRON,
                 ],
                 'plugins'   => $pluginHealth,
             ]);
+            $response->header('Cache-Control', 'private, max-age=60');
+            return $response;
         },
     ]);
 });
