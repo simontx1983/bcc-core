@@ -17,4 +17,9 @@ final class NullScoreReadService implements ScoreReadServiceInterface
     {
         return [];
     }
+
+    public function getEnrichedScoresForPageIds(array $pageIds): array
+    {
+        return [];
+    }
 }
