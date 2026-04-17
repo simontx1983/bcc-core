@@ -11,13 +11,11 @@ if (!defined('ABSPATH')) {
 /**
  * Fail-safe implementation returned when bcc-trust-engine is not active.
  *
- * SECURITY: Methods that gate access return RESTRICTIVE defaults
- * (fail-closed). Methods that return data return empty values.
- *
- * This ensures that when the trust engine is down:
- *   - isSuspended() returns TRUE → all non-admin users are blocked
- *   - getEligiblePanelistUserIds() returns [] → no panelists available
- *   - Data queries return empty results (no false data)
+ * Data queries return empty results (no false data).
+ * Access gates return PERMISSIVE defaults (fail-open) so users are not
+ * locked out during trust engine maintenance or plugin deactivation.
+ * The only exception is getEligiblePanelistUserIds() which returns []
+ * to prevent unqualified panelist selection.
  */
 final class NullTrustReadService implements TrustReadServiceInterface
 {
@@ -47,12 +45,13 @@ final class NullTrustReadService implements TrustReadServiceInterface
     }
 
     /**
-     * Fail-closed: when the trust engine is unavailable, treat every
-     * user as suspended. Prevents suspended users from acting during
-     * maintenance windows. Admins bypass via Permissions::is_not_suspended().
+     * Fail-open: when the trust engine is unavailable, assume users are
+     * NOT suspended. Returning true here would lock out every non-admin
+     * user from all authenticated actions (voting, endorsing, reporting)
+     * whenever the trust engine plugin is deactivated or crashes.
      */
     public function isSuspended(int $userId): bool
     {
-        return true;
+        return false;
     }
 }
