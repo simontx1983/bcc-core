@@ -25,26 +25,34 @@ final class PeepSo
     /** @var array<int, int|null> Resolved page owners, keyed by page ID. */
     private static array $cache = [];
 
+    private const CACHE_GROUP = 'bcc_peepso';
+    private const CACHE_TTL   = 300; // 5 minutes
+
     public static function get_page_owner(int $page_id): ?int
     {
         if (array_key_exists($page_id, self::$cache)) {
             return self::$cache[$page_id];
         }
 
-        // NullPageOwnerResolver falls back to WP post_author internally,
-        // so no separate fallback path is needed here.
-        // Check WP object cache first (shared across FPM workers, invalidated on writes).
         $cache_key = 'bcc_page_owner_' . $page_id;
-        $cached = wp_cache_get($cache_key, 'bcc_peepso');
+        $cached = wp_cache_get($cache_key, self::CACHE_GROUP);
         if ($cached !== false) {
             return self::$cache[$page_id] = ($cached ?: null);
+        }
+
+        // Stampede lock: wp_cache_add is atomic — only one process wins.
+        // Losers return null for this request rather than piling onto the DB.
+        $lock_key = $cache_key . '_lock';
+        if (!\wp_cache_add($lock_key, 1, self::CACHE_GROUP, 5)) {
+            return self::$cache[$page_id] = null;
         }
 
         $resolver = ServiceLocator::resolvePageOwnerResolver();
         $owner    = $resolver->getPageOwner($page_id);
         $result   = $owner ?: null;
 
-        wp_cache_set($cache_key, $result ?? 0, 'bcc_peepso', 60);
+        wp_cache_set($cache_key, $result ?? 0, self::CACHE_GROUP, self::CACHE_TTL);
+        wp_cache_delete($lock_key, self::CACHE_GROUP);
 
         return self::$cache[$page_id] = $result;
     }
@@ -58,6 +66,6 @@ final class PeepSo
     public static function invalidate(int $pageId): void
     {
         unset(self::$cache[$pageId]);
-        wp_cache_delete('bcc_page_owner_' . $pageId, 'bcc_peepso');
+        wp_cache_delete('bcc_page_owner_' . $pageId, self::CACHE_GROUP);
     }
 }

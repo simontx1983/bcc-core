@@ -78,28 +78,57 @@ add_action('plugins_loaded', [\BCC\Core\ServiceLocator::class, 'freeze'], PHP_IN
 add_action('bcc_core_rl_cleanup', function () {
     global $wpdb;
 
-    // Clean both prefixes: _bcc_rl_ (Throttle) and _transient_bcc_rl_ (RateLimiter).
-    // Use range scan instead of LIKE wildcards to avoid full table scan.
-    // Loop up to 10 times (10000 rows max per cron tick).
-    $ranges = [
-        ['_bcc_rl_',           '_bcc_rl_~'],
-        ['_transient_bcc_rl_', '_transient_bcc_rl_~'],
-    ];
+    // Advisory lock prevents overlapping runs when WP-Cron fires
+    // multiple times (duplicate spawns, external cron + wp-cron race).
+    $lockAcquired = (int) $wpdb->get_var("SELECT GET_LOCK('bcc_core_rl_cleanup', 0)") === 1;
+    if (!$lockAcquired) {
+        return;
+    }
 
-    foreach ($ranges as [$rangeStart, $rangeEnd]) {
-        $deleted = 0;
-        $iterations = 0;
-        do {
-            $deleted = (int) $wpdb->query( $wpdb->prepare(
-                "DELETE FROM {$wpdb->options}
-                 WHERE option_name >= %s AND option_name < %s
-                   AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) < UNIX_TIMESTAMP()
-                 LIMIT 1000",
-                $rangeStart,
-                $rangeEnd
-            ) );
-            $iterations++;
-        } while ($deleted >= 1000 && $iterations < 10);
+    try {
+        // Clean both prefixes: _bcc_rl_ (Throttle) and _transient_bcc_rl_ (RateLimiter).
+        // Use range scan instead of LIKE wildcards to avoid full table scan.
+        // Loop up to 10 times (10000 rows max per cron tick).
+        $ranges = [
+            ['_bcc_rl_',           '_bcc_rl_~'],
+            ['_transient_bcc_rl_', '_transient_bcc_rl_~'],
+        ];
+
+        $totalDeleted = 0;
+        foreach ($ranges as [$rangeStart, $rangeEnd]) {
+            $deleted = 0;
+            $iterations = 0;
+            do {
+                $deleted = $wpdb->query( $wpdb->prepare(
+                    "DELETE FROM {$wpdb->options}
+                     WHERE option_name >= %s AND option_name < %s
+                       AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) < UNIX_TIMESTAMP()
+                     LIMIT 1000",
+                    $rangeStart,
+                    $rangeEnd
+                ) );
+
+                if ($deleted === false) {
+                    \BCC\Core\Log\Logger::error('[bcc-core] rl_cleanup DELETE failed', [
+                        'range' => $rangeStart,
+                        'error' => $wpdb->last_error,
+                    ]);
+                    break;
+                }
+
+                $deleted = (int) $deleted;
+                $totalDeleted += $deleted;
+                $iterations++;
+            } while ($deleted >= 1000 && $iterations < 10);
+        }
+
+        if ($totalDeleted > 0) {
+            \BCC\Core\Log\Logger::info('[bcc-core] rl_cleanup', [
+                'deleted' => $totalDeleted,
+            ]);
+        }
+    } finally {
+        $wpdb->query("SELECT RELEASE_LOCK('bcc_core_rl_cleanup')");
     }
 });
 

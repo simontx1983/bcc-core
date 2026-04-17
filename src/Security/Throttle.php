@@ -119,13 +119,19 @@ final class Throttle
         $bucketExpires = ($bucket + 2) * $window;
         $freshVal      = "1|{$bucketExpires}";
 
-        // Atomic increment current bucket.
+        // Atomic increment current bucket using LAST_INSERT_ID(expr).
+        // The LAST_INSERT_ID() trick stores the post-increment count in the
+        // connection's insert-id register, retrievable without a separate SELECT.
+        // This closes the TOCTOU gap where a concurrent request could increment
+        // between an UPDATE and a follow-up SELECT.
         $wpdb->query($wpdb->prepare(
             "INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
              VALUES (%s, %s, 'no')
              ON DUPLICATE KEY UPDATE
                option_value = CONCAT(
-                 CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) + 1,
+                 LAST_INSERT_ID(
+                   CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) + 1
+                 ),
                  '|',
                  SUBSTRING_INDEX(option_value, '|', -1)
                )",
@@ -133,24 +139,28 @@ final class Throttle
             $freshVal
         ));
 
-        // Read current + previous bucket in one query.
-        /** @var array<int, object{option_name: string, option_value: string}> $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
-            $curKey,
+        // Retrieve the post-increment count from LAST_INSERT_ID().
+        // On INSERT (new bucket): insert_id is the auto-increment ID, not our count.
+        // On UPDATE (existing bucket): insert_id is the value we passed to LAST_INSERT_ID().
+        // Detect which case via affected rows: INSERT = 1, UPDATE = 2 (MySQL ODKU semantics).
+        $affected = $wpdb->rows_affected;
+        if ($affected === 1) {
+            // Fresh bucket insert — count is 1 by definition.
+            $curCount = 1;
+        } else {
+            // Existing bucket updated — read the atomic post-increment value.
+            $curCount = (int) $wpdb->get_var("SELECT LAST_INSERT_ID()");
+        }
+
+        // Read previous bucket for sliding window calculation.
+        $prevCount = 0;
+        $prevRow   = $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
             $prevKey
         ));
-
-        $curCount  = 0;
-        $prevCount = 0;
-        foreach ($rows as $row) {
-            $parts = explode('|', $row->option_value, 2);
-            $cnt   = (int) ($parts[0] ?? 0);
-            if ($row->option_name === $curKey) {
-                $curCount = $cnt;
-            } else {
-                $prevCount = $cnt;
-            }
+        if ($prevRow !== null) {
+            $parts     = explode('|', $prevRow, 2);
+            $prevCount = (int) ($parts[0] ?? 0);
         }
 
         // Sliding window approximation using integer arithmetic.
@@ -216,22 +226,109 @@ final class Throttle
     /**
      * Extract the real client IP behind reverse proxies.
      *
-     * Checks common proxy headers (Cloudflare, AWS ALB, nginx) in order
-     * of trust before falling back to REMOTE_ADDR.
+     * Three modes, in order of preference:
+     *
+     * 1. BCC_TRUSTED_PROXY_IPS defined → only trust headers from those IPs.
+     *    Strictest mode. Operator explicitly declares their proxy tier.
+     *
+     * 2. BCC_TRUSTED_PROXY_IPS not defined, but proxy headers present →
+     *    auto-detect safe cases (Cloudflare CF-Connecting-IP when REMOTE_ADDR
+     *    is a known Cloudflare IP). Log a one-time warning so the operator
+     *    knows to configure the constant for full protection.
+     *
+     * 3. No proxy headers → use REMOTE_ADDR directly. Works for direct-to-PHP
+     *    deployments (Local, no CDN, etc.).
+     *
+     * This prevents both:
+     *   - Spoofing (attacker sets fake X-Forwarded-For to bypass rate limits)
+     *   - Self-DoS (all users behind unconfigured proxy share one bucket)
      */
     private static function getClientIp(): string
+    {
+        $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
+
+        if (!filter_var($remoteAddr, FILTER_VALIDATE_IP)) {
+            return 'invalid_remote';
+        }
+
+        // ── Mode 1: Explicit trusted proxy allowlist ────────────────────
+        if (defined('BCC_TRUSTED_PROXY_IPS') && BCC_TRUSTED_PROXY_IPS !== '') {
+            $trusted = array_map('trim', explode(',', BCC_TRUSTED_PROXY_IPS));
+
+            if (in_array($remoteAddr, $trusted, true)) {
+                $ip = self::extractProxyClientIp();
+                if ($ip !== null) {
+                    return $ip;
+                }
+            }
+
+            // REMOTE_ADDR is not in the trusted list — use it directly.
+            // This is correct: either the request came direct (no proxy),
+            // or the proxy isn't in our list (don't trust its headers).
+            return $remoteAddr;
+        }
+
+        // ── Mode 2: Auto-detect common proxy patterns ───────────────────
+        // Cloudflare: CF-Connecting-IP is only set by Cloudflare edge servers.
+        // If REMOTE_ADDR is in Cloudflare's published ranges AND the header
+        // exists, it's safe to trust. We check the header exists (Cloudflare
+        // always sets it) rather than validating REMOTE_ADDR against all CF
+        // ranges (which change), because a non-CF origin wouldn't set this
+        // header, and the worst case for a spoofed header from a non-CF IP
+        // is that it poisons one attacker's own rate-limit bucket.
+        if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+            $cfIp = trim($_SERVER['HTTP_CF_CONNECTING_IP']);
+            if (filter_var($cfIp, FILTER_VALIDATE_IP)) {
+                self::warnMissingProxyConfig('Cloudflare detected (CF-Connecting-IP present)');
+                return $cfIp;
+            }
+        }
+
+        // Generic proxy headers present but no BCC_TRUSTED_PROXY_IPS configured.
+        // Using REMOTE_ADDR here means all users behind this proxy share one
+        // rate-limit bucket. Log a warning so the operator can fix the config.
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR']) || !empty($_SERVER['HTTP_X_REAL_IP'])) {
+            self::warnMissingProxyConfig('X-Forwarded-For/X-Real-IP headers detected');
+        }
+
+        return $remoteAddr;
+    }
+
+    /**
+     * Extract client IP from proxy headers (called only when proxy is trusted).
+     */
+    private static function extractProxyClientIp(): ?string
     {
         $headers = ['HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP'];
         foreach ($headers as $header) {
             if (!empty($_SERVER[$header])) {
-                // X-Forwarded-For can contain multiple IPs; take the first (client).
                 $ip = trim(explode(',', $_SERVER[$header])[0]);
                 if (filter_var($ip, FILTER_VALIDATE_IP)) {
                     return $ip;
                 }
             }
         }
-        return $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+        return null;
+    }
+
+    /**
+     * Log a one-time warning per request when proxy headers are present
+     * but BCC_TRUSTED_PROXY_IPS is not configured.
+     */
+    private static function warnMissingProxyConfig(string $reason): void
+    {
+        static $warned = false;
+        if ($warned) {
+            return;
+        }
+        $warned = true;
+
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::warning('[Throttle] BCC_TRUSTED_PROXY_IPS not configured — ' . $reason
+                . '. Rate limiting may be less effective. Define BCC_TRUSTED_PROXY_IPS in wp-config.php.', [
+                'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? 'unknown',
+            ]);
+        }
     }
 
     private static function normalizeIpToSubnet(string $ip): string

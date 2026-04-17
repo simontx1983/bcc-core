@@ -119,9 +119,15 @@ final class Logger
         if ($context) {
             $context = self::redactSensitive($context);
             $json    = wp_json_encode($context, JSON_UNESCAPED_SLASHES);
-            // Strip control characters (newlines, tabs, etc.) from JSON
-            // to prevent log injection attacks that forge fake log entries.
-            $entry .= ' ' . preg_replace('/[\x00-\x1F\x7F]/', '', $json);
+            if ($json === false) {
+                // JSON encoding failed (circular ref, depth limit, invalid UTF-8).
+                // Log the failure itself so context loss is visible.
+                $entry .= ' {"_json_error":"' . json_last_error_msg() . '"}';
+            } else {
+                // Strip control characters (newlines, tabs, etc.) from JSON
+                // to prevent log injection attacks that forge fake log entries.
+                $entry .= ' ' . preg_replace('/[\x00-\x1F\x7F]/', '', $json);
+            }
         }
 
         $entry .= PHP_EOL;
@@ -145,6 +151,22 @@ final class Logger
 
             if (@file_put_contents(self::$log_file, $entry, FILE_APPEND | LOCK_EX) !== false) {
                 return;
+            }
+
+            // Primary log write failed — alert via PHP error system so the
+            // failure is visible in server error logs even if error_log() below
+            // also fails. This prevents critical audit events from vanishing
+            // silently (e.g., dispute resolutions, fraud detections).
+            // Rate-limit the alert to once per request to avoid log storms.
+            static $alertedThisRequest = false;
+            if (!$alertedThisRequest) {
+                $alertedThisRequest = true;
+                // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_trigger_error
+                trigger_error(
+                    '[BCC Logger] Primary log file write failed: ' . self::$log_file
+                    . ' — falling back to error_log(). Check disk space and permissions.',
+                    E_USER_WARNING
+                );
             }
         }
 
