@@ -21,7 +21,7 @@ final class ChallengeRepository
      * Store a challenge payload as a WordPress transient.
      *
      * @param string $key     Transient key (without the `_transient_` prefix).
-     * @param array  $payload Challenge data to store.
+     * @param array<string, mixed> $payload Challenge data to store.
      * @param int    $ttl     Time-to-live in seconds.
      */
     public static function store(string $key, array $payload, int $ttl): void
@@ -48,9 +48,18 @@ final class ChallengeRepository
         $optionName = '_transient_' . $key;
         $timeoutKey = '_transient_timeout_' . $key;
 
-        $wpdb->query('SAVEPOINT bcc_challenge_consume');
+        // Check if we are already inside an outer transaction.
+        // If so, use SAVEPOINT to avoid issuing a nested START TRANSACTION
+        // (which would implicitly commit the outer one in MySQL).
+        $inTransaction = (bool) $wpdb->get_var("SELECT @@in_transaction");
 
-        $released = false;
+        if ($inTransaction) {
+            $wpdb->query('SAVEPOINT bcc_challenge_consume');
+        } else {
+            $wpdb->query('START TRANSACTION');
+        }
+
+        $committed = false;
 
         try {
             /** @var string|null $serialized */
@@ -62,8 +71,12 @@ final class ChallengeRepository
             ));
 
             if ($serialized === null) {
-                $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
-                $released = true;
+                if ($inTransaction) {
+                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+                } else {
+                    $wpdb->query('ROLLBACK');
+                }
+                $committed = true;
                 return null;
             }
 
@@ -72,14 +85,18 @@ final class ChallengeRepository
 
             if (!is_array($challenge)) {
                 // Corrupted challenge — delete it to prevent replay, then
-                // release so the DELETE persists.
+                // commit so the DELETE persists.
                 $wpdb->query($wpdb->prepare(
                     "DELETE FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
                     $optionName,
                     $timeoutKey
                 ));
-                $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
-                $released = true;
+                if ($inTransaction) {
+                    $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
+                } else {
+                    $wpdb->query('COMMIT');
+                }
+                $committed = true;
                 return null;
             }
 
@@ -91,22 +108,39 @@ final class ChallengeRepository
             ));
 
             if ($deleted === false) {
-                $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
-                $released = true;
+                if ($inTransaction) {
+                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+                } else {
+                    $wpdb->query('ROLLBACK');
+                }
+                $committed = true;
                 return null;
             }
 
-            $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
-            $released = true;
+            if ($inTransaction) {
+                $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
+            } else {
+                $wpdb->query('COMMIT');
+            }
+            $committed = true;
 
             return $challenge;
         } catch (\Throwable $e) {
-            $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
-            $released = true;
+            if (!$committed) {
+                if ($inTransaction) {
+                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+                } else {
+                    $wpdb->query('ROLLBACK');
+                }
+            }
             throw $e;
         } finally {
-            if (!$released) {
-                $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+            if (!$committed) {
+                if ($inTransaction) {
+                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
+                } else {
+                    $wpdb->query('ROLLBACK');
+                }
             }
         }
     }

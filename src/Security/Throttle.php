@@ -139,17 +139,23 @@ final class Throttle
             $freshVal
         ));
 
-        // Retrieve the post-increment count from LAST_INSERT_ID().
-        // On INSERT (new bucket): insert_id is the auto-increment ID, not our count.
-        // On UPDATE (existing bucket): insert_id is the value we passed to LAST_INSERT_ID().
-        // Detect which case via affected rows: INSERT = 1, UPDATE = 2 (MySQL ODKU semantics).
+        // Capture rows_affected and insert_id IMMEDIATELY after the query,
+        // before any intervening DB call can overwrite $wpdb's state.
+        // On INSERT (new bucket): affected = 1, insert_id is auto-increment ID.
+        // On UPDATE (existing bucket): affected = 2 (MySQL ODKU semantics),
+        //   insert_id is the value we passed to LAST_INSERT_ID().
         $affected = $wpdb->rows_affected;
+        $insertId = $wpdb->insert_id;
+
         if ($affected === 1) {
             // Fresh bucket insert — count is 1 by definition.
             $curCount = 1;
         } else {
-            // Existing bucket updated — read the atomic post-increment value.
-            $curCount = (int) $wpdb->get_var("SELECT LAST_INSERT_ID()");
+            // Existing bucket updated — use the captured insert_id which holds
+            // the atomic post-increment value from LAST_INSERT_ID(expr).
+            // Previously this used a separate SELECT LAST_INSERT_ID() query,
+            // which was vulnerable to corruption by intervening queries.
+            $curCount = (int) $insertId;
         }
 
         // Read previous bucket for sliding window calculation.

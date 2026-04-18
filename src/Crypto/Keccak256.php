@@ -151,7 +151,6 @@ final class Keccak256 {
             $x    = $laneIdx % 5;
             $y    = intdiv($laneIdx, 5);
             $lane = $A[$x][$y];
-            /** @phpstan-ignore smaller.alwaysTrue */
             for ($b = 0; $b < 8 && $needed > 0; $b++) {
                 $output .= chr(gmp_intval(gmp_and($lane, gmp_init(0xff))));
                 $lane    = gmp_div_q($lane, gmp_init(256));

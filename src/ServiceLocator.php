@@ -181,7 +181,10 @@ final class ServiceLocator
         }
 
         // Trigger resolution if not already cached.
+        // The return value is intentionally discarded — we only care about
+        // populating self::$cache so the array_key_exists check below works.
         if (!array_key_exists($filter, self::$cache)) {
+            /** @var class-string $contract */
             self::resolveOnce($filter, $contract);
         }
 

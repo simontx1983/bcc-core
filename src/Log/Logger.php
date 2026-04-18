@@ -91,10 +91,33 @@ final class Logger
             wp_mkdir_p($log_dir);
         }
 
-        // Protect log directory from web access (covers Apache, Nginx via .htaccess).
+        // Protect log directory from web access.
+        // The .htaccess covers Apache; the <Files> directive with a wildcard
+        // also blocks direct file access. Nginx ignores .htaccess, so we
+        // additionally use a randomized filename to prevent URL guessing.
         $htaccess = $log_dir . '/.htaccess';
         if (!file_exists($htaccess)) {
-            @file_put_contents($htaccess, "# Deny all access\n<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\nOrder deny,allow\nDeny from all\n</IfModule>\n");
+            @file_put_contents($htaccess, implode("\n", [
+                '# Deny all access to this directory',
+                '<IfModule mod_authz_core.c>',
+                'Require all denied',
+                '</IfModule>',
+                '<IfModule !mod_authz_core.c>',
+                'Order deny,allow',
+                'Deny from all',
+                '</IfModule>',
+                '# Block direct file access as well',
+                '<Files "*">',
+                '<IfModule mod_authz_core.c>',
+                'Require all denied',
+                '</IfModule>',
+                '<IfModule !mod_authz_core.c>',
+                'Order deny,allow',
+                'Deny from all',
+                '</IfModule>',
+                '</Files>',
+                '',
+            ]));
         }
 
         // Prevent directory listing and direct access on non-Apache servers.
@@ -103,7 +126,18 @@ final class Logger
             @file_put_contents($index, "<?php\n// Silence is golden.\n");
         }
 
-        self::$log_file = $log_dir . '/bcc.log';
+        // Use a randomized log filename so the file cannot be guessed on
+        // servers where .htaccess is ignored (e.g., Nginx). The random
+        // suffix is generated once and stored as a wp_option so it persists
+        // across requests but is not predictable.
+        $optionKey   = 'bcc_log_file_secret';
+        $logSecret   = get_option($optionKey);
+        if (!is_string($logSecret) || strlen($logSecret) < 32) {
+            $logSecret = bin2hex(random_bytes(16));
+            update_option($optionKey, $logSecret, false);
+        }
+
+        self::$log_file = $log_dir . '/bcc-' . $logSecret . '.log';
     }
 
     /**
