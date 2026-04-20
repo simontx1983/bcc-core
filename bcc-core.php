@@ -271,5 +271,103 @@ add_action('rest_api_init', function () {
             return $response;
         },
     ]);
+
+    // ── Public uptime probe ────────────────────────────────────────
+    //
+    // Returns HTTP 200 when the system is healthy, HTTP 503 when critical
+    // subsystems are degraded. Safe to expose publicly — returns only a
+    // minimal {status, checks} payload, no internal counts or DB state.
+    //
+    // Point an uptime monitor (UptimeRobot, Pingdom, Better Stack) at
+    // /wp-json/bcc/v1/system/ping to get alerted when:
+    //   - Trust read service is on NullObject fallback (platform down)
+    //   - Dispute adjudicator is unavailable
+    //   - Score recalculation cron is >15 minutes overdue
+    //   - Read model dirty queue has been stuck >10 minutes
+    //
+    // Cached for 30s to absorb probe storms.
+    register_rest_route('bcc/v1', '/system/ping', [
+        'methods'             => \WP_REST_Server::READABLE,
+        'permission_callback' => '__return_true',
+        'callback'            => function () {
+            // Serve from cache if fresh — absorbs monitoring traffic.
+            $cached = wp_cache_get('ping_result', 'bcc_health');
+            if (is_array($cached)) {
+                $resp = rest_ensure_response($cached['body']);
+                $resp->set_status($cached['http']);
+                $resp->header('Cache-Control', 'public, max-age=30');
+                return $resp;
+            }
+
+            $checks = [];
+            $healthy = true;
+
+            // ── Check 1: Trust read service is real (not NullObject) ─
+            $trustRead = \BCC\Core\ServiceLocator::hasRealService(
+                \BCC\Core\Contracts\TrustReadServiceInterface::class
+            );
+            $checks['trust_read'] = $trustRead ? 'ok' : 'fail';
+            if (!$trustRead) $healthy = false;
+
+            // ── Check 2: Dispute adjudicator is real ──────────────────
+            $disputeReady = \BCC\Core\ServiceLocator::hasRealService(
+                \BCC\Core\Contracts\DisputeAdjudicationInterface::class
+            );
+            $checks['dispute_adjudicator'] = $disputeReady ? 'ok' : 'fail';
+            if (!$disputeReady) $healthy = false;
+
+            // ── Check 3: Score recalc cron freshness ─────────────────
+            // Cron writes option 'bcc_trust_last_recalc_run' after each
+            // successful run. If older than 15 min, cron has stalled.
+            $lastRecalc = (int) get_option('bcc_trust_last_recalc_run', 0);
+            $recalcAge  = time() - $lastRecalc;
+            if ($lastRecalc === 0) {
+                // Grace: system may have just installed — don't fail.
+                $checks['score_recalc_cron'] = 'pending';
+            } elseif ($recalcAge > 900) {
+                $checks['score_recalc_cron'] = 'stale';
+                $healthy = false;
+            } else {
+                $checks['score_recalc_cron'] = 'ok';
+            }
+
+            // ── Check 4: Read model dirty queue not stuck ────────────
+            $rmDirty = wp_cache_get('bcc_rm_dirty_pages', 'bcc_rm_sync');
+            if (is_array($rmDirty) && !empty($rmDirty)) {
+                $oldest = min($rmDirty);
+                $age    = time() - (int) $oldest;
+                if ($age > 600) {
+                    $checks['read_model_sync'] = 'stuck';
+                    $healthy = false;
+                } else {
+                    $checks['read_model_sync'] = 'ok';
+                }
+            } else {
+                $checks['read_model_sync'] = 'ok';
+            }
+
+            // ── Check 5: Object cache writable ────────────────────────
+            $probeKey = 'bcc_ping_probe_' . wp_generate_password(6, false);
+            wp_cache_set($probeKey, 1, 'bcc_health', 10);
+            $writable = wp_cache_get($probeKey, 'bcc_health') === 1;
+            wp_cache_delete($probeKey, 'bcc_health');
+            $checks['cache_writable'] = $writable ? 'ok' : 'fail';
+            if (!$writable) $healthy = false;
+
+            $body = [
+                'status'    => $healthy ? 'ok' : 'degraded',
+                'timestamp' => gmdate('c'),
+                'checks'    => $checks,
+            ];
+            $http = $healthy ? 200 : 503;
+
+            wp_cache_set('ping_result', ['body' => $body, 'http' => $http], 'bcc_health', 30);
+
+            $resp = rest_ensure_response($body);
+            $resp->set_status($http);
+            $resp->header('Cache-Control', 'public, max-age=30');
+            return $resp;
+        },
+    ]);
 });
 
