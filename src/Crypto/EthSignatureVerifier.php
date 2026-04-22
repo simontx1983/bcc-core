@@ -74,7 +74,13 @@ final class EthSignatureVerifier {
             return null;
         }
 
-        $hash    = Keccak256::hash(hex2bin($pubKey), false);
+        $pubKeyBinary = hex2bin($pubKey);
+        if ($pubKeyBinary === false) {
+            // ecrecover() always produces 128 hex chars, so this is unreachable
+            // in practice. Fail safe in case an upstream change ever violates that.
+            return null;
+        }
+        $hash    = Keccak256::hash($pubKeyBinary, false);
         $address = '0x' . substr($hash, 24);
 
         return $address;
@@ -179,17 +185,28 @@ final class EthSignatureVerifier {
         }
 
         if (gmp_cmp($x1, $x2) === 0 && gmp_cmp($y1, $y2) === 0) { // Point doubling
+            // 2·y1 ≡ 0 (mod p) only for points of order 2 (y=0). secp256k1 has
+            // no such rational points, but a crafted signature could steer here.
+            $twoY1Inv = gmp_invert(gmp_mod(gmp_mul(gmp_init(2), $y1), $mod), $mod);
+            if ($twoY1Inv === false) {
+                return null;
+            }
             $lam = gmp_mod(
                 gmp_mul(
                     gmp_mul(gmp_init(3), gmp_powm($x1, gmp_init(2), $mod)),
-                    gmp_invert(gmp_mod(gmp_mul(gmp_init(2), $y1), $mod), $mod)
+                    $twoY1Inv
                 ),
                 $mod
             );
         } else {
             $dy  = gmp_mod(gmp_sub($y2, $y1), $mod);
             $dx  = gmp_mod(gmp_sub($x2, $x1), $mod);
+            // $dx cannot be 0 here (x1 != x2 per the branch condition), but
+            // guard anyway: any invert failure would fatal on the next gmp_mul.
             $inv = gmp_invert(gmp_mod($dx, $mod), $mod);
+            if ($inv === false) {
+                return null;
+            }
             $lam = gmp_mod(gmp_mul($dy, $inv), $mod);
         }
         $x3 = gmp_mod(gmp_sub(gmp_sub(gmp_powm($lam, gmp_init(2), $mod), $x1), $x2), $mod);

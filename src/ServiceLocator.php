@@ -146,7 +146,7 @@ final class ServiceLocator
      * methods above. If you add/rename a resolve method, update this
      * map too. Used by hasRealService() to look up cached instances.
      *
-     * @var array<class-string, string>
+     * @var array<class-string, non-empty-string>
      */
     private static array $contractToFilter = [
         DisputeAdjudicationInterface::class    => 'bcc.resolve.dispute_adjudication',
@@ -251,14 +251,23 @@ final class ServiceLocator
      * on the next call within the same request (until freeze() is called).
      *
      * @template T of object
-     * @param string $filter   The filter hook name.
+     * @param non-empty-string $filter   The filter hook name.
      * @param class-string<T> $contract The interface the resolved service must implement.
      * @return T
      */
     private static function resolveOnce(string $filter, string $contract)
     {
         if (array_key_exists($filter, self::$cache)) {
-            return self::$cache[$filter];
+            $cached = self::$cache[$filter];
+            if (!$cached instanceof $contract) {
+                // Defensive: cache is only populated after instanceof checks
+                // below, so this branch is unreachable. Guard against future
+                // regressions in the caching logic.
+                throw new \LogicException(
+                    "Cached service for {$filter} does not implement {$contract}"
+                );
+            }
+            return $cached;
         }
 
         if (self::$frozen) {
@@ -267,6 +276,11 @@ final class ServiceLocator
             $nullClass = self::$nullObjects[$contract] ?? null;
             if ($nullClass) {
                 $null = new $nullClass();
+                if (!$null instanceof $contract) {
+                    throw new \LogicException(
+                        "NullObject {$nullClass} does not implement contract {$contract}"
+                    );
+                }
                 self::$cache[$filter] = $null;
                 return $null;
             }
@@ -306,7 +320,13 @@ final class ServiceLocator
         $nullClass = self::$nullObjects[$contract] ?? null;
 
         if ($nullClass) {
-            return new $nullClass();
+            $null = new $nullClass();
+            if (!$null instanceof $contract) {
+                throw new \LogicException(
+                    "NullObject {$nullClass} does not implement contract {$contract}"
+                );
+            }
+            return $null;
         }
 
         // Unreachable if $nullObjects is kept in sync with contracts.

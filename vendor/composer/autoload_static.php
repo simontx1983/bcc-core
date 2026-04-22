@@ -6,7 +6,15 @@ namespace Composer\Autoload;
 
 class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
 {
+    public static $files = array (
+        '9b38cf48e83f5d8f60375221cd213eee' => __DIR__ . '/..' . '/phpstan/phpstan/bootstrap.php',
+    );
+
     public static $prefixLengthsPsr4 = array (
+        'S' =>
+        array (
+            'SzepeViktor\\PHPStan\\WordPress\\' => 30,
+        ),
         'B' =>
         array (
             'BCC\\Core\\' => 9,
@@ -14,6 +22,10 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
     );
 
     public static $prefixDirsPsr4 = array (
+        'SzepeViktor\\PHPStan\\WordPress\\' =>
+        array (
+            0 => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src',
+        ),
         'BCC\\Core\\' =>
         array (
             0 => __DIR__ . '/../..' . '/src',
@@ -33,13 +45,18 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
         'BCC\\Core\\Contracts\\WalletLinkWriteInterface' => __DIR__ . '/../..' . '/src/Contracts/WalletLinkWriteInterface.php',
         'BCC\\Core\\Contracts\\WalletSignalWriteInterface' => __DIR__ . '/../..' . '/src/Contracts/WalletSignalWriteInterface.php',
         'BCC\\Core\\Contracts\\WalletVerificationReadInterface' => __DIR__ . '/../..' . '/src/Contracts/WalletVerificationReadInterface.php',
+        'BCC\\Core\\Cron\\AsyncDispatcher' => __DIR__ . '/../..' . '/src/Cron/AsyncDispatcher.php',
         'BCC\\Core\\Crypto\\CosmosSignatureVerifier' => __DIR__ . '/../..' . '/src/Crypto/CosmosSignatureVerifier.php',
         'BCC\\Core\\Crypto\\EthSignatureVerifier' => __DIR__ . '/../..' . '/src/Crypto/EthSignatureVerifier.php',
         'BCC\\Core\\Crypto\\Keccak256' => __DIR__ . '/../..' . '/src/Crypto/Keccak256.php',
         'BCC\\Core\\Crypto\\SolanaSignatureVerifier' => __DIR__ . '/../..' . '/src/Crypto/SolanaSignatureVerifier.php',
         'BCC\\Core\\Crypto\\WalletChallenge' => __DIR__ . '/../..' . '/src/Crypto/WalletChallenge.php',
         'BCC\\Core\\Crypto\\WalletVerifier' => __DIR__ . '/../..' . '/src/Crypto/WalletVerifier.php',
+        'BCC\\Core\\DB\\AdvisoryLock' => __DIR__ . '/../..' . '/src/DB/AdvisoryLock.php',
         'BCC\\Core\\DB\\DB' => __DIR__ . '/../..' . '/src/DB/DB.php',
+        'BCC\\Core\\DTO\\DTOAssert' => __DIR__ . '/../..' . '/src/DTO/DTOAssert.php',
+        'BCC\\Core\\DTO\\RowAssert' => __DIR__ . '/../..' . '/src/DTO/RowAssert.php',
+        'BCC\\Core\\Http\\SafeHttpClient' => __DIR__ . '/../..' . '/src/Http/SafeHttpClient.php',
         'BCC\\Core\\Log\\Logger' => __DIR__ . '/../..' . '/src/Log/Logger.php',
         'BCC\\Core\\NullServices\\NullDisputeAdjudication' => __DIR__ . '/../..' . '/src/NullServices/NullDisputeAdjudication.php',
         'BCC\\Core\\NullServices\\NullOnchainDataRead' => __DIR__ . '/../..' . '/src/NullServices/NullOnchainDataRead.php',
@@ -61,6 +78,21 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
         'BCC\\Core\\Wallet\\WalletIdentityService' => __DIR__ . '/../..' . '/src/Wallet/WalletIdentityService.php',
         'BCC\\Core\\Wallet\\WalletVerificationRequest' => __DIR__ . '/../..' . '/src/Wallet/WalletVerificationRequest.php',
         'Composer\\InstalledVersions' => __DIR__ . '/..' . '/composer/InstalledVersions.php',
+        'SzepeViktor\\PHPStan\\WordPress\\ApplyFiltersDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/ApplyFiltersDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\AssertWpErrorTypeSpecifyingExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/AssertWpErrorTypeSpecifyingExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\EscSqlDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/EscSqlDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookCallbackRule' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookCallbackRule.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookDocBlock' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookDocBlock.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookDocsRule' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookDocsRule.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookDocsVisitor' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookDocsVisitor.php',
+        'SzepeViktor\\PHPStan\\WordPress\\NormalizeWhitespaceDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/NormalizeWhitespaceDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\NormalizedArguments' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/NormalizedArguments.php',
+        'SzepeViktor\\PHPStan\\WordPress\\ShortcodeAttsDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/ShortcodeAttsDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\SlashitFunctionsDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/SlashitFunctionsDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\StripslashesFromStringsOnlyDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/StripslashesFromStringsOnlyDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\WpConstantFetchRule' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/WpConstantFetchRule.php',
+        'SzepeViktor\\PHPStan\\WordPress\\WpParseUrlFunctionDynamicReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/WpParseUrlFunctionDynamicReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\WpSlashDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/WpSlashDynamicFunctionReturnTypeExtension.php',
     );
 
     public static function getInitializer(ClassLoader $loader)

@@ -161,7 +161,7 @@ final class WalletIdentityService
 
         // 3. Fire the canonical domain event.
         //    Listeners:
-        //    - trust-engine CronService: creates bcc_wallet_signals scoring row
+        //    - trust-engine CronService: creates bcc_onchain_signals scoring row
         //    - onchain-signals WalletSeedService: populates on-chain data
         do_action('bcc_wallet_verified', $req->userId, $req->chainSlug, $req->walletAddress);
 

@@ -348,7 +348,18 @@ final class Throttle
 
         // IPv6: mask to /64 (first 4 groups)
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-            $expanded = (string) inet_ntop(inet_pton($ip));
+            // inet_pton/inet_ntop can only fail for non-IPv6 input, but $ip is
+            // validated above. Fail safe by returning the unnormalized IP —
+            // rate limiting still works, just at a finer granularity than /64.
+            $binary = inet_pton($ip);
+            if ($binary === false) {
+                return $ip;
+            }
+            $ntop = inet_ntop($binary);
+            if ($ntop === false) {
+                return $ip;
+            }
+            $expanded = $ntop;
             // inet_ntop may return compressed form; expand to full groups
             $full = implode(':', array_map(
                 fn(string $g): string => str_pad($g, 4, '0', STR_PAD_LEFT),
