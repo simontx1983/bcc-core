@@ -52,7 +52,7 @@ final class ServiceLocator
      * @var array<class-string, list<string>>
      */
     private static array $allowedProviders = [
-        DisputeAdjudicationInterface::class    => ['BCC\\Trust\\Core\\Application\\Disputes\\DisputeAdjudicationService'],
+        DisputeAdjudicationInterface::class    => ['BCC\\Trust\\Core\\Application\\Disputes\\DisputeAdjudicator'],
         TrustReadServiceInterface::class       => ['BCC\\Trust\\Core\\Application\\TrustReadService'],
         ScoreContributorInterface::class       => ['BCC\\Trust\\Core\\Application\\ScoreContributorService'],
         ScoreReadServiceInterface::class       => ['BCC\\Trust\\Core\\Application\\ScoreReadService'],
