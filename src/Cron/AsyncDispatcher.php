@@ -41,21 +41,32 @@ class AsyncDispatcher
      *                          list — anything else throws.
      * @param string     $group Action Scheduler group label, used for filtering
      *                          the AS admin UI. Ignored by the wp-cron fallback.
+     * @return bool True if the backend accepted the enqueue, false on soft
+     *              failure (AS returned 0, wp_schedule_single_event returned
+     *              false/WP_Error). Callers MUST check this — a silent false
+     *              return leaves the work unclaimed with no retry unless the
+     *              caller explicitly reconciles.
      * @throws \LogicException When `$args` is not `array_is_list`.
      */
-    public static function enqueueAsync(string $hook, array $args = [], string $group = ''): void
+    public static function enqueueAsync(string $hook, array $args = [], string $group = ''): bool
     {
         self::assertList($args, 'enqueueAsync', $hook);
 
         if (function_exists('as_enqueue_async_action')) {
-            as_enqueue_async_action($hook, $args, $group);
-            return;
+            // Action Scheduler returns the action ID on success, 0 on failure.
+            $actionId = as_enqueue_async_action($hook, $args, $group);
+            return is_int($actionId) ? $actionId > 0 : (bool) $actionId;
         }
 
         // Even with DISABLE_WP_CRON, wp_schedule_single_event queues the
         // event in the database. It will fire on the next HTTP request that
         // invokes wp-cron.php (which managed hosts trigger via system cron).
-        wp_schedule_single_event(time(), $hook, $args);
+        // Returns true/false/WP_Error (WP 5.1+); null on older WP (treat as ok).
+        $scheduled = wp_schedule_single_event(time(), $hook, $args);
+        if ($scheduled === null) {
+            return true; // Legacy WP signalled success via null return.
+        }
+        return $scheduled === true;
     }
 
     /**

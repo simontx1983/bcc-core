@@ -18,8 +18,14 @@ final class NullDisputeAdjudication implements DisputeAdjudicationInterface
         return false;
     }
 
-    public function rejectVoteDispute(int $disputeId, int $voteId, int $pageId, int $resolvedBy): bool
-    {
+    public function rejectVoteDispute(
+        int $disputeId,
+        int $voteId,
+        int $pageId,
+        int $reporterId,
+        int $resolvedBy,
+        bool $quorumMet
+    ): bool {
         return false;
     }
 }

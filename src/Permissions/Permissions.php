@@ -32,21 +32,34 @@ final class Permissions
      *
      * When the trust engine is unavailable, the NullTrustReadService
      * returns isSuspended()=true (fail-closed). Admins with
-     * manage_options capability bypass this gate so they can still
-     * administer the site during trust-engine downtime.
+     * manage_options capability bypass this gate BY DEFAULT so they
+     * can still administer the site during trust-engine downtime.
+     *
+     * $allowAdminBypass:
+     *   - true  (default) — admins always pass. Use for admin screens
+     *     and any path where a suspended admin must still be able to
+     *     administer recovery.
+     *   - false — admins are subject to the same suspension gate as
+     *     any other user. Use for participant paths where an admin
+     *     should NOT get a free pass (e.g. dispute REST endpoints: a
+     *     suspended admin should not be able to file disputes or cast
+     *     panel votes). Callers that choose this mode MUST treat
+     *     admins as ordinary users for gating purposes.
      *
      * Result is cached for 60 seconds per user.
      */
-    public static function is_not_suspended(?int $user_id = null): bool
+    public static function is_not_suspended(?int $user_id = null, bool $allowAdminBypass = true): bool
     {
         $user_id = $user_id ?: get_current_user_id();
         if (!$user_id) {
             return false;
         }
 
-        // Admins always bypass suspension — critical for maintaining the
-        // site when the trust engine is down (fail-closed NullObject).
-        if (user_can($user_id, 'manage_options')) {
+        $isAdmin = user_can($user_id, 'manage_options');
+
+        // Admin bypass: only when allowed by the caller. Admin UIs keep
+        // the bypass; dispute/participation paths opt out.
+        if ($allowAdminBypass && $isAdmin) {
             return true;
         }
 
@@ -55,7 +68,11 @@ final class Permissions
         $cacheKey = self::buildSuspensionCacheKey($user_id);
         $cached = wp_cache_get($cacheKey, self::CACHE_GROUP);
         if ($cached !== false) {
-            return !$cached;
+            $isSuspendedCached = (bool) $cached;
+            if ($isSuspendedCached && $isAdmin && !$allowAdminBypass) {
+                self::logSuspendedAdminBlocked($user_id);
+            }
+            return !$isSuspendedCached;
         }
 
         // Delegates to the trust-engine implementation (or NullTrustReadService
@@ -63,7 +80,28 @@ final class Permissions
         $isSuspended = ServiceLocator::resolveTrustReadService()->isSuspended($user_id);
         wp_cache_set($cacheKey, $isSuspended, self::CACHE_GROUP, self::CACHE_TTL);
 
+        if ($isSuspended && $isAdmin && !$allowAdminBypass) {
+            self::logSuspendedAdminBlocked($user_id);
+        }
+
         return !$isSuspended;
+    }
+
+    /**
+     * Log an informational record when a suspended admin is blocked from a
+     * participation path (dispute REST endpoints, etc.). Admin bypass for
+     * admin screens continues — this log fires only for the $allowAdminBypass
+     * = false case, so ops can see misuse attempts without spamming the
+     * log on normal admin-screen traffic.
+     */
+    private static function logSuspendedAdminBlocked(int $userId): void
+    {
+        if (!class_exists('\\BCC\\Core\\Log\\Logger')) {
+            return;
+        }
+        \BCC\Core\Log\Logger::info('[Permissions] Suspended admin blocked from dispute participation', [
+            'user_id' => $userId,
+        ]);
     }
 
     /**

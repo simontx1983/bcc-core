@@ -76,4 +76,17 @@ interface TrustReadServiceInterface
      * via Permissions::is_not_suspended().
      */
     public function isSuspended(int $userId): bool;
+
+    /**
+     * Acquire a row-level FOR UPDATE lock on the given vote and return true
+     * if it is still active (status=1). Must be invoked inside an open
+     * transaction on the shared $wpdb connection — the lock is released on
+     * that transaction's COMMIT/ROLLBACK.
+     *
+     * Implementations MUST fail-closed: return false when the vote is
+     * missing, inactive, or when the trust engine is unavailable. Used by
+     * bcc-disputes to prevent creating a dispute against a vote that was
+     * soft-deleted between the controller read and the repository insert.
+     */
+    public function lockActiveVoteForDispute(int $voteId): bool;
 }

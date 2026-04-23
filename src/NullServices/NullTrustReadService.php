@@ -57,4 +57,13 @@ final class NullTrustReadService implements TrustReadServiceInterface
     {
         return true;
     }
+
+    /**
+     * Fail-closed: when the trust engine is unavailable we cannot prove the
+     * vote is still active, so dispute creation against it must abort.
+     */
+    public function lockActiveVoteForDispute(int $voteId): bool
+    {
+        return false;
+    }
 }
