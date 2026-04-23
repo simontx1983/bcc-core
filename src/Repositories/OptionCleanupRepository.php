@@ -51,6 +51,43 @@ final class OptionCleanupRepository
     }
 
     /**
+     * Delete every wp_options row whose option_name is in the half-open
+     * range [$prefix, $prefix . '~'). Used by plugin-level migration
+     * scripts to purge legacy option keys whose payload shape does not
+     * match the "count|expiry" format and therefore cannot go through
+     * deleteExpiredRange().
+     *
+     * The '~' (0x7E) suffix is one codepoint above any normal ASCII
+     * character, so the range safely terminates after every key matching
+     * the given prefix. Returns the number of rows deleted, or null on
+     * DB error.
+     */
+    public static function deleteByPrefix(string $prefix): ?int
+    {
+        global $wpdb;
+
+        if ($prefix === '') {
+            return 0;
+        }
+
+        $rangeStart = $prefix;
+        $rangeEnd   = $prefix . '~';
+
+        $result = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options}
+             WHERE option_name >= %s AND option_name < %s",
+            $rangeStart,
+            $rangeEnd
+        ));
+
+        if ($result === false) {
+            return null;
+        }
+
+        return (int) $result;
+    }
+
+    /**
      * Last DB error text from the shared $wpdb connection.
      * Exposed so the caller can log the underlying failure without
      * touching $wpdb directly.
