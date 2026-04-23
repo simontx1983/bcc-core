@@ -14,6 +14,15 @@
  * @package BCC\Core\Tests
  */
 
+// Web-exposure guard: refuse to execute when reached via a web SAPI.
+// The tests/ directory has no reason to be accessible over HTTP; if
+// Apache/Nginx isn't configured to deny it, this belt-and-suspenders
+// check prevents path-enumeration and accidental test-output leakage.
+if (PHP_SAPI !== 'cli') {
+    http_response_code(404);
+    exit;
+}
+
 // Define ABSPATH so the WordPress guard in the source file doesn't exit.
 if (!defined('ABSPATH')) {
     define('ABSPATH', __DIR__ . '/../../../../');

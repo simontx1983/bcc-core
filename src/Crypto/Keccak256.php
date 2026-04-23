@@ -41,15 +41,17 @@ final class Keccak256 {
 
     private static ?\GMP $mask64 = null;
 
-    private static function init(): void {
+    /** 64-bit mask (2^64 - 1) — lazily initialized on first use, cached as non-null. */
+    private static function mask64(): \GMP {
         if (self::$mask64 === null) {
             self::$mask64 = gmp_init('ffffffffffffffff', 16);
         }
+        return self::$mask64;
     }
 
     /** Rotate a 64-bit GMP integer left by $n bits. */
     private static function rotl64(\GMP $x, int $n): \GMP {
-        $mask = self::$mask64;
+        $mask  = self::mask64();
         $left  = gmp_and(gmp_mul($x, gmp_pow(gmp_init(2), $n)), $mask);
         $right = gmp_div_q($x, gmp_pow(gmp_init(2), 64 - $n));
         return gmp_and(gmp_or($left, $right), $mask);
@@ -61,8 +63,7 @@ final class Keccak256 {
      * @param array<int, array<int, \GMP>> $A
      */
     private static function keccakF(array &$A): void {
-        self::init();
-        $mask = self::$mask64;
+        $mask = self::mask64();
 
         for ($round = 0; $round < 24; $round++) {
             // θ step
@@ -112,8 +113,7 @@ final class Keccak256 {
      */
     public static function hash(string $input, bool $binary = false): string {
 
-        self::init();
-        $mask = self::$mask64;
+        $mask = self::mask64();
 
         // Parameters for Keccak-256: rate = 1088 bits = 136 bytes, output = 256 bits
         $rate     = 136;

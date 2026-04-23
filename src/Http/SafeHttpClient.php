@@ -114,6 +114,30 @@ final class SafeHttpClient
         // passing `redirection` explicitly — null-coalesce honours that.
         $args['redirection'] = $args['redirection'] ?? 0;
 
+        // Enforce a conservative default timeout. WordPress's default
+        // is 5s for GET but some paths run on Streams transport that
+        // respects only per-call connect timeouts; a malicious DNS
+        // server can slow-respond to hold a PHP worker hostage. Cap
+        // at a defensive 10s unless the caller explicitly raises it.
+        if (!isset($args['timeout']) || (float) $args['timeout'] <= 0) {
+            $args['timeout'] = 5;
+        } else {
+            $args['timeout'] = min((float) $args['timeout'], 30.0);
+        }
+
+        // Force cURL transport. CURLOPT_RESOLVE pinning is a cURL-only
+        // feature — if WordPress falls back to Streams (no libcurl,
+        // or a filter forcing it), the pin is silently dropped and
+        // a TOCTOU DNS-rebinding window reopens. Reject the request
+        // rather than send it insecurely.
+        if (!function_exists('curl_init')) {
+            return new \WP_Error(
+                'ssrf_no_curl',
+                'SafeHttpClient requires the PHP cURL extension; Streams transport cannot enforce DNS pinning.'
+            );
+        }
+        add_filter('use_streams_transport', '__return_false');
+
         return $args;
     }
 

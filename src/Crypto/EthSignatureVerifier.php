@@ -67,6 +67,26 @@ final class EthSignatureVerifier {
             return null;
         }
 
+        // EIP-2 / BIP-0062 malleability check: reject high-S signatures.
+        // For every valid ECDSA signature (r, s) there is a counterpart
+        // (r, n - s, v ^ 1) that recovers the same address. Accepting
+        // both would let an attacker mint a second distinct-on-disk
+        // signature for the same message, bypassing any downstream
+        // idempotency / replay-dedup that hashes the signature bytes.
+        // Require s <= n/2.
+        $sGmp    = gmp_init($s, 16);
+        $nGmp    = gmp_init(self::N, 16);
+        $halfN   = gmp_div_q($nGmp, gmp_init(2, 10));
+        if (gmp_cmp($sGmp, $halfN) > 0) {
+            return null;
+        }
+        // Also reject degenerate r/s == 0 (invalid signatures).
+        if (gmp_cmp($sGmp, gmp_init(0, 10)) === 0
+            || gmp_cmp(gmp_init($r, 16), gmp_init(0, 10)) === 0
+        ) {
+            return null;
+        }
+
         $msgHash = self::hashMessage($message);
 
         $pubKey = self::ecrecover($msgHash, $v, $r, $s);
@@ -136,7 +156,13 @@ final class EthSignatureVerifier {
         //        = rInv * s * R + rInv * (-z) * G
         $sR    = self::pointMul([$x, $y], $sGmp, $p, $n);
         $negZG = self::pointMul([$gx, $gy], $negZ, $p, $n);
+        if ($sR === null || $negZG === null) {
+            return null;
+        }
         $sum   = self::pointAdd($sR, $negZG, $p);
+        if ($sum === null) {
+            return null;
+        }
         $pub   = self::pointMul($sum, $rInv, $p, $n);
 
         if ($pub === null) {

@@ -37,9 +37,25 @@ class AdvisoryLock
     public static function acquire(string $key, int $timeout = 0): bool
     {
         global $wpdb;
-        return (int) $wpdb->get_var(
+        // Distinguish NULL (driver/permission error) from 0 (held by peer).
+        // Prior (int)-cast collapsed both to 0, so transient MySQL errors
+        // silently became "locked elsewhere" and cron handlers no-op'd
+        // indefinitely without any log trail. Explicit null-check surfaces
+        // the failure class so callers (and operators) can react.
+        $raw = $wpdb->get_var(
             $wpdb->prepare('SELECT GET_LOCK(%s, %d)', $key, $timeout)
-        ) === 1;
+        );
+        if ($raw === null) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error('[bcc-core] AdvisoryLock::acquire GET_LOCK returned NULL', [
+                    'key'     => $key,
+                    'timeout' => $timeout,
+                    'db_error' => $wpdb->last_error,
+                ]);
+            }
+            return false;
+        }
+        return (int) $raw === 1;
     }
 
     /**

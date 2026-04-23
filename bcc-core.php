@@ -382,13 +382,20 @@ add_action('rest_api_init', function () {
             $checks['cache_writable'] = $writable ? 'ok' : 'fail';
             if (!$writable) $healthy = false;
 
+            // Public ping — return ONLY the overall status. The per-check
+            // breakdown (cron staleness, adjudicator availability, circuit
+            // state) is a reconnaissance signal for attackers timing abuse
+            // windows. Full details remain available to authenticated
+            // admins via the /system/health endpoint, which uses
+            // current_user_can('manage_options') as its permission_callback.
             $body = [
                 'status'    => $healthy ? 'ok' : 'degraded',
                 'timestamp' => gmdate('c'),
-                'checks'    => $checks,
             ];
             $http = $healthy ? 200 : 503;
 
+            // Cache the trimmed public payload only. The detailed $checks
+            // array was intentionally dropped — do not re-include it here.
             wp_cache_set('ping_result', ['body' => $body, 'http' => $http], 'bcc_health', 30);
 
             $resp = rest_ensure_response($body);

@@ -22,18 +22,75 @@ final class Throttle
     /** @var bool Whether the system has detected a Redis/object-cache failure this request. */
     private static bool $degraded = false;
 
+    /** @var bool Have we already consulted the shared degraded flag this request? */
+    private static bool $sharedDegradedChecked = false;
+
     /**
-     * Whether the rate limiter is operating in degraded mode this request.
+     * Shared degraded marker: site option storing the UNIX timestamp of the
+     * most recent cache-layer failure observed by ANY PHP worker. When the
+     * persistent object cache (Redis/Memcached) flaps, every worker
+     * previously re-discovered the failure independently via wp_cache_incr
+     * returning false — each discovery cost a cache round-trip and the
+     * per-process $degraded flag never propagated. The option is authoritative
+     * for ~30 seconds; stale entries self-expire on the first check after
+     * DEGRADED_TTL passes.
+     */
+    private const DEGRADED_OPTION_KEY = 'bcc_throttle_degraded_until';
+    private const DEGRADED_TTL        = 30;
+    /** Minimum seconds between option writes to avoid hammering wp_options. */
+    private const DEGRADED_WRITE_THROTTLE = 5;
+
+    /**
+     * Whether the rate limiter is operating in degraded mode.
      *
      * Other plugins can check this to tighten their own behavior:
      *   if (Throttle::isDegraded()) { // reduce batch sizes, skip optional cache reads }
      *
-     * Set the first time wp_cache_incr/add fails within allow().
-     * Persists for the remainder of the PHP request (process-level).
+     * Returns true when:
+     *   - this process has already observed a cache failure (sticky per-request), OR
+     *   - another worker wrote the shared DEGRADED_OPTION_KEY within DEGRADED_TTL.
      */
     public static function isDegraded(): bool
     {
+        if (self::$degraded) {
+            return true;
+        }
+        self::loadSharedDegraded();
         return self::$degraded;
+    }
+
+    /**
+     * Read the shared degraded flag once per request. A site option is used
+     * (not a cache entry) because the whole point is to signal cache failure.
+     */
+    private static function loadSharedDegraded(): void
+    {
+        if (self::$sharedDegradedChecked) {
+            return;
+        }
+        self::$sharedDegradedChecked = true;
+
+        $until = (int) get_option(self::DEGRADED_OPTION_KEY, 0);
+        if ($until > 0 && $until > time()) {
+            self::$degraded = true;
+        }
+    }
+
+    /**
+     * Propagate the in-process degraded flag to a shared store so other
+     * workers short-circuit without rediscovering the same cache failure.
+     * Throttled to at most one write per DEGRADED_WRITE_THROTTLE seconds.
+     */
+    private static function markSharedDegraded(): void
+    {
+        $now       = time();
+        $existing  = (int) get_option(self::DEGRADED_OPTION_KEY, 0);
+        // Only write if the existing marker is absent, expired, or about to
+        // expire. This keeps wp_options writes to once per bout of degradation.
+        if ($existing > $now + (self::DEGRADED_TTL - self::DEGRADED_WRITE_THROTTLE)) {
+            return;
+        }
+        update_option(self::DEGRADED_OPTION_KEY, $now + self::DEGRADED_TTL, false);
     }
 
     /**
@@ -149,8 +206,13 @@ final class Throttle
         // site-wide slowdown vector. Operators MUST provision Redis (or
         // the trust-engine RateLimiter) — the bcc-core admin notice flags
         // the missing backend so this deny-all state is loud, not silent.
+        // Short-circuit if another worker has already recorded a cache failure.
+        // Cheap — static per-request after the first call.
+        self::loadSharedDegraded();
+
         if (!self::isReady()) {
             self::$degraded = true;
+            self::markSharedDegraded();
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[Throttle] No rate-limiter backend available — denying', [
                     'action' => $action,
@@ -187,12 +249,45 @@ final class Throttle
             $cache_key = 'bcc_throttle_' . md5($key);
             $added = wp_cache_add($cache_key, 1, 'bcc_throttle', $window);
             if ($added) {
+                // Liveness round-trip: wp_cache_add can return true against
+                // a local in-memory fallback when the persistent backend is
+                // disconnected, producing per-worker buckets instead of the
+                // intended shared bucket. Read back: if the value is not
+                // exactly 1, the store is degraded and we must fail-closed
+                // for mutating actions so attackers cannot multiply their
+                // effective rate limit by the PHP-FPM pool size.
+                $verify = wp_cache_get($cache_key, 'bcc_throttle');
+                if ((int) $verify !== 1) {
+                    self::$degraded = true;
+                    self::markSharedDegraded();
+                    $critical = in_array($action, [
+                        'vote', 'endorse', 'wallet_verify', 'report',
+                        'flag', 'verify', 'report_user',
+                        'dispute_submit', 'panel_vote',
+                    ], true);
+                    if ($critical) {
+                        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                            \BCC\Core\Log\Logger::error('[Throttle] wp_cache_add liveness failed — mutating action denied', [
+                                'action' => $action, 'key' => $cache_key,
+                                'verify' => var_export($verify, true),
+                            ]);
+                        }
+                        return false;
+                    }
+                    return self::processLevelBackstop($action, $limit);
+                }
                 self::touchLastSuccess();
                 return true;
             }
             $hits = wp_cache_incr($cache_key, 1, 'bcc_throttle');
-            if ($hits === false) {
+            // Strict-typing guard: any non-positive-int return from
+            // wp_cache_incr means the backend is unusable for atomic
+            // counting on this request. Drop-in object caches vary on
+            // the error return (false, 0, null, string); treat anything
+            // that's not a clean positive int as degraded.
+            if (!is_int($hits) || $hits <= 0) {
                 self::$degraded = true;
+                self::markSharedDegraded();
                 // Cache backend broken (Redis outage, connection reset, etc.).
                 // Differentiate by action criticality:
                 //   - Mutating/abuse-prone actions → deny (fail-closed)
@@ -271,6 +366,7 @@ final class Throttle
         // exactly when abuse protection is most needed.
         if ($result === false) {
             self::$degraded = true;
+            self::markSharedDegraded();
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[Throttle] DB fallback fail-closed', [
                     'action'   => $action,
@@ -302,6 +398,7 @@ final class Throttle
             // path — likely a DB error the driver didn't surface as false.
             // Deny rather than treat as count=0 (which would allow everything).
             self::$degraded = true;
+            self::markSharedDegraded();
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[Throttle] DB fallback inconsistent — denied', [
                     'action'    => $action,
@@ -371,6 +468,7 @@ final class Throttle
         unset($limit); // parameter kept for signature stability
 
         self::$degraded = true;
+        self::markSharedDegraded();
 
         if (class_exists('\\BCC\\Core\\Log\\Logger')) {
             \BCC\Core\Log\Logger::warning('[Throttle] Process-level backstop denied (Redis down)', [
@@ -565,6 +663,7 @@ final class Throttle
             && is_array($cached['v4'])
             && is_array($cached['v6'])
         ) {
+            /** @var array{v4: list<string>, v6: list<string>} $cached */
             return $cached;
         }
 

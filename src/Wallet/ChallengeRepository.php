@@ -48,16 +48,32 @@ final class ChallengeRepository
         $optionName = '_transient_' . $key;
         $timeoutKey = '_transient_timeout_' . $key;
 
-        // Check if we are already inside an outer transaction.
-        // If so, use SAVEPOINT to avoid issuing a nested START TRANSACTION
-        // (which would implicitly commit the outer one in MySQL).
-        $inTransaction = (bool) $wpdb->get_var("SELECT @@in_transaction");
-
-        if ($inTransaction) {
-            $wpdb->query('SAVEPOINT bcc_challenge_consume');
-        } else {
-            $wpdb->query('START TRANSACTION');
+        // Detect outer transaction state. A NULL return from @@in_transaction
+        // means the driver could not determine transaction state (connection
+        // reset, permission anomaly on managed MySQL). Proceeding would risk
+        // either (a) START TRANSACTION implicitly committing a real outer tx,
+        // or (b) treating a non-transactional session as transactional and
+        // issuing ROLLBACK TO a non-existent savepoint. Fail-closed instead.
+        $rawInTx = $wpdb->get_var("SELECT @@in_transaction");
+        if ($rawInTx === null) {
+            throw new \RuntimeException(
+                'ChallengeRepository::consume: cannot determine transaction state — refusing to proceed'
+            );
         }
+        $inTransaction = (int) $rawInTx === 1;
+
+        // Enforce contract: consume() must not run inside a caller's
+        // transaction. If the caller's outer transaction later rolls back,
+        // our SAVEPOINT-based DELETE is rolled back with it — making the
+        // nonce replayable. Require atomic consume to own the whole tx.
+        if ($inTransaction) {
+            throw new \LogicException(
+                'ChallengeRepository::consume must be called outside any open transaction ' .
+                '(nonce-replay hazard under outer-transaction rollback)'
+            );
+        }
+
+        $wpdb->query('START TRANSACTION');
 
         $committed = false;
 
@@ -71,11 +87,7 @@ final class ChallengeRepository
             ));
 
             if ($serialized === null) {
-                if ($inTransaction) {
-                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
-                } else {
-                    $wpdb->query('ROLLBACK');
-                }
+                $wpdb->query('ROLLBACK');
                 $committed = true;
                 return null;
             }
@@ -91,11 +103,7 @@ final class ChallengeRepository
                     $optionName,
                     $timeoutKey
                 ));
-                if ($inTransaction) {
-                    $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
-                } else {
-                    $wpdb->query('COMMIT');
-                }
+                $wpdb->query('COMMIT');
                 $committed = true;
                 return null;
             }
@@ -108,39 +116,29 @@ final class ChallengeRepository
             ));
 
             if ($deleted === false) {
-                if ($inTransaction) {
-                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
-                } else {
-                    $wpdb->query('ROLLBACK');
-                }
+                $wpdb->query('ROLLBACK');
                 $committed = true;
                 return null;
             }
 
-            if ($inTransaction) {
-                $wpdb->query('RELEASE SAVEPOINT bcc_challenge_consume');
-            } else {
-                $wpdb->query('COMMIT');
-            }
+            $wpdb->query('COMMIT');
             $committed = true;
 
             return $challenge;
         } catch (\Throwable $e) {
             if (!$committed) {
-                if ($inTransaction) {
-                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
-                } else {
-                    $wpdb->query('ROLLBACK');
-                }
+                $wpdb->query('ROLLBACK');
+                // Mark handled so the finally block does not issue a
+                // second ROLLBACK on an already-rolled-back transaction
+                // (which poisons $wpdb->last_error across the request
+                // and prior caused "SAVEPOINT does not exist" warnings
+                // under GTID-strict replication).
+                $committed = true;
             }
             throw $e;
         } finally {
             if (!$committed) {
-                if ($inTransaction) {
-                    $wpdb->query('ROLLBACK TO SAVEPOINT bcc_challenge_consume');
-                } else {
-                    $wpdb->query('ROLLBACK');
-                }
+                $wpdb->query('ROLLBACK');
             }
         }
     }

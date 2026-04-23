@@ -141,8 +141,27 @@ final class Permissions
      *
      * Use as 'permission_callback' => [Permissions::class, 'restCallback']
      * instead of duplicating the check in each controller.
+     *
+     * SECURITY: this explicitly passes $allowAdminBypass = false so that a
+     * suspended administrator is still denied REST-driven mutating actions
+     * (vote, endorse, dispute submit, etc.). is_not_suspended()'s default
+     * admin-bypass is intended for admin-screen rendering only — do NOT
+     * reuse this callback for admin-ops endpoints that require suspension
+     * to be bypassable; use restCallbackAdminAllowed() below instead.
      */
     public static function restCallback(): bool
+    {
+        return is_user_logged_in() && self::is_not_suspended(null, false);
+    }
+
+    /**
+     * REST permission callback for endpoints that must remain available to
+     * admins even if they are suspended (admin-ops actions, help links).
+     *
+     * Callers opt in explicitly — default {@see self::restCallback} is
+     * fail-closed against suspended admins.
+     */
+    public static function restCallbackAdminAllowed(): bool
     {
         return is_user_logged_in() && self::is_not_suspended();
     }
