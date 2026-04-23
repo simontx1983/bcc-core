@@ -19,11 +19,50 @@ if (!defined('ABSPATH')) {
  */
 final class Throttle
 {
+    /**
+     * Action identifiers that must fail-closed (deny) on cache-backend
+     * failure. Any action not in this list gets the process-level
+     * backstop (which also denies today, but the behaviour is explicit
+     * here so a future restructuring that re-introduces soft-degrade
+     * for non-critical actions cannot silently relax abuse protection
+     * on a mutating endpoint.)
+     */
+    private const CRITICAL_ACTIONS = [
+        // bcc-trust / bcc-disputes mutating actions
+        'vote', 'endorse', 'wallet_verify', 'report',
+        'flag', 'verify', 'report_user',
+        'dispute_submit', 'panel_vote',
+        // bcc-peepso mutating AJAX actions. Previously relied on the
+        // always-deny processLevelBackstop to fail closed; explicit
+        // membership here prevents that implicit reliance from breaking
+        // if the backstop policy ever widens again.
+        'bcc_peepso.inline_edit',
+        'bcc_peepso.visibility',
+        'bcc_peepso.gallery_upload',
+        'bcc_peepso.gallery_delete',
+        'bcc_peepso.gallery_reorder',
+        'bcc_peepso.gallery_bulk_delete',
+        'bcc_peepso.repeater_delete',
+        'bcc_peepso.repeater_reorder',
+    ];
+
     /** @var bool Whether the system has detected a Redis/object-cache failure this request. */
     private static bool $degraded = false;
 
     /** @var bool Have we already consulted the shared degraded flag this request? */
     private static bool $sharedDegradedChecked = false;
+
+    /**
+     * Per-request set of (error-class, action) keys already logged. Prevents
+     * a single PHP worker from writing the same "backend down" error line
+     * hundreds of times during a cache outage — when every rate-limited
+     * endpoint fails identically within one request lifecycle, one log line
+     * per error-class-per-action carries all the diagnostic signal without
+     * flooding disk and log-aggregation pipelines.
+     *
+     * @var array<string, true>
+     */
+    private static array $loggedOnce = [];
 
     /**
      * Shared degraded marker: site option storing the UNIX timestamp of the
@@ -213,11 +252,11 @@ final class Throttle
         if (!self::isReady()) {
             self::$degraded = true;
             self::markSharedDegraded();
-            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            self::logOnce('no_backend_' . $action, static function () use ($action): void {
                 \BCC\Core\Log\Logger::error('[Throttle] No rate-limiter backend available — denying', [
                     'action' => $action,
                 ]);
-            }
+            });
             return false;
         }
 
@@ -260,18 +299,14 @@ final class Throttle
                 if ((int) $verify !== 1) {
                     self::$degraded = true;
                     self::markSharedDegraded();
-                    $critical = in_array($action, [
-                        'vote', 'endorse', 'wallet_verify', 'report',
-                        'flag', 'verify', 'report_user',
-                        'dispute_submit', 'panel_vote',
-                    ], true);
+                    $critical = in_array($action, self::CRITICAL_ACTIONS, true);
                     if ($critical) {
-                        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                        self::logOnce('liveness_fail_' . $action, static function () use ($action, $cache_key, $verify): void {
                             \BCC\Core\Log\Logger::error('[Throttle] wp_cache_add liveness failed — mutating action denied', [
                                 'action' => $action, 'key' => $cache_key,
                                 'verify' => var_export($verify, true),
                             ]);
-                        }
+                        });
                         return false;
                     }
                     return self::processLevelBackstop($action, $limit);
@@ -292,18 +327,14 @@ final class Throttle
                 // Differentiate by action criticality:
                 //   - Mutating/abuse-prone actions → deny (fail-closed)
                 //   - Read-only/low-risk actions   → allow with process-level backstop
-                $critical = in_array($action, [
-                    'vote', 'endorse', 'wallet_verify', 'report',
-                    'flag', 'verify', 'report_user',
-                    'dispute_submit', 'panel_vote',
-                ], true);
+                $critical = in_array($action, self::CRITICAL_ACTIONS, true);
 
                 if ($critical) {
-                    if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                    self::logOnce('redis_down_' . $action, static function () use ($action, $cache_key): void {
                         \BCC\Core\Log\Logger::error('[Throttle] Redis down — mutating action denied', [
                             'action' => $action, 'key' => $cache_key,
                         ]);
-                    }
+                    });
                     return false;
                 }
 
@@ -366,13 +397,31 @@ final class Throttle
         self::$degraded = true;
         self::markSharedDegraded();
 
-        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+        self::logOnce('backstop_' . $action, static function () use ($action): void {
             \BCC\Core\Log\Logger::warning('[Throttle] Process-level backstop denied (Redis down)', [
                 'action' => $action,
             ]);
-        }
+        });
 
         return false;
+    }
+
+    /**
+     * Invoke $logger only once per request for a given $key. Used to dedup
+     * the high-volume "backend down" error lines so a Redis outage does not
+     * generate hundreds of identical log entries per request lifecycle. The
+     * callable indirection avoids building the log context (var_export, etc.)
+     * on every suppressed call.
+     */
+    private static function logOnce(string $key, callable $logger): void
+    {
+        if (isset(self::$loggedOnce[$key])) {
+            return;
+        }
+        self::$loggedOnce[$key] = true;
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            $logger();
+        }
     }
 
     /**
@@ -629,10 +678,22 @@ final class Throttle
 
     /**
      * Extract client IP from proxy headers (called only when proxy is trusted).
+     *
+     * SECURITY: deliberately does NOT consult HTTP_CF_CONNECTING_IP. That
+     * header is Cloudflare-specific and is reserved for the Mode-3 CF
+     * auto-detect path, which validates REMOTE_ADDR is in a published
+     * Cloudflare range before trusting it. If a non-Cloudflare proxy is
+     * allowlisted here (Modes 1/2) and that proxy fails to strip
+     * CF-Connecting-IP, an attacker can spoof it through the proxy and
+     * poison any IP's bucket. By restricting this extractor to standard
+     * forwarding headers (XFF, X-Real-IP), the explicit allowlist remains
+     * safe even against proxies with sloppy header policies. Operators on
+     * Cloudflare with an explicit BCC_TRUSTED_PROXY_IPS allowlist can rely
+     * on X-Forwarded-For (which CF also sends).
      */
     private static function extractProxyClientIp(): ?string
     {
-        $headers = ['HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP'];
+        $headers = ['HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP'];
         foreach ($headers as $header) {
             if (!empty($_SERVER[$header])) {
                 $ip = trim(explode(',', $_SERVER[$header])[0]);

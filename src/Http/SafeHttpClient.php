@@ -82,6 +82,9 @@ final class SafeHttpClient
     /** Whether the http_api_curl hook has been registered (process-once). */
     private static bool $hookRegistered = false;
 
+    /** Whether the use_streams_transport filter has been added (process-once). */
+    private static bool $streamsFilterAdded = false;
+
     /**
      * SSRF-hardened wrapper around `wp_remote_get`.
      *
@@ -201,7 +204,14 @@ final class SafeHttpClient
                 'SafeHttpClient requires the PHP cURL extension; Streams transport cannot enforce DNS pinning.'
             );
         }
-        add_filter('use_streams_transport', '__return_false');
+        // Register the streams-disable filter once per worker. WordPress
+        // dedupes by callback so re-adding is functionally idempotent, but
+        // gating avoids a per-call apply_filters bookkeeping cycle on hot
+        // outbound paths.
+        if (!self::$streamsFilterAdded) {
+            add_filter('use_streams_transport', '__return_false');
+            self::$streamsFilterAdded = true;
+        }
 
         return $args;
     }
