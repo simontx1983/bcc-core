@@ -39,22 +39,49 @@ define('BCC_CORE_VERSION', '1.0.0');
 define('BCC_CORE_PATH', plugin_dir_path(__FILE__));
 define('BCC_CORE_URL', plugin_dir_url(__FILE__));
 
-// ── Persistent object cache warning ─────────────────────────────
-// Rate limiting and caching degrade significantly without Redis/Memcached.
-// Show a non-dismissible admin warning on production sites.
+// ── Rate-limiter readiness enforcement ──────────────────────────
+// BCC requires a safe rate-limiter backend — either the trust-engine's
+// atomic RateLimiter OR a persistent object cache (Redis / Memcached).
+// Throttle::isReady() is the single source of truth; Throttle::allow()
+// FAILS CLOSED (denies every action) when isReady() returns false so a
+// missing backend cannot silently disengage abuse protection.
+//
+// This notice runs late on plugins_loaded so all BCC plugins — including
+// bcc-trust-engine, which provides the preferred RateLimiter class —
+// have had a chance to register before we probe the environment.
+
+add_action('plugins_loaded', function (): void {
+    if (\BCC\Core\Security\Throttle::isReady()) {
+        return;
+    }
+
+    // Log once per request so the problem shows up in whatever log
+    // aggregation the operator uses, not just the admin UI.
+    if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+        \BCC\Core\Log\Logger::error(
+            '[bcc-core] Rate limiter NOT ready — denying all throttled actions. ' .
+            'Install Redis / Memcached or activate bcc-trust-engine (RateLimiter).'
+        );
+    }
+}, 100);
 
 add_action('admin_notices', function () {
-    if (wp_using_ext_object_cache()) {
+    if (\BCC\Core\Security\Throttle::isReady()) {
         return;
     }
-    // Only warn on production-like environments (not local dev).
-    if (defined('WP_DEBUG') && WP_DEBUG) {
-        return;
-    }
+    // Blocking red notice — intentionally not dismissible. The deny-all
+    // fail-closed behaviour in Throttle::allow means EVERY rate-limited
+    // action (disputes, voting, wallet verification, report-user, etc.)
+    // is returning 429 until the operator provisions a backend.
     printf(
-        '<div class="notice notice-warning"><p><strong>%s</strong> %s</p></div>',
-        esc_html('Blue Collar Crypto:'),
-        esc_html('No persistent object cache detected. Rate limiting and search caching are operating in degraded mode (per-request only). Install Redis or Memcached for production use.')
+        '<div class="notice notice-error"><p><strong>%s</strong> %s</p></div>',
+        esc_html('Blue Collar Crypto — Rate limiter offline:'),
+        esc_html(
+            'BCC requires Redis or a persistent object cache for safe rate limiting. '
+            . 'No backend is currently available, so all throttled actions (disputes, voting, '
+            . 'wallet verification, user reports) are being DENIED by default. Install Redis / '
+            . 'Memcached or activate bcc-trust-engine to restore service.'
+        )
     );
 });
 
@@ -76,12 +103,9 @@ add_action('plugins_loaded', [\BCC\Core\ServiceLocator::class, 'freeze'], PHP_IN
 // entries in bounded batches to avoid table-locking.
 
 add_action('bcc_core_rl_cleanup', function () {
-    global $wpdb;
-
     // Advisory lock prevents overlapping runs when WP-Cron fires
     // multiple times (duplicate spawns, external cron + wp-cron race).
-    $lockAcquired = (int) $wpdb->get_var("SELECT GET_LOCK('bcc_core_rl_cleanup', 0)") === 1;
-    if (!$lockAcquired) {
+    if (!\BCC\Core\DB\AdvisoryLock::acquire('bcc_core_rl_cleanup', 0)) {
         return;
     }
 
@@ -96,27 +120,22 @@ add_action('bcc_core_rl_cleanup', function () {
 
         $totalDeleted = 0;
         foreach ($ranges as [$rangeStart, $rangeEnd]) {
-            $deleted = 0;
             $iterations = 0;
             do {
-                $deleted = $wpdb->query( $wpdb->prepare(
-                    "DELETE FROM {$wpdb->options}
-                     WHERE option_name >= %s AND option_name < %s
-                       AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) < UNIX_TIMESTAMP()
-                     LIMIT 1000",
+                $deleted = \BCC\Core\Repositories\OptionCleanupRepository::deleteExpiredRange(
                     $rangeStart,
-                    $rangeEnd
-                ) );
+                    $rangeEnd,
+                    1000
+                );
 
-                if ($deleted === false) {
+                if ($deleted === null) {
                     \BCC\Core\Log\Logger::error('[bcc-core] rl_cleanup DELETE failed', [
                         'range' => $rangeStart,
-                        'error' => $wpdb->last_error,
+                        'error' => \BCC\Core\Repositories\OptionCleanupRepository::lastError(),
                     ]);
                     break;
                 }
 
-                $deleted = (int) $deleted;
                 $totalDeleted += $deleted;
                 $iterations++;
             } while ($deleted >= 1000 && $iterations < 10);
@@ -128,7 +147,7 @@ add_action('bcc_core_rl_cleanup', function () {
             ]);
         }
     } finally {
-        $wpdb->query("SELECT RELEASE_LOCK('bcc_core_rl_cleanup')");
+        \BCC\Core\DB\AdvisoryLock::release('bcc_core_rl_cleanup');
     }
 });
 
@@ -169,9 +188,14 @@ add_action('rest_api_init', function () {
 
             // ── Rate-limit row count in wp_options ──────────────────────
             // Use range scan instead of LIKE wildcards to avoid full table scan.
-            global $wpdb;
-            $rlRowCount1 = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name >= '_bcc_rl_' AND option_name < '_bcc_rl_~'");
-            $rlRowCount2 = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name >= '_transient_bcc_rl_' AND option_name < '_transient_bcc_rl_~'");
+            $rlRowCount1 = \BCC\Core\Repositories\DbMetricsRepository::countOptionsInRange(
+                '_bcc_rl_',
+                '_bcc_rl_~'
+            );
+            $rlRowCount2 = \BCC\Core\Repositories\DbMetricsRepository::countOptionsInRange(
+                '_transient_bcc_rl_',
+                '_transient_bcc_rl_~'
+            );
             $rlRowCount  = $rlRowCount1 + $rlRowCount2;
 
             // ── Service availability ────────────────────────────────────
@@ -202,18 +226,21 @@ add_action('rest_api_init', function () {
             // ── DB active connections / threads running ──────────────────
             // Use SHOW STATUS (works on MySQL 5.7 and 8.x).
             // information_schema.GLOBAL_STATUS was removed in MySQL 8.0.
-            $threadsRow       = $wpdb->get_row("SHOW GLOBAL STATUS LIKE 'Threads_connected'");
-            $dbThreadsConnected = $threadsRow ? (int) $threadsRow->Value : 0;
-            $runningRow       = $wpdb->get_row("SHOW GLOBAL STATUS LIKE 'Threads_running'");
-            $dbThreadsRunning   = $runningRow ? (int) $runningRow->Value : 0;
-            $dbMaxConnections   = (int) $wpdb->get_var("SELECT @@max_connections");
+            $dbThreadsConnected = \BCC\Core\Repositories\DbMetricsRepository::showGlobalStatusInt('Threads_connected');
+            $dbThreadsRunning   = \BCC\Core\Repositories\DbMetricsRepository::showGlobalStatusInt('Threads_running');
+            $dbMaxConnections   = \BCC\Core\Repositories\DbMetricsRepository::showSystemVariableInt('max_connections');
 
             // ── Recalculation queue depth ────────────────────────────────
-            $recalcPending = 0;
-            if (class_exists('\\BCC\\Trust\\Database\\TableRegistry')) {
-                $scoresTable   = \BCC\Trust\Database\TableRegistry::scores();
-                $recalcPending = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$scoresTable} WHERE recalculate_required = 1");
-            }
+            // Resolved via RecalcQueueReadInterface so bcc-core does not
+            // reach into trust-engine tables. The `source` field
+            // disambiguates "0 = no backlog" from "0 = null object
+            // because trust-engine is not wired". Dashboards MUST key
+            // alerting on source, not on pending_pages alone.
+            $recalcQueueReal = \BCC\Core\ServiceLocator::hasRealService(
+                \BCC\Core\Contracts\RecalcQueueReadInterface::class
+            );
+            $recalcPending = \BCC\Core\ServiceLocator::resolveRecalcQueueRead()->pendingCount();
+            $recalcSource  = $recalcQueueReal ? 'trust_engine' : 'unavailable';
 
             // ── Plugin-specific health (pulled via filter) ──────────────
             $pluginHealth = apply_filters('bcc_system_health', []);
@@ -251,6 +278,7 @@ add_action('rest_api_init', function () {
                 ],
                 'recalculation' => [
                     'pending_pages' => $recalcPending,
+                    'source'        => $recalcSource,
                 ],
                 'database' => [
                     'threads_connected' => $dbThreadsConnected,

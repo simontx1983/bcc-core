@@ -3,6 +3,7 @@
 namespace BCC\Core;
 
 use BCC\Core\Contracts\DisputeAdjudicationInterface;
+use BCC\Core\Contracts\RecalcQueueReadInterface;
 use BCC\Core\Contracts\ScoreContributorInterface;
 use BCC\Core\Contracts\ScoreReadServiceInterface;
 use BCC\Core\Contracts\PageOwnerResolverInterface;
@@ -52,6 +53,7 @@ final class ServiceLocator
         OnchainDataReadInterface::class        => ['BCC\\Onchain\\Services\\OnchainDataReadService'],
         WalletSignalWriteInterface::class      => ['BCC\\Onchain\\Services\\WalletSignalWriteService'],
         TrendingDataInterface::class           => ['BCC\\Trust\\Application\\TrendingDataService'],
+        RecalcQueueReadInterface::class        => ['BCC\\Trust\\Application\\RecalcQueueReadService'],
     ];
 
     /**
@@ -77,6 +79,7 @@ final class ServiceLocator
         WalletSignalWriteInterface::class      => \BCC\Core\NullServices\NullWalletSignalWrite::class,
         OnchainDataReadInterface::class        => \BCC\Core\NullServices\NullOnchainDataRead::class,
         TrendingDataInterface::class           => \BCC\Core\NullServices\NullTrendingData::class,
+        RecalcQueueReadInterface::class        => \BCC\Core\NullServices\NullRecalcQueueRead::class,
     ];
 
     public static function resolveDisputeAdjudication(): DisputeAdjudicationInterface
@@ -139,6 +142,11 @@ final class ServiceLocator
         return self::resolveOnce('bcc.resolve.trending_data', TrendingDataInterface::class);
     }
 
+    public static function resolveRecalcQueueRead(): RecalcQueueReadInterface
+    {
+        return self::resolveOnce('bcc.resolve.recalc_queue_read', RecalcQueueReadInterface::class);
+    }
+
     /**
      * Map of contract class → filter name.
      *
@@ -161,6 +169,7 @@ final class ServiceLocator
         WalletSignalWriteInterface::class      => 'bcc.resolve.wallet_signal_write',
         OnchainDataReadInterface::class        => 'bcc.resolve.onchain_data_read',
         TrendingDataInterface::class           => 'bcc.resolve.trending_data',
+        RecalcQueueReadInterface::class        => 'bcc.resolve.recalc_queue_read',
     ];
 
     /**

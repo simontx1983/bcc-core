@@ -99,6 +99,33 @@ final class WalletIdentityService
         return $challenge;
     }
 
+    /**
+     * Non-destructive view of a stored challenge.
+     *
+     * Returns the challenge payload without deleting it so a controller
+     * can read chain metadata (chain_id etc.) BEFORE handing control to
+     * verifyAndLink(), which performs the atomic consume. A race between
+     * peek and consume is safe: the loser of the consume gets a failure
+     * response and no state is mutated.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function peekChallenge(int $userId, string $walletAddress): ?array
+    {
+        $key = self::challengeKey($userId, $walletAddress);
+
+        $challenge = get_transient($key);
+        if (!is_array($challenge)) {
+            return null;
+        }
+
+        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
+            return null;
+        }
+
+        return $challenge;
+    }
+
     // ── Verification ────────────────────────────────────────────────────
 
     /**
@@ -106,6 +133,11 @@ final class WalletIdentityService
      *
      * This is the SINGLE execution pipeline for all wallet verifications,
      * regardless of whether the request arrived via REST or AJAX.
+     *
+     * The challenge message is NEVER trusted from caller input — it is
+     * consumed atomically from the ChallengeRepository at step 1. This
+     * closes the footgun where a future call-site could pass a
+     * user-supplied `$_POST['message']` and bypass nonce enforcement.
      *
      * On success, fires `bcc_wallet_verified` so listeners (trust-engine
      * scoring, onchain-signals seeding) can react.
@@ -115,10 +147,50 @@ final class WalletIdentityService
      */
     public static function verifyAndLink(WalletVerificationRequest $req): array
     {
-        // 1. Cryptographic verification (CPU-only, no network I/O).
+        // 1. Atomically consume the stored challenge. If it is missing
+        //    or expired we must refuse — this prevents replay and also
+        //    prevents verification against an attacker-supplied message.
+        //
+        //    Severity note: this is NOT a security event — the most
+        //    common cause is a frontend integration issue (duplicate
+        //    submit, stale tab, user clicked verify before challenge
+        //    request finished). Logged at warning so ops paging
+        //    thresholds do not fire on normal UX hiccups. A genuine
+        //    replay attempt would still bubble up as a pattern in the
+        //    warning stream.
+        $challenge = self::consumeChallenge($req->userId, $req->walletAddress);
+        if ($challenge === null) {
+            Logger::warning('[WalletIdentity] Challenge missing or expired', [
+                'user_id' => $req->userId,
+                'chain'   => $req->chainSlug,
+                'address' => $req->walletAddress,
+            ]);
+            return [
+                'success'        => false,
+                'wallet_link_id' => 0,
+                'message'        => 'Challenge not found or expired. Please try again.',
+            ];
+        }
+
+        $challengeMessage = isset($challenge['message']) ? (string) $challenge['message'] : '';
+        if ($challengeMessage === '') {
+            Logger::error('[WalletIdentity] Stored challenge is malformed', [
+                'user_id' => $req->userId,
+                'chain'   => $req->chainSlug,
+            ]);
+            return [
+                'success'        => false,
+                'wallet_link_id' => 0,
+                'message'        => 'Challenge malformed.',
+            ];
+        }
+
+        // 2. Cryptographic verification (CPU-only, no network I/O).
+        //    The message is sourced from the consumed challenge above
+        //    so it is always server-authoritative.
         $valid = WalletVerifier::verify(
             $req->chainType,
-            $req->challengeMessage,
+            $challengeMessage,
             $req->signature,
             $req->walletAddress,
             $req->extra
@@ -137,7 +209,7 @@ final class WalletIdentityService
             ];
         }
 
-        // 2. Link wallet via the canonical write contract.
+        // 3. Link wallet via the canonical write contract.
         $walletLinkId = ServiceLocator::resolveWalletLinkWrite()->linkWallet(
             $req->userId,
             $req->chainSlug,
@@ -159,7 +231,7 @@ final class WalletIdentityService
             ];
         }
 
-        // 3. Fire the canonical domain event.
+        // 4. Fire the canonical domain event.
         //    Listeners:
         //    - trust-engine CronService: creates bcc_onchain_signals scoring row
         //    - onchain-signals WalletSeedService: populates on-chain data
