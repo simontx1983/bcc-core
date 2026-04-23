@@ -38,15 +38,46 @@ if (!defined('ABSPATH')) {
  */
 final class SafeHttpClient
 {
-    /** Hostnames blocked outright before DNS resolution. */
+    /**
+     * Hostnames blocked outright before DNS resolution.
+     *
+     * The IP literal path also rejects link-local (169.254/16) via
+     * FILTER_FLAG_NO_RES_RANGE, which covers the numeric forms of every
+     * cloud metadata service — but hostnames are cheap to short-circuit
+     * before we pay for DNS, and catch DNS-rebinding setups that route a
+     * normal-looking hostname to 169.254.169.254 at connect time.
+     */
     private const BLOCKED_HOSTS = [
         'metadata.google.internal',
         'metadata.google.com',
+        'metadata',                   // AWS IMDSv1/IMDSv2 short form
+        'metadata.aws.internal',
+        'metadata.ec2.internal',
+        'metadata.azure.com',
+        'metadata.packet.net',        // Equinix Metal
+        'metadata.internal.cloudapp.net',
+        'metadata.local',             // DigitalOcean
+        'opc.oraclecloud.com',
     ];
+
+    /** Maximum response body size (bytes) — caps memory footprint per call. */
+    private const DEFAULT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MiB
+
+    /** DNS resolution cache TTL (seconds, request-local only). */
+    private const DNS_CACHE_TTL = 60;
 
     /** Pinned DNS entries: host → "host:port:ip" for CURLOPT_RESOLVE. */
     /** @var array<string, string> */
     private static array $pinnedResolves = [];
+
+    /**
+     * Per-request DNS resolution cache keyed by host → ['ip' => string, 'expires' => int].
+     * Reset on every request because PHP-FPM static lifetime would otherwise
+     * outlive short-TTL records.
+     *
+     * @var array<string, array{ip: string, expires: int}>
+     */
+    private static array $dnsCache = [];
 
     /** Whether the http_api_curl hook has been registered (process-once). */
     private static bool $hookRegistered = false;
@@ -66,7 +97,16 @@ final class SafeHttpClient
         if ($secured instanceof \WP_Error) {
             return $secured;
         }
-        return wp_remote_get($url, $secured);
+
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        try {
+            return wp_remote_get($url, $secured);
+        } finally {
+            // Clear any pin we registered for this host so a later exception,
+            // redirect, or retry path cannot leak a stale IP binding into an
+            // unrelated cURL call on the same long-lived PHP-FPM worker.
+            self::clearPin($host);
+        }
     }
 
     /**
@@ -84,7 +124,24 @@ final class SafeHttpClient
         if ($secured instanceof \WP_Error) {
             return $secured;
         }
-        return wp_remote_post($url, $secured);
+
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        try {
+            return wp_remote_post($url, $secured);
+        } finally {
+            self::clearPin($host);
+        }
+    }
+
+    /**
+     * Remove a pinned DNS entry for a host after the request completes.
+     * No-op when no pin was registered for the host.
+     */
+    private static function clearPin(string $host): void
+    {
+        if ($host !== '' && isset(self::$pinnedResolves[$host])) {
+            unset(self::$pinnedResolves[$host]);
+        }
     }
 
     /**
@@ -114,15 +171,23 @@ final class SafeHttpClient
         // passing `redirection` explicitly — null-coalesce honours that.
         $args['redirection'] = $args['redirection'] ?? 0;
 
-        // Enforce a conservative default timeout. WordPress's default
-        // is 5s for GET but some paths run on Streams transport that
-        // respects only per-call connect timeouts; a malicious DNS
-        // server can slow-respond to hold a PHP worker hostage. Cap
-        // at a defensive 10s unless the caller explicitly raises it.
+        // Enforce a tight default timeout. A hostile endpoint (or its DNS)
+        // can hold a PHP worker hostage; 3s is enough for any legitimate
+        // external call the BCC ecosystem makes and caps the worker-pool
+        // exhaustion surface. Callers that need longer must opt in, and
+        // we still refuse anything above 30s.
         if (!isset($args['timeout']) || (float) $args['timeout'] <= 0) {
-            $args['timeout'] = 5;
+            $args['timeout'] = 3;
         } else {
             $args['timeout'] = min((float) $args['timeout'], 30.0);
+        }
+
+        // Cap response body size unless the caller explicitly set it. A
+        // malicious public endpoint can return multi-GB responses and OOM
+        // a PHP worker; wp_remote_* honours `limit_response_size` to short-
+        // circuit the transfer once the cap is reached.
+        if (!isset($args['limit_response_size']) || (int) $args['limit_response_size'] <= 0) {
+            $args['limit_response_size'] = self::DEFAULT_MAX_RESPONSE_BYTES;
         }
 
         // Force cURL transport. CURLOPT_RESOLVE pinning is a cURL-only
@@ -181,43 +246,65 @@ final class SafeHttpClient
             return null; // IP literal — no DNS to pin.
         }
 
-        // Collect ALL resolved IPs (A + AAAA), validate, pin the first public.
-        // This prevents mixed-record attacks where one valid A record passes
-        // validation but cURL picks a private AAAA record at connect time.
-        /** @var string[] $validPublicIps */
-        $validPublicIps = [];
-        $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+        $port = (int) ($parsed['port'] ?? ($scheme === 'https' ? 443 : 80));
 
-        // IPv4 (A records) via gethostbyname.
-        $ipv4 = gethostbyname($host);
-        if ($ipv4 !== $host && filter_var($ipv4, FILTER_VALIDATE_IP, $flags)) {
-            $validPublicIps[] = $ipv4;
+        // Serve from per-request cache when fresh. A PHP-FPM worker
+        // processing a burst of calls to the same host would otherwise
+        // block on the OS resolver on every call, and hostile upstreams
+        // (or merely slow NXDOMAINs) become a worker-exhaustion vector.
+        if (isset(self::$dnsCache[$host]) && self::$dnsCache[$host]['expires'] > time()) {
+            return ['host' => $host, 'port' => $port, 'ip' => self::$dnsCache[$host]['ip']];
         }
 
-        // IPv6 (AAAA records) via dns_get_record.
-        $aaaaRecords = @dns_get_record($host, DNS_AAAA);
-        if (is_array($aaaaRecords)) {
-            foreach ($aaaaRecords as $record) {
-                $ipv6 = $record['ipv6'] ?? '';
-                if ($ipv6 !== '' && filter_var($ipv6, FILTER_VALIDATE_IP, $flags)) {
-                    $validPublicIps[] = $ipv6;
-                }
-            }
-        }
-
-        if (empty($validPublicIps)) {
+        $pinnedIp = self::resolvePublicIp($host);
+        if ($pinnedIp === null) {
             return new \WP_Error(
                 'ssrf_blocked',
                 "Blocked: {$host} resolves to no public IP addresses"
             );
         }
 
-        // Pin the first valid public IP. Prefer IPv4 (collected first) for
-        // compatibility with legacy stacks.
-        $pinnedIp = $validPublicIps[0];
-        $port     = (int) ($parsed['port'] ?? ($scheme === 'https' ? 443 : 80));
+        self::$dnsCache[$host] = [
+            'ip'      => $pinnedIp,
+            'expires' => time() + self::DNS_CACHE_TTL,
+        ];
 
         return ['host' => $host, 'port' => $port, 'ip' => $pinnedIp];
+    }
+
+    /**
+     * Resolve a host to its first valid public IP (A or AAAA).
+     *
+     * Collects both A and AAAA records and returns the first entry that
+     * passes FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE. This
+     * closes mixed-record attacks where an A record passes validation but
+     * cURL picks a private AAAA at connect time.
+     *
+     * Note: PHP's userland resolver has no per-call timeout knob; the OS
+     * resolver timeout applies (typically 5s). Callers combine this with
+     * the per-request cache above and SafeHttpClient's tight default
+     * transport timeout to bound worker-blocking exposure.
+     */
+    private static function resolvePublicIp(string $host): ?string
+    {
+        $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+
+        $ipv4 = gethostbyname($host);
+        if ($ipv4 !== $host && filter_var($ipv4, FILTER_VALIDATE_IP, $flags)) {
+            return $ipv4;
+        }
+
+        $aaaaRecords = @dns_get_record($host, DNS_AAAA);
+        if (is_array($aaaaRecords)) {
+            foreach ($aaaaRecords as $record) {
+                $ipv6 = $record['ipv6'] ?? '';
+                if ($ipv6 !== '' && filter_var($ipv6, FILTER_VALIDATE_IP, $flags)) {
+                    return $ipv6;
+                }
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -261,9 +348,10 @@ final class SafeHttpClient
 
         if ($host !== '' && isset(self::$pinnedResolves[$host]) && $handle instanceof \CurlHandle) {
             curl_setopt($handle, CURLOPT_RESOLVE, [self::$pinnedResolves[$host]]);
-            // Clear after use — one pin per request cycle so a stale entry
-            // cannot leak into a subsequent unrelated request to the same host.
-            unset(self::$pinnedResolves[$host]);
         }
+        // Pin clearing is owned by get()/post()'s finally block so that an
+        // exception, early return, or redirect on a different host cannot
+        // leave a stale pin resident across requests in long-lived PHP-FPM
+        // workers.
     }
 }

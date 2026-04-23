@@ -11,14 +11,23 @@ if (!defined('ABSPATH')) {
 /**
  * No-op implementation returned when bcc-trust-engine is not active.
  *
- * Falls back to WP post_author for page ownership resolution.
+ * Fails CLOSED outside the one post type the platform actually uses for
+ * page ownership (peepso-page). The prior implementation returned
+ * post_author for ANY post type — meaning during the trust-engine
+ * null-fallback window, any WP author could pass Permissions::owns_page()
+ * for any post they authored (regular posts, attachments, arbitrary
+ * plugin CPTs) and reach page-owner-gated REST routes (submit-dispute,
+ * etc.) with pages they don't actually own.
  */
 final class NullPageOwnerResolver implements PageOwnerResolverInterface
 {
     public function getPageOwner(int $pageId): int
     {
         $post = get_post($pageId);
-        return $post ? (int) $post->post_author : 0;
+        if (!$post || $post->post_type !== 'peepso-page') {
+            return 0;
+        }
+        return (int) $post->post_author;
     }
 
     public function getPageForOwner(int $userId): int

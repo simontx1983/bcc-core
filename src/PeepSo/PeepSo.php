@@ -56,16 +56,4 @@ final class PeepSo
 
         return self::$cache[$page_id] = $result;
     }
-
-    /**
-     * Invalidate the cached page-owner for a specific page.
-     *
-     * Call after ownership changes (page transfer, deletion) to ensure
-     * subsequent lookups hit the database.
-     */
-    public static function invalidate(int $pageId): void
-    {
-        unset(self::$cache[$pageId]);
-        wp_cache_delete('bcc_page_owner_' . $pageId, self::CACHE_GROUP);
-    }
 }

@@ -66,8 +66,16 @@ final class Permissions
         // SECURITY: Cache key includes an HMAC so co-installed plugins cannot
         // predict or construct valid keys to poison the suspension cache.
         $cacheKey = self::buildSuspensionCacheKey($user_id);
-        $cached = wp_cache_get($cacheKey, self::CACHE_GROUP);
-        if ($cached !== false) {
+
+        // Use the $found out-param to distinguish a genuine MISS from a
+        // cached `false` value. Without it, `wp_cache_get` returning false
+        // is ambiguous — and `false` is exactly the value we store for the
+        // common case (user is NOT suspended). The previous `$cached !== false`
+        // check meant non-suspended users NEVER hit the cache, forcing every
+        // REST permission_callback to re-query the trust engine.
+        $found  = false;
+        $cached = wp_cache_get($cacheKey, self::CACHE_GROUP, false, $found);
+        if ($found) {
             $isSuspendedCached = (bool) $cached;
             if ($isSuspendedCached && $isAdmin && !$allowAdminBypass) {
                 self::logSuspendedAdminBlocked($user_id);

@@ -29,6 +29,17 @@ final class ServiceLocator
     private static bool $frozen = false;
 
     /**
+     * Filters whose apply_filters() call already returned a non-allowlisted
+     * class this request. Re-running apply_filters() would re-invoke the
+     * rogue callback and re-log — a write-storm vector under load. Once we
+     * have rejected a provider, skip the filter for the remainder of the
+     * request (or until freeze() runs) and return the NullObject directly.
+     *
+     * @var array<string, true>
+     */
+    private static array $rejectedFilters = [];
+
+    /**
      * Allowlist of concrete classes permitted to provide each contract.
      *
      * Only classes listed here will be accepted from apply_filters().
@@ -175,11 +186,22 @@ final class ServiceLocator
     /**
      * Check whether a real (non-null-object) implementation is available.
      *
-     * Triggers resolution if not already cached. Returns false if the
-     * resolved service is a NullObject or if no service was resolved.
+     * Triggers resolution if not already cached. Returns false when the
+     * resolved value is a NullObject or when no service was resolved at all.
      *
-     * Useful when a caller needs to distinguish "trust engine active" from
-     * "running on null fallback" — e.g., to decide whether to queue a retry.
+     * Callers use this to distinguish "trust engine active" from "running
+     * on null fallback" — e.g., disputes reconcile skips ticks when this
+     * returns false rather than burning its 3-strike circuit-breaker on a
+     * missing service.
+     *
+     * IMPLEMENTATION NOTE: the UNFROZEN resolveOnce() path intentionally
+     * does NOT cache NullObjects (so a late-loading provider can still
+     * win on the next call). The POST-FREEZE path DOES cache them as an
+     * optimisation. A simple "is it in the cache?" check would therefore
+     * return true for a frozen NullObject — which was the bug this method
+     * used to have. We now always type-check the cached value against the
+     * contract's registered NullObject class before reporting a real
+     * service is available.
      */
     public static function hasRealService(string $contract): bool
     {
@@ -191,16 +213,30 @@ final class ServiceLocator
 
         // Trigger resolution if not already cached.
         // The return value is intentionally discarded — we only care about
-        // populating self::$cache so the array_key_exists check below works.
+        // populating self::$cache so the checks below can inspect it.
         if (!array_key_exists($filter, self::$cache)) {
             /** @var class-string $contract */
             self::resolveOnce($filter, $contract);
         }
 
-        // If the filter resolved to a real service, it's in the cache.
-        // NullObjects are NOT cached (by design in resolveOnce), so a
-        // cache miss here means only a NullObject was available.
-        return array_key_exists($filter, self::$cache);
+        // Cache miss → only a NullObject was returned (unfrozen path does
+        // not cache those) → no real service.
+        if (!array_key_exists($filter, self::$cache)) {
+            return false;
+        }
+
+        // Cache hit → type-check the cached value. The frozen path caches
+        // NullObjects for performance, so a raw key-exists check would
+        // incorrectly report a real service here. The contract's
+        // registered NullObject class is the canonical "not real" marker.
+        $cached    = self::$cache[$filter];
+        $nullClass = self::$nullObjects[$contract] ?? null;
+
+        if ($nullClass !== null && $cached instanceof $nullClass) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -281,19 +317,21 @@ final class ServiceLocator
 
         if (self::$frozen) {
             // Frozen: no real service was registered before plugins_loaded.
-            // Return NullObject — do NOT call apply_filters() again.
-            $nullClass = self::$nullObjects[$contract] ?? null;
-            if ($nullClass) {
-                $null = new $nullClass();
-                if (!$null instanceof $contract) {
-                    throw new \LogicException(
-                        "NullObject {$nullClass} does not implement contract {$contract}"
-                    );
-                }
-                self::$cache[$filter] = $null;
-                return $null;
-            }
-            throw new \LogicException("No NullObject registered for contract: {$contract}");
+            // Return NullObject and cache it — do NOT call apply_filters()
+            // again. Caching the NullObject here (unlike the un-frozen path)
+            // is intentional: once frozen the provider set cannot change, so
+            // caching avoids re-instantiating the NullObject on every call.
+            $null = self::newNullObject($contract);
+            self::$cache[$filter] = $null;
+            return $null;
+        }
+
+        // Short-circuit filters that already produced a non-allowlisted
+        // class this request. Without this guard, apply_filters() would
+        // re-invoke the rogue callback on every resolve call and log-write
+        // per invocation — a DoS amplifier under load.
+        if (isset(self::$rejectedFilters[$filter])) {
+            return self::newNullObject($contract);
         }
 
         $service = apply_filters($filter, null);
@@ -308,6 +346,10 @@ final class ServiceLocator
                     'class'    => $class,
                 ]);
 
+                // Record the rejection so subsequent resolveOnce() calls
+                // skip apply_filters() entirely for the rest of the request.
+                self::$rejectedFilters[$filter] = true;
+
                 // Fall through to NullObject — do NOT cache the rogue service.
                 $service = null;
             } else {
@@ -321,27 +363,40 @@ final class ServiceLocator
                 'contract' => $contract,
                 'type'     => is_object($service) ? get_class($service) : gettype($service),
             ]);
+            self::$rejectedFilters[$filter] = true;
         }
 
         // No real provider available. Return NullObject fallback but do NOT
         // cache it — a plugin that loads later in this request should still
         // be able to provide the real implementation on the next resolve call.
+        return self::newNullObject($contract);
+    }
+
+    /**
+     * Instantiate the NullObject for a contract. Throws if none registered.
+     *
+     * @template T of object
+     * @param class-string<T> $contract
+     * @return T
+     */
+    private static function newNullObject(string $contract)
+    {
         $nullClass = self::$nullObjects[$contract] ?? null;
 
-        if ($nullClass) {
-            $null = new $nullClass();
-            if (!$null instanceof $contract) {
-                throw new \LogicException(
-                    "NullObject {$nullClass} does not implement contract {$contract}"
-                );
-            }
-            return $null;
+        if ($nullClass === null) {
+            // Unreachable if $nullObjects is kept in sync with contracts.
+            throw new \LogicException(
+                "[ServiceLocator] No NullObject registered for contract: {$contract}"
+            );
         }
 
-        // Unreachable if $nullObjects is kept in sync with contracts.
-        throw new \LogicException(
-            "[ServiceLocator] No NullObject registered for contract: {$contract}"
-        );
+        $null = new $nullClass();
+        if (!$null instanceof $contract) {
+            throw new \LogicException(
+                "NullObject {$nullClass} does not implement contract {$contract}"
+            );
+        }
+        return $null;
     }
 
 }

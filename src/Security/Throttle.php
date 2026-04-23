@@ -11,11 +11,11 @@ if (!defined('ABSPATH')) {
  *
  * Production requirement: EITHER the trust-engine's atomic RateLimiter OR a
  * persistent object cache (Redis / Memcached) must be available. When neither
- * is present, allow() FAILS CLOSED for every action — the legacy wp_options
- * sliding-window fallback caused write amplification on the most-contended WP
- * table under load and is now only used for audit / last-resort scenarios
- * where the operator has explicitly opted in. See self::isReady() and the
- * admin notice in bcc-core/bcc-core.php.
+ * is present, allow() FAILS CLOSED for every action at the isReady() gate.
+ * A previous release carried a wp_options-backed sliding-window fallback;
+ * that fallback caused write amplification on the most-contended WP table
+ * under load and has been removed. See self::isReady() and the admin notice
+ * in bcc-core/bcc-core.php.
  */
 final class Throttle
 {
@@ -319,122 +319,18 @@ final class Throttle
             return $allowed;
         }
 
-        // Fallback: bucketed sliding-window rate limiter (works without Redis).
-        //
-        // Keys are bucketed by time window: hash(key + floor(now/window)).
-        // Each bucket stores "count|bucket_expiry". The expiry lets the
-        // cleanup cron garbage-collect old buckets.
-        //
-        // Sliding window: effective_count = current_count + prev_count * weight
-        // where weight = fraction of previous window still overlapping.
-        // This prevents boundary-edge spikes (2x limit over 2 seconds).
-        global $wpdb;
-
-        $now    = time();
-        $window = max(1, $window);
-        $bucket = (int) floor($now / $window);
-
-        $curKey  = '_bcc_rl_' . md5($key . '_b' . $bucket);
-        $prevKey = '_bcc_rl_' . md5($key . '_b' . ($bucket - 1));
-        // Bucket expires after 2 windows (sliding window lookback + cleanup buffer).
-        $bucketExpires = ($bucket + 2) * $window;
-        $freshVal      = "1|{$bucketExpires}";
-
-        // Atomic increment current bucket using LAST_INSERT_ID(expr).
-        // The LAST_INSERT_ID() trick stores the post-increment count in the
-        // connection's insert-id register, retrievable without a separate SELECT.
-        // This closes the TOCTOU gap where a concurrent request could increment
-        // between an UPDATE and a follow-up SELECT.
-        $result = $wpdb->query($wpdb->prepare(
-            "INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
-             VALUES (%s, %s, 'no')
-             ON DUPLICATE KEY UPDATE
-               option_value = CONCAT(
-                 LAST_INSERT_ID(
-                   CAST(SUBSTRING_INDEX(option_value, '|', 1) AS UNSIGNED) + 1
-                 ),
-                 '|',
-                 SUBSTRING_INDEX(option_value, '|', -1)
-               )",
-            $curKey,
-            $freshVal
-        ));
-
-        // FAIL CLOSED: DB error must deny. A silent fail-open here turns the
-        // limiter into a no-op whenever the options table is locked, the
-        // connection pool is exhausted, or the query times out — which is
-        // exactly when abuse protection is most needed.
-        if ($result === false) {
-            self::$degraded = true;
-            self::markSharedDegraded();
-            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                \BCC\Core\Log\Logger::error('[Throttle] DB fallback fail-closed', [
-                    'action'   => $action,
-                    'key'      => $curKey,
-                    'db_error' => $wpdb->last_error,
-                ]);
-            }
-            return false;
-        }
-
-        // Capture rows_affected and insert_id IMMEDIATELY after the query,
-        // before any intervening DB call can overwrite $wpdb's state.
-        // On INSERT (new bucket): affected = 1, insert_id is auto-increment ID.
-        // On UPDATE (existing bucket): affected = 2 (MySQL ODKU semantics),
-        //   insert_id is the value we passed to LAST_INSERT_ID().
-        $affected = $wpdb->rows_affected;
-        $insertId = $wpdb->insert_id;
-
-        if ($affected === 1) {
-            // Fresh bucket insert — count is 1 by definition.
-            $curCount = 1;
-        } elseif ($affected >= 1 && $insertId > 0) {
-            // UPDATE path (ODKU typically reports affected=2; some tuned
-            // installs report 1). insert_id holds the atomic post-increment
-            // value from LAST_INSERT_ID(expr).
-            $curCount = (int) $insertId;
-        } else {
-            // Inconsistent state: neither a fresh INSERT nor a valid UPDATE
-            // path — likely a DB error the driver didn't surface as false.
-            // Deny rather than treat as count=0 (which would allow everything).
-            self::$degraded = true;
-            self::markSharedDegraded();
-            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                \BCC\Core\Log\Logger::error('[Throttle] DB fallback inconsistent — denied', [
-                    'action'    => $action,
-                    'key'       => $curKey,
-                    'affected'  => $affected,
-                    'insert_id' => $insertId,
-                    'db_error'  => $wpdb->last_error,
-                ]);
-            }
-            return false;
-        }
-
-        // Read previous bucket for sliding window calculation.
-        $prevCount = 0;
-        $prevRow   = $wpdb->get_var($wpdb->prepare(
-            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
-            $prevKey
-        ));
-        if ($prevRow !== null) {
-            $parts     = explode('|', $prevRow, 2);
-            $prevCount = (int) ($parts[0] ?? 0);
-        }
-
-        // Sliding window approximation using integer arithmetic.
-        // weight_pct = 100 - (elapsed * 100 / window), clamped to [0, 100].
-        // effective = current + prev * weight_pct / 100, clamped to [0, 2*limit].
-        $elapsed   = $now - ($bucket * $window);
-        $weightPct = max(0, min(100, 100 - (int) (($elapsed * 100) / $window)));
-        $effective = $curCount + (int) (($prevCount * $weightPct) / 100);
-        $effective = max(0, min($limit * 2, $effective));
-
-        $allowed = $effective <= $limit;
-        if ($allowed) {
-            self::touchLastSuccess();
-        }
-        return $allowed;
+        // Unreachable by construction: isReady() returns true iff the
+        // trust-engine RateLimiter class is loaded OR WordPress is using a
+        // persistent object cache, and both paths above return before this
+        // point. A previous release shipped a wp_options-backed sliding-
+        // window fallback here — that fallback caused write amplification on
+        // the most-contended WP table under load, and bcc-core now fails
+        // closed at the isReady() gate instead. If this throw ever fires,
+        // someone has broken the invariant in isReady() — do not silently
+        // recover.
+        throw new \LogicException(
+            '[Throttle] allow() reached unreachable branch — isReady() invariant violated'
+        );
     }
 
     /**
@@ -584,11 +480,28 @@ final class Throttle
             }
         }
 
-        // ── Mode 3: Cloudflare auto-detect (validated) ──────────────────
-        // CF-Connecting-IP is only trusted when REMOTE_ADDR is actually
-        // in a published Cloudflare range. Without this check a direct
-        // attacker could spoof the header and poison any IP's bucket.
-        if (!empty($_SERVER['HTTP_CF_CONNECTING_IP']) && self::remoteAddrIsCloudflare($remoteAddr)) {
+        // ── Mode 3: Cloudflare auto-detect (operator opt-in + validated) ─
+        // CF-Connecting-IP is only trusted when:
+        //   (a) the operator has explicitly opted in via the
+        //       BCC_BEHIND_CLOUDFLARE constant (or the 'bcc_behind_cloudflare'
+        //       filter for hot-swappable config), AND
+        //   (b) REMOTE_ADDR is actually in a published Cloudflare range.
+        //
+        // Without the opt-in gate, any site whose traffic happens to
+        // transit a CF-proxied egress (shared SaaS hosts, cloud egress
+        // pools) would trust a header the SITE was never behind CF for —
+        // letting any attacker on that egress spoof arbitrary client IPs.
+        // With the opt-in gate, operators who are actually behind CF get
+        // the validated fast path and everyone else falls through to
+        // Mode 4 (direct REMOTE_ADDR).
+        $cfOptIn = (defined('BCC_BEHIND_CLOUDFLARE') && BCC_BEHIND_CLOUDFLARE)
+            || (bool) apply_filters('bcc_behind_cloudflare', false);
+
+        if (
+            $cfOptIn
+            && !empty($_SERVER['HTTP_CF_CONNECTING_IP'])
+            && self::remoteAddrIsCloudflare($remoteAddr)
+        ) {
             $cfIp = trim((string) $_SERVER['HTTP_CF_CONNECTING_IP']);
             if (filter_var($cfIp, FILTER_VALIDATE_IP)) {
                 return $cfIp;
