@@ -52,19 +52,19 @@ final class ServiceLocator
      * @var array<class-string, list<string>>
      */
     private static array $allowedProviders = [
-        DisputeAdjudicationInterface::class    => ['BCC\\Trust\\Application\\Disputes\\DisputeAdjudicationService'],
-        TrustReadServiceInterface::class       => ['BCC\\Trust\\Application\\TrustReadService'],
-        ScoreContributorInterface::class       => ['BCC\\Trust\\Application\\ScoreContributorService'],
-        ScoreReadServiceInterface::class       => ['BCC\\Trust\\Application\\ScoreReadService'],
-        TrustHeaderDataInterface::class        => ['BCC\\Trust\\Integration\\PeepSoIntegration'],
-        PageOwnerResolverInterface::class      => ['BCC\\Trust\\Services\\PageOwnerResolver'],
-        WalletVerificationReadInterface::class => ['BCC\\Trust\\Application\\WalletVerificationReadService'],
+        DisputeAdjudicationInterface::class    => ['BCC\\Trust\\Core\\Application\\Disputes\\DisputeAdjudicationService'],
+        TrustReadServiceInterface::class       => ['BCC\\Trust\\Core\\Application\\TrustReadService'],
+        ScoreContributorInterface::class       => ['BCC\\Trust\\Core\\Application\\ScoreContributorService'],
+        ScoreReadServiceInterface::class       => ['BCC\\Trust\\Core\\Application\\ScoreReadService'],
+        TrustHeaderDataInterface::class        => ['BCC\\Trust\\Core\\Integration\\PeepSoIntegration'],
+        PageOwnerResolverInterface::class      => ['BCC\\Trust\\Core\\Services\\PageOwnerResolver'],
+        WalletVerificationReadInterface::class => ['BCC\\Trust\\Core\\Application\\WalletVerificationReadService'],
         WalletLinkReadInterface::class         => ['BCC\\Onchain\\Services\\WalletLinkReadService'],
         WalletLinkWriteInterface::class        => ['BCC\\Onchain\\Services\\WalletLinkWriteService'],
         OnchainDataReadInterface::class        => ['BCC\\Onchain\\Services\\OnchainDataReadService'],
         WalletSignalWriteInterface::class      => ['BCC\\Onchain\\Services\\WalletSignalWriteService'],
-        TrendingDataInterface::class           => ['BCC\\Trust\\Application\\TrendingDataService'],
-        RecalcQueueReadInterface::class        => ['BCC\\Trust\\Application\\RecalcQueueReadService'],
+        TrendingDataInterface::class           => ['BCC\\Trust\\Core\\Application\\TrendingDataService'],
+        RecalcQueueReadInterface::class        => ['BCC\\Trust\\Core\\Application\\RecalcQueueReadService'],
     ];
 
     /**

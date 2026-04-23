@@ -266,17 +266,17 @@ final class Throttle
             // Normalize to /24 (IPv4) or /64 (IPv6) subnet to bound cardinality.
             // A /24 covers 256 IPs → one bucket per household/office, preventing
             // unbounded DB growth from rotating IPs (mobile, VPN, Tor).
-            $ip  = class_exists('\\BCC\\Trust\\Security\\IpResolver')
-                ? \BCC\Trust\Security\IpResolver::resolve()
+            $ip  = class_exists('\\BCC\\Trust\\Core\\Security\\IpResolver')
+                ? \BCC\Trust\Core\Security\IpResolver::resolve()
                 : self::getClientIp();
             $subnet = self::normalizeIpToSubnet($ip);
             $key = "bcc_throttle_{$action}_ip_" . md5($subnet);
         }
         $key = $key ?? "bcc_throttle_{$action}_{$user_id}";
 
-        // Prefer trust-engine's atomic RateLimiter when available.
-        if (class_exists('\\BCC\\Trust\\Security\\RateLimiter')) {
-            $ok = \BCC\Trust\Security\RateLimiter::allowByKey($key, $limit, $window);
+        // Prefer bcc-trust's atomic RateLimiter when available.
+        if (class_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter')) {
+            $ok = \BCC\Trust\Core\Security\RateLimiter::allowByKey($key, $limit, $window);
             if ($ok) {
                 self::touchLastSuccess();
             }

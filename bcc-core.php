@@ -47,7 +47,7 @@ define('BCC_CORE_URL', plugin_dir_url(__FILE__));
 // missing backend cannot silently disengage abuse protection.
 //
 // This notice runs late on plugins_loaded so all BCC plugins — including
-// bcc-trust-engine, which provides the preferred RateLimiter class —
+// bcc-trust, which provides the preferred RateLimiter class —
 // have had a chance to register before we probe the environment.
 
 add_action('plugins_loaded', function (): void {
@@ -60,7 +60,7 @@ add_action('plugins_loaded', function (): void {
     if (class_exists('\\BCC\\Core\\Log\\Logger')) {
         \BCC\Core\Log\Logger::error(
             '[bcc-core] Rate limiter NOT ready — denying all throttled actions. ' .
-            'Install Redis / Memcached or activate bcc-trust-engine (RateLimiter).'
+            'Install Redis / Memcached or activate bcc-trust (RateLimiter).'
         );
     }
 }, 100);
@@ -80,7 +80,7 @@ add_action('admin_notices', function () {
             'BCC requires Redis or a persistent object cache for safe rate limiting. '
             . 'No backend is currently available, so all throttled actions (disputes, voting, '
             . 'wallet verification, user reports) are being DENIED by default. Install Redis / '
-            . 'Memcached or activate bcc-trust-engine to restore service.'
+            . 'Memcached or activate bcc-trust to restore service.'
         )
     );
 });
