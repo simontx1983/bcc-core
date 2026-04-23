@@ -13,17 +13,21 @@ if (!defined('ABSPATH')) {
  * many score rows are still pending recalculation. The implementation
  * lives in bcc-trust-engine; bcc-core must not reach into trust-engine
  * tables directly. Resolved via ServiceLocator; the NullObject returns
- * 0 so the health endpoint degrades gracefully when trust-engine is
- * unavailable.
+ * null so the health endpoint can distinguish "queue empty" (0) from
+ * "queue unreachable" (null) when trust-engine is unavailable or its
+ * underlying query fails.
  */
 interface RecalcQueueReadInterface
 {
     /**
-     * Number of score rows flagged as needing recalculation.
+     * Number of score rows flagged as needing recalculation, or null
+     * when the queue cannot be queried (trust engine not wired, DB
+     * error, etc.).
      *
      * Implementations MUST be bounded (aggregate COUNT on an indexed
-     * column) and MUST NOT throw — return 0 on failure so the health
-     * endpoint does not cascade into a platform-wide outage.
+     * column) and MUST NOT throw. Return null on any internal failure
+     * so monitoring dashboards can alert on "we don't know" instead
+     * of silently treating an unreachable backend as "nothing queued".
      */
-    public function pendingCount(): int;
+    public function pendingCount(): ?int;
 }

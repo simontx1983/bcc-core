@@ -11,16 +11,17 @@ if (!defined('ABSPATH')) {
 /**
  * Fail-safe RecalcQueueRead for when bcc-trust-engine is not active.
  *
- * Returns 0 pending — the health endpoint interprets this as
- * "no recalculation backlog" which is indistinguishable from
- * "trust engine unavailable". The `services.ScoreReadService` /
- * `trust_subsystem.trust_read_service_real` flags in the health
- * payload already surface the real reason.
+ * Returns null — the NullObject IS unreachable by definition, and
+ * null lets the health endpoint surface "queue status unknown"
+ * instead of falsely reporting "0 = nothing queued". The `source`
+ * field in the health payload still says 'unavailable' for the same
+ * reason, but dashboards that key only on pending_pages now see a
+ * truthful signal.
  */
 final class NullRecalcQueueRead implements RecalcQueueReadInterface
 {
-    public function pendingCount(): int
+    public function pendingCount(): ?int
     {
-        return 0;
+        return null;
     }
 }

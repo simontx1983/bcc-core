@@ -110,6 +110,89 @@ register_activation_hook(__FILE__, function () {
 // immediately instead of waiting for the 60-second cache TTL.
 \BCC\Core\Permissions\Permissions::registerHooks();
 
+// ── Legacy option cleanup (post-consolidation one-shot) ─────────
+// bcc-disputes and bcc-onchain-signals were merged into bcc-trust.
+// Their option rows in wp_options (settings, counters, transients)
+// no longer have a consumer, so they bloat the table and risk
+// stale-cache collisions if any code path ever reads them again.
+// Gated on a version-scoped option sentinel so the sweep runs at
+// most once per install and is skipped on every subsequent boot.
+add_action('init', function (): void {
+    $sentinel = 'bcc_core_legacy_cleanup_v1';
+    if (get_option($sentinel)) {
+        return;
+    }
+
+    // Serialize across PHP workers — without the lock, two concurrent
+    // requests on a fresh deploy would both enter the DELETE path
+    // before either writes the sentinel.
+    if (!\BCC\Core\DB\AdvisoryLock::acquire($sentinel, 0)) {
+        return;
+    }
+
+    try {
+        // Re-check under lock in case another worker completed the
+        // sweep between our initial get_option() and acquire().
+        if (get_option($sentinel)) {
+            return;
+        }
+
+        // Only prefixes that were owned by the DELETED plugins are
+        // listed here. bcc_core_* and bcc_trust_* are still live.
+        // Transient twins (_transient_<key>, _transient_timeout_<key>)
+        // are included so expired transient metadata is also swept.
+        $legacyPrefixes = [
+            'bcc_disputes_',
+            'bcc_onchain_',
+            'bcc_signals_',
+            '_transient_bcc_disputes_',
+            '_transient_bcc_onchain_',
+            '_transient_bcc_signals_',
+            '_transient_timeout_bcc_disputes_',
+            '_transient_timeout_bcc_onchain_',
+            '_transient_timeout_bcc_signals_',
+        ];
+
+        $totalDeleted = 0;
+        $errors       = [];
+        foreach ($legacyPrefixes as $prefix) {
+            $deleted = \BCC\Core\Repositories\OptionCleanupRepository::deleteByPrefix($prefix);
+            if ($deleted === null) {
+                $errors[] = [
+                    'prefix' => $prefix,
+                    'error'  => \BCC\Core\Repositories\OptionCleanupRepository::lastError(),
+                ];
+                continue;
+            }
+            $totalDeleted += $deleted;
+        }
+
+        // Write the sentinel regardless of per-prefix errors — we don't
+        // want a single transient DB hiccup to loop this on every init.
+        // Errors are logged so operators can re-run manually if needed.
+        update_option($sentinel, [
+            'completed_at'  => gmdate('c'),
+            'total_deleted' => $totalDeleted,
+            'errors'        => $errors,
+        ], false);
+
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            if (!empty($errors)) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] legacy option cleanup completed with errors', [
+                    'total_deleted' => $totalDeleted,
+                    'errors'        => $errors,
+                ]);
+            } elseif ($totalDeleted > 0) {
+                \BCC\Core\Log\Logger::info('[bcc-core] legacy option cleanup', [
+                    'total_deleted' => $totalDeleted,
+                ]);
+            }
+        }
+    } finally {
+        \BCC\Core\DB\AdvisoryLock::release($sentinel);
+    }
+}, 5);
+
 // ── Rate-limit row cleanup ──────────────────────────────────────
 // Throttle's DB fallback and RateLimiter write rows to wp_options
 // that never auto-expire. This hourly cron garbage-collects expired
@@ -246,14 +329,20 @@ add_action('rest_api_init', function () {
             // ── Recalculation queue depth ────────────────────────────────
             // Resolved via RecalcQueueReadInterface so bcc-core does not
             // reach into trust-engine tables. The `source` field
-            // disambiguates "0 = no backlog" from "0 = null object
-            // because trust-engine is not wired". Dashboards MUST key
-            // alerting on source, not on pending_pages alone.
+            // disambiguates "trust-engine answered" from "null object
+            // because trust-engine is not wired". `pending_pages` is
+            // null when the queue is unreachable (either the NullObject
+            // is in use, or the real adapter's COUNT query failed) so
+            // dashboards can alert on "unknown" distinctly from 0.
             $recalcQueueReal = \BCC\Core\ServiceLocator::hasRealService(
                 \BCC\Core\Contracts\RecalcQueueReadInterface::class
             );
             $recalcPending = \BCC\Core\ServiceLocator::resolveRecalcQueueRead()->pendingCount();
-            $recalcSource  = $recalcQueueReal ? 'trust_engine' : 'unavailable';
+            if ($recalcPending === null) {
+                $recalcSource = $recalcQueueReal ? 'error' : 'unavailable';
+            } else {
+                $recalcSource = 'trust_engine';
+            }
 
             // ── Plugin-specific health (pulled via filter) ──────────────
             $pluginHealth = apply_filters('bcc_system_health', []);

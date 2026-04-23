@@ -151,6 +151,59 @@ final class Throttle
     }
 
     /**
+     * Opt-in production guard for ambiguous trusted-proxy configuration.
+     *
+     * Returns true when ALL of the following hold:
+     *   - BCC_REQUIRE_TRUSTED_PROXY_CONFIG is defined (operator opt-in), AND
+     *   - proxy-style headers (CF-Connecting-IP, X-Forwarded-For, X-Real-IP)
+     *     are present on the request, AND
+     *   - no trusted-proxy config resolved (no constant, no filter, no CF
+     *     opt-in with REMOTE_ADDR inside a CF range).
+     *
+     * In that state, getClientIp() would fall through to REMOTE_ADDR — on a
+     * proxied deployment that collapses the whole tenant base into a single
+     * shared rate-limit bucket, masking attacks behind legitimate traffic.
+     * Operators who know they're behind a proxy should either declare the
+     * proxy (BCC_TRUSTED_PROXY_IPS / bcc_trusted_proxy_ips filter / Cloudflare
+     * opt-in) or leave BCC_REQUIRE_TRUSTED_PROXY_CONFIG undefined.
+     */
+    public static function shouldDenyForProxyConfig(): bool
+    {
+        if (!defined('BCC_REQUIRE_TRUSTED_PROXY_CONFIG') || !BCC_REQUIRE_TRUSTED_PROXY_CONFIG) {
+            return false;
+        }
+
+        $hasProxyHeaders = !empty($_SERVER['HTTP_CF_CONNECTING_IP'])
+            || !empty($_SERVER['HTTP_X_FORWARDED_FOR'])
+            || !empty($_SERVER['HTTP_X_REAL_IP']);
+
+        if (!$hasProxyHeaders) {
+            return false;
+        }
+
+        if (defined('BCC_TRUSTED_PROXY_IPS') && BCC_TRUSTED_PROXY_IPS !== '') {
+            return false;
+        }
+
+        $filtered = apply_filters('bcc_trusted_proxy_ips', null);
+        if (is_array($filtered) && !empty($filtered)) {
+            return false;
+        }
+
+        $cfOptIn = (defined('BCC_BEHIND_CLOUDFLARE') && BCC_BEHIND_CLOUDFLARE)
+            || (bool) apply_filters('bcc_behind_cloudflare', false);
+
+        if ($cfOptIn) {
+            $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
+            if ($remoteAddr !== '' && self::remoteAddrIsCloudflare($remoteAddr)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Operational snapshot for health endpoints. Stable JSON shape:
      *   [
      *     'rate_limiter_ready' => bool,
@@ -238,6 +291,22 @@ final class Throttle
      */
     public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
     {
+        // Fail-closed when proxy config is ambiguous AND operator has opted
+        // in via BCC_REQUIRE_TRUSTED_PROXY_CONFIG. Without this, a site that
+        // sits behind a reverse proxy but has not declared it will resolve
+        // every request's client IP to the proxy's own address, so rate
+        // limiting buckets the whole tenant base into a shared slot. The
+        // opt-in makes the "production but unconfigured" state refuse
+        // traffic loudly instead of silently mis-bucketing it.
+        if (self::shouldDenyForProxyConfig()) {
+            self::logOnce('proxy_config_ambiguous_' . $action, static function () use ($action): void {
+                \BCC\Core\Log\Logger::error('[Throttle] BCC_REQUIRE_TRUSTED_PROXY_CONFIG set but no trusted-proxy config resolved — denying', [
+                    'action' => $action,
+                ]);
+            });
+            return false;
+        }
+
         // FAIL CLOSED when no safe backend is available. Previously this
         // function silently fell through to a wp_options-backed sliding
         // window which, under load, created severe write amplification on
