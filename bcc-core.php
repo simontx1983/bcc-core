@@ -91,6 +91,19 @@ add_action('admin_notices', function () {
 
 add_action('plugins_loaded', [\BCC\Core\ServiceLocator::class, 'freeze'], PHP_INT_MAX);
 
+// ── Logger secret pre-seed ──────────────────────────────────────
+// Logger::ensureInit() writes `bcc_log_file_secret` to wp_options on the
+// first log call.  If that first call happens inside a transaction that
+// subsequently rolls back (e.g. Logger::error from a catch block inside
+// TransactionManager::run), the secret write is rolled back with it and
+// the randomized log filename changes across requests.  Pre-seed at
+// activation so the option exists before any transactional code runs.
+register_activation_hook(__FILE__, function () {
+    if (!get_option('bcc_log_file_secret')) {
+        add_option('bcc_log_file_secret', bin2hex(random_bytes(16)), '', false);
+    }
+});
+
 // ── Cross-plugin suspension cache invalidation ─────────────────
 // Trust-engine fires `bcc_user_suspension_changed` when a user's
 // suspension status changes. This ensures Permissions picks it up
@@ -331,18 +344,26 @@ add_action('rest_api_init', function () {
             $healthy = true;
 
             // ── Check 1: Trust read service is real (not NullObject) ─
-            $trustRead = \BCC\Core\ServiceLocator::hasRealService(
+            //
+            // Cache-read-only probe (inspectReal) — NEVER call hasRealService()
+            // from this public endpoint.  hasRealService() triggers a live
+            // apply_filters() resolve on cache miss, which under probe storms
+            // amplifies to per-provider registration work on every request.
+            // An 'unknown' status (nothing resolved yet this request) is treated
+            // as 'ok' for liveness purposes — cold-start probes should not be
+            // false-positive-degraded.
+            $trustReadStatus = \BCC\Core\ServiceLocator::inspectReal(
                 \BCC\Core\Contracts\TrustReadServiceInterface::class
             );
-            $checks['trust_read'] = $trustRead ? 'ok' : 'fail';
-            if (!$trustRead) $healthy = false;
+            $checks['trust_read'] = ($trustReadStatus === 'null') ? 'fail' : 'ok';
+            if ($trustReadStatus === 'null') $healthy = false;
 
             // ── Check 2: Dispute adjudicator is real ──────────────────
-            $disputeReady = \BCC\Core\ServiceLocator::hasRealService(
+            $disputeStatus = \BCC\Core\ServiceLocator::inspectReal(
                 \BCC\Core\Contracts\DisputeAdjudicationInterface::class
             );
-            $checks['dispute_adjudicator'] = $disputeReady ? 'ok' : 'fail';
-            if (!$disputeReady) $healthy = false;
+            $checks['dispute_adjudicator'] = ($disputeStatus === 'null') ? 'fail' : 'ok';
+            if ($disputeStatus === 'null') $healthy = false;
 
             // ── Check 3: Score recalc cron freshness ─────────────────
             // Cron writes option 'bcc_trust_last_recalc_run' after each

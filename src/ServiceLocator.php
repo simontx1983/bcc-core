@@ -202,6 +202,12 @@ final class ServiceLocator
      * used to have. We now always type-check the cached value against the
      * contract's registered NullObject class before reporting a real
      * service is available.
+     *
+     * WARNING: this method may trigger apply_filters() if no provider has
+     * been resolved yet this request.  Do NOT call from public, unauthenticated
+     * endpoints — a probe storm before the cache warms up will re-invoke every
+     * provider's registration callback per request.  Use {@see inspectReal()}
+     * from public ping endpoints instead; it is strictly cache-read-only.
      */
     public static function hasRealService(string $contract): bool
     {
@@ -240,18 +246,99 @@ final class ServiceLocator
     }
 
     /**
+     * Cache-read-only service-availability probe.
+     *
+     * Returns one of:
+     *   - 'real'    — a non-null-object implementation has already been resolved.
+     *   - 'null'    — only a NullObject is currently cached.
+     *   - 'unknown' — nothing has been resolved yet for this contract.
+     *
+     * Unlike {@see hasRealService()}, this method NEVER triggers apply_filters()
+     * and NEVER populates the cache.  It is safe to call from public,
+     * unauthenticated endpoints (uptime probes, health pings) where a cold-cache
+     * resolve would otherwise amplify probe traffic into per-provider registration
+     * callbacks on every request.
+     *
+     * 'unknown' is a legitimate status — it just means no code path has needed
+     * the service yet this request.  Callers treating 'unknown' as "degraded"
+     * will false-positive during cold starts; treating it as "ok" is usually
+     * closer to correct for liveness-style probes.
+     *
+     * @param class-string $contract
+     * @return 'real'|'null'|'unknown'
+     */
+    public static function inspectReal(string $contract): string
+    {
+        $filter = self::$contractToFilter[$contract] ?? null;
+        if ($filter === null || !array_key_exists($filter, self::$cache)) {
+            return 'unknown';
+        }
+
+        $cached    = self::$cache[$filter];
+        $nullClass = self::$nullObjects[$contract] ?? null;
+
+        if ($nullClass !== null && $cached instanceof $nullClass) {
+            return 'null';
+        }
+
+        return 'real';
+    }
+
+    /**
      * Freeze the service cache after plugins_loaded.
      *
      * Once frozen, resolved real services are locked in and cannot be
      * replaced by late-registered filters. NullObject fallbacks can
      * still be promoted to real services until frozen.
      *
+     * Also runs a parity self-check on the three contract maps:
+     * {@see $allowedProviders}, {@see $nullObjects}, and
+     * {@see $contractToFilter} MUST all have exactly the same set of keys.
+     * A missing entry in any one map silently breaks resolution for that
+     * contract (rogue-provider rejection → always-NullObject, missing
+     * NullObject → LogicException on every resolve, missing filter →
+     * hasRealService always false).  Catch the drift at boot, not at first
+     * request during production.
+     *
      * Call this from the main plugin boot:
      *   add_action('plugins_loaded', [ServiceLocator::class, 'freeze'], PHP_INT_MAX);
      */
     public static function freeze(): void
     {
+        self::assertContractMapsInSync();
         self::$frozen = true;
+    }
+
+    /**
+     * Verify the three contract-keyed maps have identical key sets.
+     *
+     * Logs an ERROR for any mismatch (missing allowlist entry, missing
+     * NullObject, or missing filter name) rather than throwing, so a
+     * mis-synced map does not take the whole site down at boot.  The error
+     * log line is the signal — ops sees it and fixes the map.
+     */
+    private static function assertContractMapsInSync(): void
+    {
+        $providerKeys = array_keys(self::$allowedProviders);
+        $nullKeys     = array_keys(self::$nullObjects);
+        $filterKeys   = array_keys(self::$contractToFilter);
+
+        sort($providerKeys);
+        sort($nullKeys);
+        sort($filterKeys);
+
+        if ($providerKeys === $nullKeys && $nullKeys === $filterKeys) {
+            return;
+        }
+
+        Log\Logger::error('[ServiceLocator] Contract map key mismatch — resolution will misbehave for affected contracts', [
+            'allowlist_only' => array_values(array_diff($providerKeys, $nullKeys, $filterKeys)),
+            'null_only'      => array_values(array_diff($nullKeys, $providerKeys, $filterKeys)),
+            'filter_only'    => array_values(array_diff($filterKeys, $providerKeys, $nullKeys)),
+            'missing_from_allowlist' => array_values(array_diff(array_unique(array_merge($nullKeys, $filterKeys)), $providerKeys)),
+            'missing_from_nullobjects' => array_values(array_diff(array_unique(array_merge($providerKeys, $filterKeys)), $nullKeys)),
+            'missing_from_filters' => array_values(array_diff(array_unique(array_merge($providerKeys, $nullKeys)), $filterKeys)),
+        ]);
     }
 
     /**

@@ -61,15 +61,32 @@ class AdvisoryLock
     /**
      * Release a MySQL advisory lock previously acquired by this session.
      *
-     * Silently no-ops if the lock is not held — releasing a lock you do not
-     * own is not an error condition. Callers in `finally` blocks therefore
-     * do not need a guard.
+     * RELEASE_LOCK return values:
+     *   - 1    → lock was held by this session and is now released.
+     *   - 0    → lock exists but was not held by this session (no-op).
+     *   - NULL → lock did not exist, OR the driver errored.
+     *
+     * The 0 path is not an error — releasing a lock you do not own is
+     * normal for finally-block semantics.  The NULL path is ambiguous on
+     * MySQL: "did not exist" looks identical to "driver error" at this
+     * call site.  We log the last_error text when it is non-empty so a
+     * genuine driver failure is traceable; a clean "did not exist" NULL
+     * leaves last_error blank and stays silent.
      */
     public static function release(string $key): void
     {
         global $wpdb;
-        $wpdb->get_var(
+        $raw = $wpdb->get_var(
             $wpdb->prepare('SELECT RELEASE_LOCK(%s)', $key)
         );
+
+        if ($raw === null && !empty($wpdb->last_error)) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error('[bcc-core] AdvisoryLock::release RELEASE_LOCK errored', [
+                    'key'      => $key,
+                    'db_error' => (string) $wpdb->last_error,
+                ]);
+            }
+        }
     }
 }
