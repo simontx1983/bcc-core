@@ -9,7 +9,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Fail-safe RecalcQueueRead for when bcc-trust-engine is not active.
+ * Fail-safe RecalcQueueRead for when bcc-trust is not active.
  *
  * Returns null — the NullObject IS unreachable by definition, and
  * null lets the health endpoint surface "queue status unknown"

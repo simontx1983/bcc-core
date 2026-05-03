@@ -9,7 +9,7 @@ if (!defined('ABSPATH')) {
 /**
  * Lightweight rate-limit helper for the BCC ecosystem.
  *
- * Production requirement: EITHER the trust-engine's atomic RateLimiter OR a
+ * Production requirement: EITHER bcc-trust's atomic RateLimiter OR a
  * persistent object cache (Redis / Memcached) must be available. When neither
  * is present, allow() FAILS CLOSED for every action at the isReady() gate.
  * A previous release carried a wp_options-backed sliding-window fallback;
@@ -28,7 +28,7 @@ final class Throttle
      * on a mutating endpoint.)
      */
     private const CRITICAL_ACTIONS = [
-        // bcc-trust / bcc-disputes mutating actions
+        // bcc-trust mutating actions (votes, disputes, wallet verifies)
         'vote', 'endorse', 'wallet_verify', 'report',
         'flag', 'verify', 'report_user',
         'dispute_submit', 'panel_vote',
@@ -136,7 +136,7 @@ final class Throttle
      * Whether a safe rate-limiter backend is available.
      *
      * Returns true when EITHER:
-     *  - the trust-engine's atomic RateLimiter class is loaded, OR
+     *  - bcc-trust's atomic RateLimiter class is loaded, OR
      *  - WordPress is using a persistent object cache (Redis / Memcached).
      *
      * When false, allow() returns false for every action (fail-closed).
@@ -146,7 +146,12 @@ final class Throttle
      */
     public static function isReady(): bool
     {
-        return class_exists('\\BCC\\Trust\\Security\\RateLimiter')
+        // Post-M1 the canonical namespace is BCC\Trust\Core\Security; the
+        // earlier BCC\Trust\Security alias no longer exists. Without this
+        // fix, isReady() silently downgrades to the wp_using_ext_object_cache
+        // branch alone, which masks the bcc-trust RateLimiter being
+        // available as a backend.
+        return class_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter')
             || wp_using_ext_object_cache();
     }
 
@@ -215,7 +220,7 @@ final class Throttle
      */
     public static function health(): array
     {
-        if (class_exists('\\BCC\\Trust\\Security\\RateLimiter')) {
+        if (class_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter')) {
             $backend = 'trust_engine';
         } elseif (wp_using_ext_object_cache()) {
             $backend = 'object_cache';
@@ -312,7 +317,7 @@ final class Throttle
         // window which, under load, created severe write amplification on
         // the most-contended WP table and turned abuse protection into a
         // site-wide slowdown vector. Operators MUST provision Redis (or
-        // the trust-engine RateLimiter) — the bcc-core admin notice flags
+        // the bcc-trust RateLimiter) — the bcc-core admin notice flags
         // the missing backend so this deny-all state is loud, not silent.
         // Short-circuit if another worker has already recorded a cache failure.
         // Cheap — static per-request after the first call.
@@ -335,8 +340,19 @@ final class Throttle
             // Normalize to /24 (IPv4) or /64 (IPv6) subnet to bound cardinality.
             // A /24 covers 256 IPs → one bucket per household/office, preventing
             // unbounded DB growth from rotating IPs (mobile, VPN, Tor).
+            //
+            // CROSS-PLUGIN BOUNDARY: bcc-trust's IpResolver knows about
+            // Cloudflare / trusted-proxy / X-Forwarded-For headers and
+            // produces a more accurate client IP than bcc-core's local
+            // fallback. Today bcc-trust is always present alongside
+            // bcc-core in production, but this class_exists() guard is
+            // intentional: it preserves the architectural seam so
+            // bcc-core can theoretically run standalone (test fixtures,
+            // a future plugin split). Do NOT delete without first
+            // committing to "bcc-core REQUIRES bcc-trust" as a hard
+            // dep — today bcc-trust requires bcc-core, not vice versa.
             $ip  = class_exists('\\BCC\\Trust\\Core\\Security\\IpResolver')
-                ? \BCC\Trust\Core\Security\IpResolver::resolve()
+                ? \BCC\Trust\Core\Security\IpResolver::getClientIp()
                 : self::getClientIp();
             $subnet = self::normalizeIpToSubnet($ip);
             $key = "bcc_throttle_{$action}_ip_" . md5($subnet);
@@ -420,7 +436,7 @@ final class Throttle
         }
 
         // Unreachable by construction: isReady() returns true iff the
-        // trust-engine RateLimiter class is loaded OR WordPress is using a
+        // bcc-trust RateLimiter class is loaded OR WordPress is using a
         // persistent object cache, and both paths above return before this
         // point. A previous release shipped a wp_options-backed sliding-
         // window fallback here — that fallback caused write amplification on

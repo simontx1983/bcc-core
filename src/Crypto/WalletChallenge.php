@@ -2,8 +2,8 @@
 /**
  * Shared wallet challenge (nonce) generation.
  *
- * Both trust-engine (REST) and onchain-signals (AJAX) controllers should
- * use this class to generate the signing message so that:
+ * Both bcc-trust's Core (REST) and Onchain (AJAX) controllers use this
+ * class to generate the signing message so that:
  *   1. The message format is identical across entry points
  *   2. Cosmos ADR-036 signing works consistently
  *   3. Changes to the message format happen in one place

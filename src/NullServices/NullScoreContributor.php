@@ -9,10 +9,10 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * No-op implementation returned when bcc-trust-engine is not active.
+ * No-op implementation returned when bcc-trust is not active.
  *
  * Returns false so callers know the bonus was NOT persisted and can
- * queue a retry (e.g. bcc-onchain-signals bonus retry mechanism).
+ * queue a retry (e.g. bcc-trust's Onchain bonus retry mechanism).
  */
 final class NullScoreContributor implements ScoreContributorInterface
 {

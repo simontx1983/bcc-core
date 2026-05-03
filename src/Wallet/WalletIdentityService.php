@@ -44,7 +44,7 @@ final class WalletIdentityService
      * @param string $chainSlug     Chain slug (e.g. 'ethereum', 'cosmos').
      * @param int    $chainId       Numeric chain ID from bcc_chains table.
      * @param string $walletAddress Wallet public address.
-     * @return array{nonce: string, message: string, chain_id: int}
+     * @return array{nonce: string, message: string, chain_slug: string, chain_id: int, wallet_address: string, expires_at: int}
      */
     public static function generateChallenge(
         int $userId,
@@ -126,6 +126,94 @@ final class WalletIdentityService
         return $challenge;
     }
 
+    // ── Anonymous challenge (wallet-as-credential auth) ─────────────────
+
+    /**
+     * Generate a wallet-signing challenge for an unauthenticated caller.
+     *
+     * Used by /auth/wallet-nonce — the entry point for both wallet-login
+     * (existing user, wallet already linked) and wallet-signup (new user,
+     * wallet about to be linked). No userId is bound to the challenge —
+     * the address itself is the namespace, since only the address-holder
+     * can produce a signature.
+     *
+     * Storage keyspace is disjoint from the authed challenges
+     * (`bcc_wc_anon_*` vs. `bcc_wc_{userId}_*`) so an anonymous challenge
+     * cannot be replayed against the authed wallet-link path or vice
+     * versa. Same TTL + transient backing as the authed flow.
+     *
+     * @return array{nonce: string, message: string, chain_slug: string, chain_id: int, wallet_address: string, expires_at: int}
+     */
+    public static function generateAnonymousChallenge(
+        string $chainSlug,
+        int $chainId,
+        string $walletAddress
+    ): array {
+        $challenge = WalletChallenge::generate($chainSlug);
+
+        $payload = [
+            'nonce'          => $challenge['nonce'],
+            'message'        => $challenge['message'],
+            'chain_slug'     => $chainSlug,
+            'chain_id'       => $chainId,
+            'wallet_address' => strtolower($walletAddress),
+            'expires_at'     => time() + self::CHALLENGE_TTL,
+        ];
+
+        $key = self::anonymousChallengeKey($walletAddress);
+        ChallengeRepository::store($key, $payload, self::CHALLENGE_TTL);
+
+        return $payload;
+    }
+
+    /**
+     * Atomically retrieve and consume an anonymous challenge.
+     *
+     * Mirrors consumeChallenge() but reads the anon keyspace. Returns
+     * null when the challenge doesn't exist, has expired, or was already
+     * consumed by a concurrent caller.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function consumeAnonymousChallenge(string $walletAddress): ?array
+    {
+        $key = self::anonymousChallengeKey($walletAddress);
+
+        $challenge = ChallengeRepository::consume($key);
+        if ($challenge === null) {
+            return null;
+        }
+
+        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
+            return null;
+        }
+
+        return $challenge;
+    }
+
+    /**
+     * Non-destructive view of an anonymous challenge — used by handlers
+     * that need to resolve chain metadata before handing off to the
+     * verify path that performs the atomic consume.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function peekAnonymousChallenge(string $walletAddress): ?array
+    {
+        $key = self::anonymousChallengeKey($walletAddress);
+
+        $challenge = get_transient($key);
+        if (!is_array($challenge)) {
+            return null;
+        }
+
+        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
+            return null;
+        }
+
+        return $challenge;
+    }
+
     // ── Verification ────────────────────────────────────────────────────
 
     /**
@@ -139,8 +227,8 @@ final class WalletIdentityService
      * closes the footgun where a future call-site could pass a
      * user-supplied `$_POST['message']` and bypass nonce enforcement.
      *
-     * On success, fires `bcc_wallet_verified` so listeners (trust-engine
-     * scoring, onchain-signals seeding) can react.
+     * On success, fires `bcc_wallet_verified` so listeners (bcc-trust
+     * Core scoring, Onchain seeding) can react.
      *
      * @param WalletVerificationRequest $req All verification parameters.
      * @return array{success: bool, wallet_link_id: int, message: string}
@@ -233,8 +321,8 @@ final class WalletIdentityService
 
         // 4. Fire the canonical domain event.
         //    Listeners:
-        //    - trust-engine CronService: creates bcc_onchain_signals scoring row
-        //    - onchain-signals WalletSeedService: populates on-chain data
+        //    - bcc-trust Core CronService: creates bcc_onchain_signals scoring row
+        //    - bcc-trust Onchain WalletSeedService: populates on-chain data
         do_action('bcc_wallet_verified', $req->userId, $req->chainSlug, $req->walletAddress);
 
         return [
@@ -290,5 +378,20 @@ final class WalletIdentityService
     private static function challengeKey(int $userId, string $address): string
     {
         return 'bcc_wc_' . $userId . '_' . md5(strtolower($address));
+    }
+
+    /**
+     * Build the transient key for an anonymous wallet challenge.
+     *
+     * Format: bcc_wc_anon_{addressHash}
+     * Disjoint from challengeKey() (which prefixes a userId) so an anon
+     * challenge can never be replayed against the authed wallet-link
+     * path, and vice-versa. The address itself is the only namespace —
+     * since only the address-holder can produce a valid signature, this
+     * is sufficient.
+     */
+    private static function anonymousChallengeKey(string $address): string
+    {
+        return 'bcc_wc_anon_' . md5(strtolower($address));
     }
 }

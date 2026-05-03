@@ -33,7 +33,7 @@ final class Permissions
      * When the trust engine is unavailable, the NullTrustReadService
      * returns isSuspended()=true (fail-closed). Admins with
      * manage_options capability bypass this gate BY DEFAULT so they
-     * can still administer the site during trust-engine downtime.
+     * can still administer the site during bcc-trust downtime.
      *
      * $allowAdminBypass:
      *   - true  (default) — admins always pass. Use for admin screens
@@ -72,7 +72,7 @@ final class Permissions
         // is ambiguous — and `false` is exactly the value we store for the
         // common case (user is NOT suspended). The previous `$cached !== false`
         // check meant non-suspended users NEVER hit the cache, forcing every
-        // REST permission_callback to re-query the trust engine.
+        // REST permission_callback to re-query bcc-trust.
         $found  = false;
         $cached = wp_cache_get($cacheKey, self::CACHE_GROUP, false, $found);
         if ($found) {
@@ -83,7 +83,7 @@ final class Permissions
             return !$isSuspendedCached;
         }
 
-        // Delegates to the trust-engine implementation (or NullTrustReadService
+        // Delegates to the bcc-trust implementation (or NullTrustReadService
         // which returns true — fail-closed) — no concrete coupling required.
         $isSuspended = ServiceLocator::resolveTrustReadService()->isSuspended($user_id);
         wp_cache_set($cacheKey, $isSuspended, self::CACHE_GROUP, self::CACHE_TTL);

@@ -9,8 +9,8 @@ if (!defined('ABSPATH')) {
 /**
  * Write access to wallet-derived trust scoring data.
  *
- * Implemented by bcc-onchain-signals (writes to bcc_onchain_signals).
- * Used by bcc-trust-engine to persist trust_boost, fraud_reduction, and
+ * Implemented by bcc-trust's Onchain domain (writes to bcc_onchain_signals).
+ * Used by bcc-trust's Core domain to persist trust_boost, fraud_reduction, and
  * role after blockchain RPC role checks — without direct cross-plugin
  * table access.
  */

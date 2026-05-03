@@ -9,9 +9,16 @@ if (!defined('ABSPATH')) {
 /**
  * Lightweight logger for the BCC ecosystem.
  *
- * Writes to a dedicated `bcc.log` file inside `wp-content/` so entries
- * don't get lost in the generic `debug.log`.  Falls back to `error_log()`
- * if the file is not writable.
+ * Writes to `bcc-{secret}.log` in a `bcc-logs/` directory, with a
+ * randomized filename so the log cannot be guessed via URL on servers
+ * that ignore `.htaccess` (e.g., Nginx). Path resolution order:
+ *   1. `BCC_LOG_DIR` constant override (wp-config.php)
+ *   2. `dirname(ABSPATH) + '/bcc-logs'` — preferred, outside webroot
+ *   3. `WP_CONTENT_DIR + '/bcc-logs'` — fallback when (2) is not writable
+ *
+ * The directory is hardened with `.htaccess` (Apache) and the
+ * randomized filename + `index.php` silence file (Nginx). Logs rotate
+ * at 5 MB. Falls back to `error_log()` if the file write fails.
  */
 final class Logger
 {

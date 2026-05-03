@@ -9,11 +9,11 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * No-op implementation returned when bcc-trust-engine is not active.
+ * No-op implementation returned when bcc-trust is not active.
  *
  * Fails CLOSED outside the one post type the platform actually uses for
  * page ownership (peepso-page). The prior implementation returned
- * post_author for ANY post type — meaning during the trust-engine
+ * post_author for ANY post type — meaning during the bcc-trust
  * null-fallback window, any WP author could pass Permissions::owns_page()
  * for any post they authored (regular posts, attachments, arbitrary
  * plugin CPTs) and reach page-owner-gated REST routes (submit-dispute,

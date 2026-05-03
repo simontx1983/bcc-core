@@ -7,11 +7,11 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Read-only access to wallet link data (bcc-onchain-signals).
+ * Read-only access to wallet link data (bcc-trust's Onchain domain).
  *
- * Bridges wallet data stored in bcc_wallet_links so that trust-engine
- * can include AJAX-verified wallets in WalletVerificationReadInterface
- * responses without querying another plugin's tables directly.
+ * Bridges wallet data stored in bcc_wallet_links so callers can
+ * verify a user's linked wallets without reaching across domains
+ * into another plugin's tables directly.
  */
 interface WalletLinkReadInterface
 {

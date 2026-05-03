@@ -10,8 +10,8 @@ if (!defined('ABSPATH')) {
  * Read-only contract for retrieving on-chain data across plugin boundaries.
  *
  * Consumer plugins (e.g. peepso-integration) call this interface instead of
- * directly accessing bcc-onchain-signals repositories. The onchain-signals
- * plugin provides the implementation.
+ * directly accessing bcc-trust's Onchain domain repositories. bcc-trust
+ * provides the implementation.
  */
 interface OnchainDataReadInterface
 {

@@ -70,9 +70,9 @@ interface TrustReadServiceInterface
     /**
      * Whether the given user is currently suspended.
      *
-     * Implementations should query the trust-engine user info table.
+     * Implementations should query bcc-trust's user info table.
      * The NullTrustReadService returns true (suspended) as a fail-closed
-     * safety default when trust-engine is inactive. Admins bypass this
+     * safety default when bcc-trust is inactive. Admins bypass this
      * via Permissions::is_not_suspended().
      */
     public function isSuspended(int $userId): bool;
@@ -85,8 +85,9 @@ interface TrustReadServiceInterface
      *
      * Implementations MUST fail-closed: return false when the vote is
      * missing, inactive, or when the trust engine is unavailable. Used by
-     * bcc-disputes to prevent creating a dispute against a vote that was
-     * soft-deleted between the controller read and the repository insert.
+     * bcc-trust's Disputes domain to prevent creating a dispute against
+     * a vote that was soft-deleted between the controller read and the
+     * repository insert.
      */
     public function lockActiveVoteForDispute(int $voteId): bool;
 }

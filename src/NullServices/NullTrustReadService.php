@@ -9,7 +9,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Fail-safe implementation returned when bcc-trust-engine is not active.
+ * Fail-safe implementation returned when bcc-trust is not active.
  *
  * Data queries return empty results (no false data).
  * Access gates return RESTRICTIVE defaults (fail-closed) so suspended

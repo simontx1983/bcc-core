@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) {
  * Read-only contract for retrieving trending page data across plugin boundaries.
  *
  * Consumer plugins (e.g. bcc-search) call this interface instead of directly
- * accessing bcc-trust-engine's TableRegistry and read model tables.
+ * accessing bcc-trust's TableRegistry and read model tables.
  */
 interface TrendingDataInterface
 {

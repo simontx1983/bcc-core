@@ -7,14 +7,14 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Read-side contract for the trust-engine score-recalculation queue.
+ * Read-side contract for bcc-trust's score-recalculation queue.
  *
  * bcc-core exposes an operational health view that needs to know how
  * many score rows are still pending recalculation. The implementation
- * lives in bcc-trust-engine; bcc-core must not reach into trust-engine
- * tables directly. Resolved via ServiceLocator; the NullObject returns
- * null so the health endpoint can distinguish "queue empty" (0) from
- * "queue unreachable" (null) when trust-engine is unavailable or its
+ * lives in bcc-trust; bcc-core must not reach into bcc-trust tables
+ * directly. Resolved via ServiceLocator; the NullObject returns null
+ * so the health endpoint can distinguish "queue empty" (0) from
+ * "queue unreachable" (null) when bcc-trust is unavailable or its
  * underlying query fails.
  */
 interface RecalcQueueReadInterface

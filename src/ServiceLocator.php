@@ -7,14 +7,12 @@ use BCC\Core\Contracts\RecalcQueueReadInterface;
 use BCC\Core\Contracts\ScoreContributorInterface;
 use BCC\Core\Contracts\ScoreReadServiceInterface;
 use BCC\Core\Contracts\PageOwnerResolverInterface;
-use BCC\Core\Contracts\TrustHeaderDataInterface;
 use BCC\Core\Contracts\TrustReadServiceInterface;
 use BCC\Core\Contracts\WalletLinkReadInterface;
 use BCC\Core\Contracts\WalletLinkWriteInterface;
 use BCC\Core\Contracts\OnchainDataReadInterface;
 use BCC\Core\Contracts\TrendingDataInterface;
 use BCC\Core\Contracts\WalletSignalWriteInterface;
-use BCC\Core\Contracts\WalletVerificationReadInterface;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -56,9 +54,7 @@ final class ServiceLocator
         TrustReadServiceInterface::class       => ['BCC\\Trust\\Core\\Application\\TrustReadService'],
         ScoreContributorInterface::class       => ['BCC\\Trust\\Core\\Application\\ScoreContributorService'],
         ScoreReadServiceInterface::class       => ['BCC\\Trust\\Core\\Application\\ScoreReadService'],
-        TrustHeaderDataInterface::class        => ['BCC\\Trust\\Core\\Integration\\PeepSoIntegration'],
         PageOwnerResolverInterface::class      => ['BCC\\Trust\\Core\\Services\\PageOwnerResolver'],
-        WalletVerificationReadInterface::class => ['BCC\\Trust\\Core\\Application\\WalletVerificationReadService'],
         WalletLinkReadInterface::class         => ['BCC\\Trust\\Onchain\\Services\\WalletLinkReadService'],
         WalletLinkWriteInterface::class        => ['BCC\\Trust\\Onchain\\Services\\WalletLinkWriteService'],
         OnchainDataReadInterface::class        => ['BCC\\Trust\\Onchain\\Services\\OnchainDataReadService'],
@@ -82,9 +78,7 @@ final class ServiceLocator
         TrustReadServiceInterface::class       => \BCC\Core\NullServices\NullTrustReadService::class,
         ScoreContributorInterface::class       => \BCC\Core\NullServices\NullScoreContributor::class,
         ScoreReadServiceInterface::class       => \BCC\Core\NullServices\NullScoreReadService::class,
-        TrustHeaderDataInterface::class        => \BCC\Core\NullServices\NullTrustHeaderData::class,
         PageOwnerResolverInterface::class      => \BCC\Core\NullServices\NullPageOwnerResolver::class,
-        WalletVerificationReadInterface::class => \BCC\Core\NullServices\NullWalletVerificationRead::class,
         WalletLinkReadInterface::class         => \BCC\Core\NullServices\NullWalletLinkRead::class,
         WalletLinkWriteInterface::class        => \BCC\Core\NullServices\NullWalletLinkWrite::class,
         WalletSignalWriteInterface::class      => \BCC\Core\NullServices\NullWalletSignalWrite::class,
@@ -113,19 +107,9 @@ final class ServiceLocator
         return self::resolveOnce('bcc.resolve.score_read_service', ScoreReadServiceInterface::class);
     }
 
-    public static function resolveTrustHeaderData(): TrustHeaderDataInterface
-    {
-        return self::resolveOnce('bcc.resolve.trust_header_data', TrustHeaderDataInterface::class);
-    }
-
     public static function resolvePageOwnerResolver(): PageOwnerResolverInterface
     {
         return self::resolveOnce('bcc.resolve.page_owner_resolver', PageOwnerResolverInterface::class);
-    }
-
-    public static function resolveWalletVerificationRead(): WalletVerificationReadInterface
-    {
-        return self::resolveOnce('bcc.resolve.wallet_verification_read', WalletVerificationReadInterface::class);
     }
 
     public static function resolveWalletLinkRead(): WalletLinkReadInterface
@@ -172,9 +156,7 @@ final class ServiceLocator
         TrustReadServiceInterface::class       => 'bcc.resolve.trust_read_service',
         ScoreContributorInterface::class       => 'bcc.resolve.score_contributor',
         ScoreReadServiceInterface::class       => 'bcc.resolve.score_read_service',
-        TrustHeaderDataInterface::class        => 'bcc.resolve.trust_header_data',
         PageOwnerResolverInterface::class      => 'bcc.resolve.page_owner_resolver',
-        WalletVerificationReadInterface::class => 'bcc.resolve.wallet_verification_read',
         WalletLinkReadInterface::class         => 'bcc.resolve.wallet_link_read',
         WalletLinkWriteInterface::class        => 'bcc.resolve.wallet_link_write',
         WalletSignalWriteInterface::class      => 'bcc.resolve.wallet_signal_write',

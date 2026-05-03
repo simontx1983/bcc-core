@@ -2,18 +2,16 @@
 /**
  * ChallengeRepository — transactional storage for wallet signing challenges.
  *
- * Challenges are stored as WordPress transients. WordPress writes those to
- * the persistent object cache (Redis/Memcached) when one is active — in
- * which case NO wp_options row ever exists — or to wp_options otherwise.
- * The consume path therefore needs two strategies:
- *
- *   - Object-cache path: wp_cache_add() as an atomic claim token so only
- *     one concurrent worker may read+delete the transient. Losers of the
- *     race get null.
- *   - Database path: SELECT … FOR UPDATE + DELETE inside a transaction.
- *
- * The two paths share the same public API so WalletIdentityService never
- * has to branch on the backend.
+ * Challenges are written directly to wp_options (bypassing the WordPress
+ * transient API's object-cache routing) so consume() can rely on a single
+ * atomic primitive — SELECT … FOR UPDATE + DELETE inside a transaction —
+ * regardless of whether a persistent object cache is configured. The
+ * earlier two-strategy design used wp_cache_add() as a claim token under
+ * an external object cache; that primitive is non-atomic across processes
+ * on backends like LiteSpeed Object Cache (its add() only checks the
+ * request-local cache array), allowing the same nonce to be consumed
+ * twice. The DB-only path closes that hole at the cost of one extra
+ * round-trip when a fast cache backend was previously serving the read.
  *
  * @package BCC\Core\Wallet
  */
@@ -26,14 +24,14 @@ if (!defined('ABSPATH')) {
 
 final class ChallengeRepository
 {
-    /** wp_cache group used for the claim token (separate from transients group). */
-    private const CLAIM_CACHE_GROUP = 'bcc_wc_claim';
-
-    /** Claim-token TTL — long enough to cover one consume, short enough to self-heal on crash. */
-    private const CLAIM_TTL = 10;
-
     /**
-     * Store a challenge payload as a WordPress transient.
+     * Store a challenge payload as a wp_options row using the WordPress
+     * transient layout (`_transient_<key>` + `_transient_timeout_<key>`).
+     *
+     * Writes go to wp_options directly so that a configured object cache
+     * does not shadow the row that consume() will read with
+     * SELECT … FOR UPDATE. The transient layout is preserved so future
+     * GC paths (WP core cleanup, bcc-core janitors) keep working.
      *
      * @param string $key     Transient key (without the `_transient_` prefix).
      * @param array<string, mixed> $payload Challenge data to store.
@@ -41,75 +39,55 @@ final class ChallengeRepository
      */
     public static function store(string $key, array $payload, int $ttl): void
     {
-        set_transient($key, $payload, $ttl);
+        global $wpdb;
+
+        $optionName = '_transient_' . $key;
+        $timeoutKey = '_transient_timeout_' . $key;
+        $expiresAt  = time() + $ttl;
+        $serialized = maybe_serialize($payload);
+
+        // Direct INSERT … ON DUPLICATE KEY UPDATE bypasses set_transient()'s
+        // cache routing so the same row can be read with SELECT … FOR UPDATE
+        // by consume() under any object-cache configuration.
+        $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
+             VALUES (%s, %s, 'no')
+             ON DUPLICATE KEY UPDATE option_value = VALUES(option_value), autoload = 'no'",
+            $optionName,
+            $serialized
+        ));
+        $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
+             VALUES (%s, %s, 'no')
+             ON DUPLICATE KEY UPDATE option_value = VALUES(option_value), autoload = 'no'",
+            $timeoutKey,
+            (string) $expiresAt
+        ));
+
+        // Best-effort: evict any cached transient values left from earlier
+        // (cache-routed) writes so a stale cache entry cannot shadow the
+        // new row on the next read.
+        if (function_exists('wp_cache_delete')) {
+            wp_cache_delete($key, 'transient');
+            wp_cache_delete($optionName, 'options');
+            wp_cache_delete($timeoutKey, 'options');
+        }
     }
 
     /**
      * Atomically retrieve and delete a challenge.
      *
-     * Dispatches to the object-cache-backed or DB-backed strategy based on
-     * whether WordPress is currently using a persistent object cache.
-     *
-     * Both strategies guarantee at-most-one consumer: concurrent callers
-     * for the same key either receive the challenge (winner) or null
-     * (loser / missing / malformed).
+     * Always uses the DB-backed strategy: SELECT … FOR UPDATE + DELETE
+     * inside a transaction. This guarantees at-most-one consumer
+     * (concurrent callers for the same key either receive the challenge
+     * or null) regardless of whether an external object cache is active.
      *
      * @param string $key Transient key (without the `_transient_` prefix).
      * @return array<string, mixed>|null The deserialized challenge, or null.
      */
     public static function consume(string $key): ?array
     {
-        // When a persistent object cache is active, set_transient() stored
-        // the value in that cache — NOT in wp_options. Querying wp_options
-        // would always return null, so we must consume through the cache.
-        if (wp_using_ext_object_cache()) {
-            return self::consumeFromCache($key);
-        }
-
         return self::consumeFromDatabase($key);
-    }
-
-    /**
-     * Object-cache consume: use wp_cache_add as an atomic claim token so
-     * only one concurrent worker reads + deletes the transient. The claim
-     * token auto-expires in CLAIM_TTL seconds so a crashed worker cannot
-     * permanently wedge a challenge.
-     *
-     * @return array<string, mixed>|null
-     */
-    private static function consumeFromCache(string $key): ?array
-    {
-        $claimKey = 'claim_' . $key;
-
-        // Atomic: only one worker wins the add. wp_cache_add returns false
-        // if the key already exists OR if the backend is unreachable — in
-        // either case the caller must treat the challenge as unconsumable
-        // for this request (fail-closed under cache failure).
-        if (!wp_cache_add($claimKey, 1, self::CLAIM_CACHE_GROUP, self::CLAIM_TTL)) {
-            return null;
-        }
-
-        try {
-            $value = get_transient($key);
-            if (!is_array($value)) {
-                // Missing, expired, or corrupted — delete to purge any stale
-                // residue and return null.
-                delete_transient($key);
-                return null;
-            }
-
-            // Delete BEFORE returning so a concurrent peek() cannot observe
-            // the consumed challenge. delete_transient is idempotent.
-            delete_transient($key);
-
-            return $value;
-        } finally {
-            // Release the claim token so the key is reusable after a
-            // legitimate re-generation. Without this the user would have
-            // to wait CLAIM_TTL seconds before a new challenge could be
-            // consumed for the same wallet.
-            wp_cache_delete($claimKey, self::CLAIM_CACHE_GROUP);
-        }
     }
 
     /**

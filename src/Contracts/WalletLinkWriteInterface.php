@@ -9,8 +9,9 @@ if (!defined('ABSPATH')) {
 /**
  * Write access to the canonical wallet link store (bcc_wallet_links).
  *
- * Used by trust-engine to write wallet records to onchain-signals' table
- * via contract instead of direct cross-plugin DB access.
+ * Used by bcc-trust's Core domain to write wallet records to the
+ * bcc_wallet_links table (owned by bcc-trust's Onchain domain) via
+ * contract instead of direct cross-domain DB access.
  */
 interface WalletLinkWriteInterface
 {

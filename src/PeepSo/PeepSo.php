@@ -12,8 +12,8 @@ if (!defined('ABSPATH')) {
  * Adapter for PeepSo page data.
  *
  * Resolves page ownership via the PageOwnerResolverInterface contract
- * (provided by bcc-trust-engine).  Falls back to WP post author if
- * no resolver is registered.
+ * (provided by bcc-trust). Falls back to WP post author if no resolver
+ * is registered.
  */
 final class PeepSo
 {
@@ -40,20 +40,25 @@ final class PeepSo
             return self::$cache[$page_id] = ($cached ?: null);
         }
 
-        // Stampede lock: wp_cache_add is atomic — only one process wins.
-        // Losers return null for this request rather than piling onto the DB.
-        $lock_key = $cache_key . '_lock';
-        if (!\wp_cache_add($lock_key, 1, self::CACHE_GROUP, 5)) {
+        // Stampede lock: MySQL GET_LOCK is atomic across all DB sessions
+        // and auto-releases on connection close, so a crashed worker
+        // cannot leave a stale lock. Losers return null for this request
+        // rather than piling onto the DB.
+        $lock_key = 'bcc_po_' . $page_id;
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($lock_key, 0)) {
             return self::$cache[$page_id] = null;
         }
 
-        $resolver = ServiceLocator::resolvePageOwnerResolver();
-        $owner    = $resolver->getPageOwner($page_id);
-        $result   = $owner ?: null;
+        try {
+            $resolver = ServiceLocator::resolvePageOwnerResolver();
+            $owner    = $resolver->getPageOwner($page_id);
+            $result   = $owner ?: null;
 
-        wp_cache_set($cache_key, $result ?? 0, self::CACHE_GROUP, self::CACHE_TTL);
-        wp_cache_delete($lock_key, self::CACHE_GROUP);
+            wp_cache_set($cache_key, $result ?? 0, self::CACHE_GROUP, self::CACHE_TTL);
 
-        return self::$cache[$page_id] = $result;
+            return self::$cache[$page_id] = $result;
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($lock_key);
+        }
     }
 }

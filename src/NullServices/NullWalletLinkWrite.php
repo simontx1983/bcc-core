@@ -9,7 +9,7 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * No-op implementation returned when bcc-onchain-signals is not active.
+ * No-op implementation returned when bcc-trust is not active.
  */
 final class NullWalletLinkWrite implements WalletLinkWriteInterface
 {
