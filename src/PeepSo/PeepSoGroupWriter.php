@@ -12,12 +12,21 @@
  * dispatcher) works identically whether the membership change came
  * from the PeepSo UI or from BCC's REST endpoint.
  *
- * V1 scope: open Locals only — `join()` calls `member_join()` directly
- * and assumes the group accepts public membership. Closed-group join
- * requests (`pending_admin` status) are deferred; the V1 plan §E3
- * naming convention treats Locals as open by design. Calling join()
- * against a non-existent or closed group is the caller's problem;
- * this wrapper does no group-policy enforcement.
+ * Privacy semantics: `PeepSoGroupUser::member_join` writes
+ * `gm_user_status = 'member'` unconditionally — it does NOT branch on
+ * `is_closed` / `is_secret`. The `pending_admin` state is produced
+ * only by PeepSo's frontend AJAX layer (`PeepSoGroupUserAjax::join_request`,
+ * which calls `member_modify('pending_admin')` after `member_join`).
+ * This wrapper is the trusted-backend door — it bypasses PeepSo's UI
+ * gating, which is exactly what BCC's own server-side gates (Locals
+ * geofence, NFT-holder gate) need.
+ *
+ * Counter consistency: PeepSo's group-header template renders the
+ * `peepso_group_members_count` post meta, which is recomputed by
+ * `PeepSoGroupUsers::update_members_count()`. Member_join itself does
+ * not touch that meta — only the AJAX caller does. We mirror the AJAX
+ * order (member_join → update_members_count → do_action) so PeepSo's
+ * frontend stays in sync with backend writes.
  *
  * @package BCC\Core\PeepSo
  * @since V1 (2026-04, Locals join/leave)
@@ -50,12 +59,19 @@ final class PeepSoGroupWriter
         if ($userId <= 0 || $groupId <= 0) {
             return false;
         }
-        if (!class_exists('PeepSoGroupUser')) {
+        if (!class_exists('PeepSoGroupUser') || !class_exists('PeepSoGroupUsers')) {
             return false;
         }
 
         $member = new \PeepSoGroupUser($groupId, $userId);
         $member->member_join();
+
+        // Recompute PeepSo's `peepso_group_members_count` post meta. Without
+        // this, the group-header template (group-header.php) renders a stale
+        // count whenever a join goes through this wrapper rather than PeepSo's
+        // AJAX endpoint. Mirrors groupuserajax.php's update_members_count()
+        // call placed between member_join() and the do_action() below.
+        (new \PeepSoGroupUsers($groupId))->update_members_count();
 
         // Mirror PeepSo's AJAX layer (peepso-groups/classes/api/groupuserajax.php)
         // — downstream subscribers expect this hook to fire on join.
@@ -84,8 +100,23 @@ final class PeepSoGroupWriter
             return false;
         }
 
+        // Refuse to remove the owner — PeepSo's member_leave is
+        // unconditional on gm_user_status (does a raw DELETE on
+        // (user_id, group_id)) so without this guard we could leave a
+        // group ownerless, which PeepSo treats as broken state. Admins
+        // who legitimately want to delete a group should do it through
+        // PeepSo's group-delete flow, not by removing the owner row.
+        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus($userId, $groupId);
+        if ($status === 'member_owner') {
+            return false;
+        }
+
         $member = new \PeepSoGroupUser($groupId, $userId);
         $member->member_leave();
+        // PeepSo's member_leave() already calls
+        // PeepSoGroupUsers::update_members_count() internally, so we
+        // do NOT duplicate the call here (unlike join(), where
+        // member_join() does not refresh the counter).
 
         // Mirror PeepSo's AJAX leave path so notifications / activity
         // subscribers see the same event whether the user left from

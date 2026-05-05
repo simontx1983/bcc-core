@@ -272,6 +272,165 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * Membership status row for a single (user, group). Returns the
+     * raw `gm_user_status` enum value (`member`, `member_owner`,
+     * `member_manager`, `member_moderator`, `member_readonly`,
+     * `pending_user`, `pending_admin`, `banned`, `block_invites`) or
+     * null if the user has no row in this group.
+     *
+     * Used by the leave path to refuse owner removal — PeepSo's
+     * member_leave is unconditional on status, so the caller must
+     * gate the call.
+     */
+    public static function getMembershipStatus(int $userId, int $groupId): ?string
+    {
+        if ($userId <= 0 || $groupId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $row = $wpdb->get_var($wpdb->prepare(
+            "SELECT gm_user_status
+               FROM {$members}
+              WHERE gm_user_id  = %d
+                AND gm_group_id = %d
+              LIMIT 1",
+            $userId,
+            $groupId
+        ));
+
+        return $row !== null ? (string) $row : null;
+    }
+
+    /**
+     * IDs of all browsable peepso-groups — published, post_type =
+     * 'peepso-group', not `is_secret`. Drives the discovery endpoint.
+     *
+     * Closed groups ARE included: per the plan, a non-member sees that
+     * the group exists (encourages buying in for NFT-gated cases) but
+     * PeepSo's privacy keeps content private. Secret groups stay hidden
+     * from anyone who isn't already a member.
+     *
+     * @return list<int>
+     */
+    public static function listBrowsableGroupIds(int $limit = 500): array
+    {
+        global $wpdb;
+
+        // peepso_group_privacy = 2 is PRIVACY_SECRET; exclude.
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT p.ID
+               FROM {$wpdb->posts} p
+          LEFT JOIN {$wpdb->postmeta} pm
+                    ON pm.post_id  = p.ID
+                   AND pm.meta_key = %s
+              WHERE p.post_type   = %s
+                AND p.post_status = %s
+                AND (pm.meta_value IS NULL OR CAST(pm.meta_value AS UNSIGNED) <> 2)
+              ORDER BY p.ID DESC
+              LIMIT %d",
+            'peepso_group_privacy',
+            self::POST_TYPE,
+            self::POST_STATUS,
+            $limit
+        ));
+
+        return array_values(array_map('intval', $rows ?: []));
+    }
+
+    /**
+     * All groups the user is an active member of, IDs only. Used by
+     * the profile Groups tab to populate the cross-kind list before
+     * each group is hydrated via GroupContextResolver.
+     *
+     * "Active" excludes pending_*, banned, block_invites — same
+     * `member%` filter the rest of this repository uses.
+     *
+     * @return list<int>
+     */
+    public static function getUserMemberGroupIds(int $userId, int $limit = 200): array
+    {
+        if ($userId <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT gm_group_id
+               FROM {$members}
+              WHERE gm_user_id     = %d
+                AND gm_user_status LIKE %s
+              ORDER BY gm_joined DESC
+              LIMIT %d",
+            $userId,
+            self::ACTIVE_MEMBER_STATUS,
+            $limit
+        ));
+
+        return array_values(array_map('intval', $ids ?: []));
+    }
+
+    /**
+     * Activity heat metrics (post count + last activity timestamp) for
+     * a set of groups, restricted to the last $sinceSeconds window.
+     *
+     * Joins peepso_activities → wp_posts (act_id = posts.ID) and filters
+     * to act_module_id = 8 (PeepSoGroups::MODULE_ID, group activity rows).
+     * Only `publish` posts count toward heat; pending / draft / trashed
+     * are excluded so reported / removed posts don't inflate counts.
+     *
+     * Used by the holder-groups suggestion surface (PR 2) and the
+     * groups-discovery sort. Groups with zero posts in the window are
+     * absent from the map — caller treats absence as cold/zero.
+     *
+     * @param int[] $groupIds
+     * @return array<int, object{posts: int, last_at: string|null}>
+     */
+    public static function getActivityHeat(array $groupIds, int $sinceSeconds = 7 * DAY_IN_SECONDS): array
+    {
+        if ($groupIds === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $activities   = $wpdb->prefix . 'peepso_activities';
+        $placeholders = implode(',', array_fill(0, count($groupIds), '%d'));
+        $cutoff       = gmdate('Y-m-d H:i:s', time() - max(60, $sinceSeconds));
+
+        $args = array_merge($groupIds, [$cutoff]);
+        $sql  = $wpdb->prepare(
+            "SELECT a.act_external_id AS group_id,
+                    COUNT(*) AS posts,
+                    MAX(p.post_date_gmt) AS last_at
+               FROM {$activities} a
+         INNER JOIN {$wpdb->posts} p ON p.ID = a.act_id
+              WHERE a.act_module_id   = 8
+                AND a.act_external_id IN ({$placeholders})
+                AND p.post_status     = 'publish'
+                AND p.post_date_gmt   >= %s
+              GROUP BY a.act_external_id
+              LIMIT 500",
+            ...$args
+        );
+
+        /** @var list<object{group_id: numeric-string, posts: numeric-string, last_at: string|null}>|null $rows */
+        $rows = $wpdb->get_results($sql);
+
+        $map = [];
+        foreach ($rows ?: [] as $row) {
+            $map[(int) $row->group_id] = (object) [
+                'posts'   => (int) $row->posts,
+                'last_at' => $row->last_at,
+            ];
+        }
+        return $map;
+    }
+
+    /**
      * Total count for the same filter set as listLocals(). Drives the
      * pagination.total / pagination.total_pages fields.
      */
