@@ -186,13 +186,17 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * Bulk-fetch group post info (id, slug, title, member_count) for a
-     * set of group_ids. Used by the User view-model's `locals` field
-     * to enrich a user's memberships with display info — single query,
-     * no N+1.
+     * Bulk-fetch group post info (id, slug, title, content, member_count)
+     * for a set of group_ids. Used by the User view-model's `locals`
+     * field and by the cross-kind discovery endpoint to enrich each
+     * group with display info — single query, no N+1.
+     *
+     * `post_content` is the group description as PeepSo stores it.
+     * Callers are responsible for stripping tags + truncating before
+     * surfacing to the wire.
      *
      * @param int[] $groupIds
-     * @return array<int, object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}>
+     * @return array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>
      */
     public static function findManyByIds(array $groupIds): array
     {
@@ -206,7 +210,7 @@ final class PeepSoGroupRepository
 
         $args = array_merge([self::ACTIVE_MEMBER_STATUS, self::POST_TYPE], $groupIds);
         $sql  = $wpdb->prepare(
-            "SELECT p.ID AS id, p.post_name, p.post_title,
+            "SELECT p.ID AS id, p.post_name, p.post_title, p.post_content,
                     COALESCE(COUNT(gm.gm_id), 0) AS member_count
                FROM {$wpdb->posts} p
                LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
@@ -218,7 +222,7 @@ final class PeepSoGroupRepository
             ...$args
         );
 
-        /** @var list<object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}>|null $rows */
+        /** @var list<object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>|null $rows */
         $rows = $wpdb->get_results($sql);
 
         $map = [];
