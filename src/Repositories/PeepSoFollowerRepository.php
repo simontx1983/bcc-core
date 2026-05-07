@@ -147,4 +147,69 @@ final class PeepSoFollowerRepository
 
         return ['following' => $following, 'followers' => $followers];
     }
+
+    /**
+     * Batched followers-count lookup. Used by list-shape consumers
+     * (e.g. /members directory, where 24 rows × `getCounts` would issue
+     * 48 sequential COUNT queries). Returns a map keyed on user_id;
+     * users with zero followers are absent from the map (callers should
+     * default to 0).
+     *
+     * Followers (passive side) only — directory cards don't surface
+     * "following" counts. Add a sibling `getFollowingCountForUsers`
+     * if/when a list surface needs it.
+     *
+     * Empty `$userIds` short-circuits to an empty map (no SQL).
+     *
+     * @param list<int> $userIds Bounded by caller; the IN-clause is
+     *                           expected to be paginated upstream
+     *                           (e.g. directory `per_page` cap of 50).
+     * @return array<int, int> user_id → followers count
+     */
+    public static function getFollowersCountForUsers(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        // Sanitize + dedupe — same pattern as ClaimRepository's batch
+        // entry points. Reject zero/negative ids before they hit SQL.
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $table       = self::table();
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        // One GROUP BY scan replaces N COUNT(*) queries. The
+        // (uf_passive_user_id, uf_follow) composite or the existing
+        // index on uf_passive_user_id is what makes this cheap.
+        /** @var list<array{user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT uf_passive_user_id AS user_id, COUNT(*) AS c
+                   FROM {$table}
+                  WHERE uf_passive_user_id IN ({$placeholders})
+                    AND uf_follow = 1
+                  GROUP BY uf_passive_user_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
 }

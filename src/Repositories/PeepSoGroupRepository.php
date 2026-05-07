@@ -233,6 +233,97 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * Batched primary-Local lookup. For a set of user_ids, returns the
+     * group post info (same shape as `findManyByIds`) of each user's
+     * primary Local — the group pointed to by their
+     * `bcc_primary_local_group_id` user_meta. Users without a primary
+     * (or whose pointer no longer resolves to an active Local) are
+     * absent from the map.
+     *
+     * Used by list-shape consumers (e.g. /members directory) where
+     * 24 rows × `get_user_meta` + 24 × `findOneById` would N+1.
+     * Replaces ~48 sequential calls with two SQLs.
+     *
+     * Note on scope: this returns only the *primary* Local — the row
+     * the user has elected as their main Local. Callers that need the
+     * full membership list should use `findUserMemberships` per-user
+     * (or build a batched sibling if a list surface needs it). The
+     * /members card only shows the primary, so that's all we batch.
+     *
+     * Empty `$userIds` short-circuits — no SQL.
+     *
+     * @param int[] $userIds Bounded by caller (directory `per_page`
+     *                       cap, e.g. 50). The user_meta + posts IN
+     *                       clauses scale linearly.
+     * @return array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>
+     *         user_id → primary-Local group post info
+     */
+    public static function getPrimaryLocalForUsers(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        // Sanitize + dedupe.
+        $cleanIds = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $cleanIds[$intVal] = true;
+            }
+        }
+        if ($cleanIds === []) {
+            return [];
+        }
+        $idList = array_keys($cleanIds);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        // Step 1: pull the bcc_primary_local_group_id meta for every
+        // user in one SQL. Skips users with no row (they don't have a
+        // primary set).
+        /** @var list<array{user_id: string, meta_value: string}> $metaRows */
+        $metaRows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT user_id, meta_value
+                   FROM {$wpdb->usermeta}
+                  WHERE meta_key = 'bcc_primary_local_group_id'
+                    AND user_id IN ({$placeholders})",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $userToGroup = [];
+        $groupIds    = [];
+        foreach (($metaRows ?: []) as $row) {
+            $userId  = (int) $row['user_id'];
+            $groupId = is_numeric($row['meta_value']) ? (int) $row['meta_value'] : 0;
+            if ($userId > 0 && $groupId > 0) {
+                $userToGroup[$userId]    = $groupId;
+                $groupIds[$groupId]      = true;
+            }
+        }
+        if ($userToGroup === []) {
+            return [];
+        }
+
+        // Step 2: bulk-resolve the group post info via the existing
+        // helper. Groups that no longer exist (deleted Locals) drop
+        // out — `findManyByIds` filters by post_type + ID match.
+        $groupInfo = self::findManyByIds(array_keys($groupIds));
+
+        $out = [];
+        foreach ($userToGroup as $userId => $groupId) {
+            if (isset($groupInfo[$groupId])) {
+                $out[$userId] = $groupInfo[$groupId];
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Bulk-fetch the viewer's active memberships across a set of
      * group_ids. Used by LocalsService to enrich the catalog with
      * per-row viewer_membership without an N+1.
