@@ -39,8 +39,55 @@ if (!defined('ABSPATH')) {
  */
 final class FeedItemNormalizer
 {
-    /** @var array<string, string> peepso act_module_id => contract post_kind */
-    private const MODULE_TO_KIND = [
+    /**
+     * peepso act_module_id => contract post_kind. Public because
+     * ReactionGrammarMap reads this to derive grammar from a
+     * peepso_activities row when no normalized post_kind is at
+     * hand (e.g. inside the reactions endpoint, given just the
+     * act_id). Single source of truth for the module → post_kind
+     * translation.
+     *
+     * --- Evolving infrastructure note (v1.5) ---
+     *
+     * This map is the seam between PeepSo's raw activity primitives
+     * (numeric module IDs that stamp `act_module_id`) and BCC's
+     * semantic post_kind contract. Future kinds (poll, drop,
+     * celebration, dispute outcome, collection unlock, mint event)
+     * will all flow through here. Keep entries explicit; do NOT rely
+     * on the `?? 'status'` fallback as a feature.
+     *
+     * String-keyed entries (`'review'`, `'pull_batch'`, etc.) are
+     * historic BCC-owned modules that the BCC writer was supposed to
+     * stamp on `act_module_id`. There's an open caveat that the
+     * underlying column is SMALLINT and string writes coerce to 0,
+     * so those keys are effectively dormant on most installs and the
+     * affected rows currently fall through to 'status' via the
+     * default. Surfacing that as a pre-existing bug worth a separate
+     * fix; this map keeps the keys for the day the writer is fixed.
+     *
+     * Integer-keyed entries (cast to string by the lookup) are PeepSo's
+     * native module IDs as actually stored:
+     *   1    = PeepSoActivity     (status)             — explicit since v1.5
+     *   4    = PeepSoSharePhotos  (photo)              — added in v1.5
+     *
+     * Currently-unmapped PeepSo modules — known integers we deliberately
+     * do NOT translate yet:
+     *   6    = PeepSoMessages     — DMs; should never reach the feed
+     *   9    = PeepSoPages        — page-wall posts; defer to V2 page surface
+     *   30   = PeepSoPolls        — V2 candidate, real new post_kind
+     *   111  = PeepSoPostBackgrounds — decorative variant of status
+     *   6661 = BLOGPOSTS_MODULE_ID — peepso-blog post type, separate flow
+     *
+     * @var array<string, string>
+     */
+    public const MODULE_TO_KIND = [
+        // Native PeepSo modules — integer keys (cast to string by the lookup).
+        '1' => 'status',
+        '4' => 'photo',
+
+        // BCC-owned modules — string keys (see caveat above re: SMALLINT
+        // coercion bug). Kept for forward compatibility once the writer
+        // is fixed to stamp string values correctly.
         'status'     => 'status',
         'review'     => 'review',
         'pull_batch' => 'pull_batch',
@@ -56,7 +103,7 @@ final class FeedItemNormalizer
      * @param ActivityRow $row     A row from PeepSoActivityRepository::getActivities().
      * @param array<string, mixed> $author Pre-hydrated author block (kind/id/handle/display_name/avatar_url/card_tier/rank_label/is_in_good_standing/is_followed_by_viewer).
      * @param array<string, mixed> $body   Pre-hydrated kind-specific body (per §3.3.1–3.3.8). Empty = use defaults.
-     * @param array{counts: array{solid: int, vouch: int, stand_behind: int}, viewer_reaction: ?string}|null $reactions
+     * @param array{kind_grammar: string, counts: array<string, int>, viewer_reaction: ?string}|null $reactions
      * @param array<string, mixed>|null $socialProof  Pre-composed §2.2 SocialProof or null.
      * @param array<string, mixed>|null $attachedCard Pre-hydrated summary Card view-model or null.
      * @param array<string, array{allowed: bool, unlock_hint: ?string}> $permissions
@@ -87,7 +134,13 @@ final class FeedItemNormalizer
             'scope_tags' => self::deriveScopeTags($postKind, (string) ($row->act_access ?? '')),
             'author'     => $author,
             'body'       => $body,
-            'reactions'  => $reactions ?? self::emptyReactions(),
+            // Reactions are grammar-aware (api-contract-v1.md §2.11):
+            // every block carries kind_grammar + counts keyed by the
+            // grammar's kinds. ReactionGrammarMap derives grammar from
+            // post_kind; the hydrator (FeedRankingService) populates
+            // the counts when it runs. When no hydrator has run, the
+            // empty fallback emits the grammar-correct zero shape.
+            'reactions'  => $reactions ?? ReactionGrammarMap::emptyReactionsFor($postKind),
             'permissions' => $permissions !== [] ? $permissions : self::defaultPermissions(),
             'links' => [
                 'self'   => '/p/feed_' . (int) $row->act_id,
@@ -130,15 +183,6 @@ final class FeedItemNormalizer
         // PeepSo stores act_time as MySQL DATETIME in UTC.
         $ts = strtotime($mysqlDatetime . ' UTC');
         return $ts ? gmdate('Y-m-d\TH:i:s\Z', $ts) : '';
-    }
-
-    /** @return array{counts: array{solid: int, vouch: int, stand_behind: int}, viewer_reaction: null} */
-    private static function emptyReactions(): array
-    {
-        return [
-            'counts'          => ['solid' => 0, 'vouch' => 0, 'stand_behind' => 0],
-            'viewer_reaction' => null,
-        ];
     }
 
     /** @return array<string, array{allowed: bool, unlock_hint: ?string}> */

@@ -178,6 +178,28 @@ final class PeepSoActivityRepository
     }
 
     /**
+     * Slim single-column lookup for callers that only need the
+     * activity's `act_module_id` (no wp_posts JOIN). Used by the
+     * v1.5 reactions endpoint to derive the post's grammar — the
+     * full row is overkill when only one column matters.
+     */
+    public static function getModuleIdByActId(int $actId): ?string
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+        global $wpdb;
+        $module = $wpdb->get_var($wpdb->prepare(
+            'SELECT act_module_id
+               FROM ' . self::table() . '
+              WHERE act_id = %d
+              LIMIT 1',
+            $actId
+        ));
+        return is_string($module) && $module !== '' ? $module : null;
+    }
+
+    /**
      * Network-percentile rollup for §O3.1 — where does this user rank
      * in raw activity count vs. all active users in the same window?
      *
