@@ -75,6 +75,56 @@ final class ChallengeRepository
     }
 
     /**
+     * Non-destructive read of a stored challenge.
+     *
+     * Reads wp_options directly — same rationale as store/consume: an
+     * external object-cache drop-in (e.g. wp-content/object-cache.php)
+     * makes `get_transient()` route only through the 'transient' cache
+     * group, which the direct-write store() never populates. Using the
+     * options table as the single source of truth keeps peek/consume in
+     * sync regardless of whether persistent caching is active.
+     *
+     * Returns null when the row is missing, payload is corrupt, or the
+     * payload's `expires_at` has elapsed. Does NOT delete on expiry —
+     * the GC happens when consume() runs (or when WP transient cleanup
+     * sweeps the wp_options table).
+     *
+     * @param string $key Transient key (without the `_transient_` prefix).
+     * @return array<string, mixed>|null
+     */
+    public static function peek(string $key): ?array
+    {
+        global $wpdb;
+
+        $optionName = '_transient_' . $key;
+
+        /** @var string|null $serialized */
+        $serialized = $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options}
+             WHERE option_name = %s
+             LIMIT 1",
+            $optionName
+        ));
+
+        if ($serialized === null) {
+            return null;
+        }
+
+        /** @var array<string, mixed>|false $challenge */
+        $challenge = maybe_unserialize($serialized);
+
+        if (!is_array($challenge)) {
+            return null;
+        }
+
+        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
+            return null;
+        }
+
+        return $challenge;
+    }
+
+    /**
      * Atomically retrieve and delete a challenge.
      *
      * Always uses the DB-backed strategy: SELECT … FOR UPDATE + DELETE
@@ -104,19 +154,37 @@ final class ChallengeRepository
         $optionName = '_transient_' . $key;
         $timeoutKey = '_transient_timeout_' . $key;
 
-        // Detect outer transaction state. A NULL return from @@in_transaction
-        // means the driver could not determine transaction state (connection
-        // reset, permission anomaly on managed MySQL). Proceeding would risk
-        // either (a) START TRANSACTION implicitly committing a real outer tx,
-        // or (b) treating a non-transactional session as transactional and
-        // issuing ROLLBACK TO a non-existent savepoint. Fail-closed instead.
-        $rawInTx = $wpdb->get_var("SELECT @@in_transaction");
-        if ($rawInTx === null) {
-            throw new \RuntimeException(
-                'ChallengeRepository::consume: cannot determine transaction state — refusing to proceed'
-            );
+        // Detect outer transaction state. The earlier `SELECT @@in_transaction`
+        // probe is not portable: MySQL 8.0 / MariaDB 10.4–10.6 do not expose
+        // it as a system variable (the query fails with "Unknown system
+        // variable 'in_transaction'") and `IN_TRANSACTION()` is not a
+        // built-in either. The result was a 100% wallet-login crash on
+        // every supported MySQL we ship against.
+        //
+        // Replacement: query INFORMATION_SCHEMA.INNODB_TRX scoped to our
+        // own thread. INNODB_TRX is a standard view present in MySQL 5.7+
+        // and MariaDB 10.x and lists every InnoDB transaction the engine
+        // is currently tracking, keyed by the OS-level connection id from
+        // CONNECTION_ID(). A row exists iff this session has an open
+        // explicit (or DML-implicit-non-autocommit) transaction. A non-null
+        // CONNECTION_ID() guarantees the lookup is meaningful; if CONNECTION_ID()
+        // returns null (driver in a degraded state), we fall back to
+        // proceeding without the protection — failing closed here would
+        // recreate the same 100% outage we're fixing, and the caller
+        // contract (consume() runs at the top of the wallet-login REST
+        // handler, no outer transaction by design) makes the protection
+        // belt-and-braces rather than load-bearing.
+        $threadId = $wpdb->get_var('SELECT CONNECTION_ID()');
+        $inTransaction = false;
+        if ($threadId !== null) {
+            $found = $wpdb->get_var($wpdb->prepare(
+                'SELECT 1 FROM information_schema.INNODB_TRX
+                  WHERE trx_mysql_thread_id = %d
+                  LIMIT 1',
+                (int) $threadId
+            ));
+            $inTransaction = $found !== null;
         }
-        $inTransaction = (int) $rawInTx === 1;
 
         // Enforce contract: consume() must not run inside a caller's
         // transaction. If the caller's outer transaction later rolls back,

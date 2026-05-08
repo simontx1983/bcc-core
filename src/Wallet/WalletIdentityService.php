@@ -112,18 +112,9 @@ final class WalletIdentityService
      */
     public static function peekChallenge(int $userId, string $walletAddress): ?array
     {
-        $key = self::challengeKey($userId, $walletAddress);
-
-        $challenge = get_transient($key);
-        if (!is_array($challenge)) {
-            return null;
-        }
-
-        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
-            return null;
-        }
-
-        return $challenge;
+        // Direct-DB peek so an object-cache drop-in cannot shadow the
+        // direct-write store(); pairs with consumeChallenge().
+        return ChallengeRepository::peek(self::challengeKey($userId, $walletAddress));
     }
 
     // ── Anonymous challenge (wallet-as-credential auth) ─────────────────
@@ -200,18 +191,9 @@ final class WalletIdentityService
      */
     public static function peekAnonymousChallenge(string $walletAddress): ?array
     {
-        $key = self::anonymousChallengeKey($walletAddress);
-
-        $challenge = get_transient($key);
-        if (!is_array($challenge)) {
-            return null;
-        }
-
-        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
-            return null;
-        }
-
-        return $challenge;
+        // Direct-DB peek so an object-cache drop-in cannot shadow the
+        // direct-write store(); pairs with consumeAnonymousChallenge().
+        return ChallengeRepository::peek(self::anonymousChallengeKey($walletAddress));
     }
 
     // ── Verification ────────────────────────────────────────────────────
