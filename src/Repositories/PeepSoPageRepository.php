@@ -173,7 +173,24 @@ final class PeepSoPageRepository
             // mid-rename). Sum into the bucket either way.
             $out[$userId][$typeKey] += $count;
         }
-        return $out;
+
+        // Materialize the declared `array{validator,project,nft,dao}`
+        // struct shape with explicit literal keys so PHPStan can prove
+        // the return type. Variable-key mutation in the loop above
+        // widens the inferred shape to `array<string,int>`; this final
+        // rewrite collapses it back to the contract — every $idList
+        // entry was initialised with ZERO_TYPE_COUNTS so the `??` is a
+        // belt-and-braces no-op at runtime.
+        $result = [];
+        foreach ($out as $id => $counts) {
+            $result[$id] = [
+                'validator' => $counts['validator'] ?? 0,
+                'project'   => $counts['project']   ?? 0,
+                'nft'       => $counts['nft']       ?? 0,
+                'dao'       => $counts['dao']       ?? 0,
+            ];
+        }
+        return $result;
     }
 
     /**

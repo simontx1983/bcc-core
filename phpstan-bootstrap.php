@@ -16,5 +16,17 @@ if (!class_exists('PeepSoActivity')) {
         public static function get_instance(): self { return new self(); }
         /** @return int|false */
         public function add_post(int $post_id, int $user_id, string $kind = '') { return false; }
+        /**
+         * @param array<string, mixed> $extra
+         * @return int|false
+         */
+        public function add_comment(int $parent_post_id, int $author_id, string $content, array $extra = []) { return false; }
+    }
+}
+
+if (!class_exists('PeepSoSharePhotos')) {
+    class PeepSoSharePhotos
+    {
+        public const MODULE_ID = 4;
     }
 }

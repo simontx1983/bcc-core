@@ -137,8 +137,8 @@ final class PeepSoPhotoWriter
         // browser-supplied Content-Type. Mirrors MyProfileEndpoint:514.
         $originalName = (string) ($file['name'] ?? 'upload');
         $checked = wp_check_filetype_and_ext($sourceTmp, $originalName);
-        $mime = is_array($checked) ? (string) ($checked['type'] ?? '') : '';
-        $ext  = is_array($checked) ? (string) ($checked['ext']  ?? '') : '';
+        $mime = (string) ($checked['type'] ?? '');
+        $ext  = (string) ($checked['ext']  ?? '');
         if (!in_array($mime, self::ALLOWED_MIME_TYPES, true)) {
             return ['ok' => false, 'reason' => 'unsupported_mime'];
         }

@@ -77,8 +77,6 @@ final class FeedItemNormalizer
      *   30   = PeepSoPolls        — V2 candidate, real new post_kind
      *   111  = PeepSoPostBackgrounds — decorative variant of status
      *   6661 = BLOGPOSTS_MODULE_ID — peepso-blog post type, separate flow
-     *
-     * @var array<string, string>
      */
     public const MODULE_TO_KIND = [
         // Native PeepSo modules — integer keys (cast to string by the lookup).
