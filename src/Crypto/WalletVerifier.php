@@ -34,12 +34,16 @@ final class WalletVerifier
         'base'      => 'evm',
         'avalanche' => 'evm',
         'bsc'       => 'evm',
-        // Cosmos chains
+        // Cosmos chains — THORChain is a Cosmos-SDK chain (secp256k1 +
+        // bech32, ADR-036 signing); the cosmos verifier handles it
+        // transparently because it derives the HRP from the address
+        // rather than hardcoding 'cosmos' as the prefix.
         'cosmos'    => 'cosmos',
         'osmosis'   => 'cosmos',
         'akash'     => 'cosmos',
         'juno'      => 'cosmos',
         'stargaze'  => 'cosmos',
+        'thorchain' => 'cosmos',
         // Solana
         'solana'    => 'solana',
     ];
