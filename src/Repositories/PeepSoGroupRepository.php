@@ -35,6 +35,22 @@ final class PeepSoGroupRepository
     private const LOCAL_TITLE_PATTERN  = 'Local %'; // §E3 naming convention
     private const ACTIVE_MEMBER_STATUS = 'member%'; // matches member, member_moderator, member_manager, member_owner, member_readonly
 
+    // Non-open privacy values per PeepSo's `peepso_group_privacy` post-meta:
+    //   0 = public (open), 1 = closed, 2 = secret. NFT-gated groups carry
+    //   privacy = 1 (closed) plus a sidecar marker — they are a strict
+    //   subset of "non-open." See ValueObjects/PeepSoPrivacy.php.
+    private const NON_OPEN_PRIVACY_VALUES = ['1', '2'];
+
+    // Cache for getNonOpenGroupIds — generation-counter pattern per §5.
+    // Read paths key on `:gen`, write paths bump the generation. Hooks
+    // wired in bcc-core.php fire on add/update/delete of the
+    // `peepso_group_privacy` post-meta.
+    private const NONOPEN_CACHE_GROUP    = 'bcc_core:groups';
+    private const NONOPEN_CACHE_KEY_LIST = 'non_open_group_ids';
+    private const NONOPEN_CACHE_KEY_GEN  = 'non_open_gen';
+    private const NONOPEN_CACHE_TTL      = 600; // 10 min
+    private const NONOPEN_DEFAULT_LIMIT  = 500; // V1 scale: ~hundreds of groups
+
     private static function membersTable(): string
     {
         global $wpdb;
@@ -230,6 +246,56 @@ final class PeepSoGroupRepository
             $map[(int) $row->id] = $row;
         }
         return $map;
+    }
+
+    /**
+     * Cross-kind single-group lookup by slug (post_name). Same row shape
+     * as `findManyByIds` (id + slug + title + post_content + member_count).
+     *
+     * Unlike `findOneBySlug` (Locals-only — title-pattern filter applied),
+     * this method returns ANY published peepso-group regardless of kind
+     * — used by the cross-kind /bcc/v1/groups/{slug} detail endpoint to
+     * resolve nft / local / system / user groups uniformly.
+     *
+     * Privacy is NOT filtered here — secret groups DO match. Defense-in-
+     * depth visibility (404 secret-from-non-members) lives in the
+     * caller (GroupsService) so the repository stays a single-purpose
+     * read seam.
+     *
+     * Returns null when no row matches the slug. Uniqueness is implicit
+     * (post_name is per-type-unique in WP) but we LIMIT 1 defensively.
+     *
+     * @return object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}|null
+     */
+    public static function findGroupBySlug(string $slug): ?object
+    {
+        if ($slug === '') {
+            return null;
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $sql = $wpdb->prepare(
+            "SELECT p.ID AS id, p.post_name, p.post_title, p.post_content,
+                    COALESCE(COUNT(gm.gm_id), 0) AS member_count
+               FROM {$wpdb->posts} p
+               LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
+                                      AND gm.gm_user_status LIKE %s
+              WHERE p.post_type = %s
+                AND p.post_status = %s
+                AND p.post_name = %s
+              GROUP BY p.ID
+              LIMIT 1",
+            self::ACTIVE_MEMBER_STATUS,
+            self::POST_TYPE,
+            self::POST_STATUS,
+            $slug
+        );
+
+        /** @var object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}|null $row */
+        $row = $wpdb->get_row($sql);
+        return $row;
     }
 
     /**
@@ -470,17 +536,157 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * IDs of all published peepso-groups whose privacy is NOT open —
+     * `peepso_group_privacy` post-meta IN ('1', '2'), i.e. closed OR
+     * secret (NFT-gated groups are a closed-privacy subset).
+     *
+     * Bounded list (V1 scale: ~hundreds of groups). Used as the
+     * candidate pool the bcc-trust feed layer subtracts the viewer's
+     * memberships from to build the §4.7.x main-feed exclusion list,
+     * mirroring the {@see PeepSoActivityRepository::getActivities()
+     * `$excludedAuthorIds`} pattern (caller decides WHY to drop, repo
+     * stays a single-purpose seam).
+     *
+     * Cached via the §5 generation-counter pattern (key
+     * `non_open_group_ids:<gen>`). Generation is bumped by the
+     * `updated_post_meta` / `added_post_meta` / `deleted_post_meta`
+     * hooks in bcc-core.php whenever `peepso_group_privacy` is written.
+     * 10-minute TTL bounds the worst-case staleness window if a write
+     * arrives via a code path that bypasses the action hooks (e.g.
+     * direct SQL).
+     *
+     * Defensive posture: when no groups match (fresh install, or every
+     * group is open), the cached value is `[]` and feed callers
+     * short-circuit the exclusion path entirely — no JOIN cost.
+     *
+     * @return list<int>
+     */
+    public static function getNonOpenGroupIds(int $limit = self::NONOPEN_DEFAULT_LIMIT): array
+    {
+        if ($limit <= 0) {
+            return [];
+        }
+        if ($limit > self::NONOPEN_DEFAULT_LIMIT) {
+            $limit = self::NONOPEN_DEFAULT_LIMIT;
+        }
+
+        $genKey = self::nonOpenCacheKey($limit);
+        $cached = wp_cache_get($genKey, self::NONOPEN_CACHE_GROUP);
+        if (is_array($cached)) {
+            /** @var list<int> $cached */
+            return $cached;
+        }
+
+        global $wpdb;
+
+        // INNER JOIN postmeta on peepso_group_privacy IN ('1','2'). The
+        // postmeta (post_id, meta_key) index is one of WP's tightest;
+        // restricting the post side to peepso-group + publish keeps the
+        // candidate set tiny on a real install. Explicit column list.
+        $placeholders = implode(',', array_fill(0, count(self::NON_OPEN_PRIVACY_VALUES), '%s'));
+
+        $params = [
+            'peepso_group_privacy',
+            self::POST_TYPE,
+            self::POST_STATUS,
+        ];
+        foreach (self::NON_OPEN_PRIVACY_VALUES as $val) {
+            $params[] = $val;
+        }
+        $params[] = $limit;
+
+        $sql = "SELECT p.ID
+                  FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm
+                       ON pm.post_id  = p.ID
+                      AND pm.meta_key = %s
+                 WHERE p.post_type   = %s
+                   AND p.post_status = %s
+                   AND pm.meta_value IN ({$placeholders})
+                 ORDER BY p.ID DESC
+                 LIMIT %d";
+
+        /** @var list<numeric-string>|null $rows */
+        $rows = $wpdb->get_col($wpdb->prepare($sql, ...$params));
+
+        $ids = [];
+        foreach ($rows ?: [] as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        wp_cache_set($genKey, $ids, self::NONOPEN_CACHE_GROUP, self::NONOPEN_CACHE_TTL);
+        return $ids;
+    }
+
+    /**
+     * Bust the {@see getNonOpenGroupIds} cache. Wired in bcc-core.php
+     * to the post-meta write hooks for `peepso_group_privacy`. Public
+     * because the hook callbacks register against this class
+     * statically — no service-locator wiring needed for cache busts.
+     */
+    public static function bustNonOpenGroupIdsCache(): void
+    {
+        // wp_cache_incr returns false when the key is uninitialized;
+        // initialize-then-incr avoids the no-op on cold caches. Same
+        // shape as HiddenActivityRepository::bustCache and the rest of
+        // the §5 generation-counter callsites in this codebase.
+        if (!is_int(wp_cache_get(self::NONOPEN_CACHE_KEY_GEN, self::NONOPEN_CACHE_GROUP))) {
+            wp_cache_set(self::NONOPEN_CACHE_KEY_GEN, 0, self::NONOPEN_CACHE_GROUP);
+        }
+        wp_cache_incr(self::NONOPEN_CACHE_KEY_GEN, 1, self::NONOPEN_CACHE_GROUP);
+    }
+
+    private static function nonOpenCacheKey(int $limit): string
+    {
+        $gen = wp_cache_get(self::NONOPEN_CACHE_KEY_GEN, self::NONOPEN_CACHE_GROUP);
+        if (!is_int($gen)) {
+            $gen = 0;
+            wp_cache_set(self::NONOPEN_CACHE_KEY_GEN, $gen, self::NONOPEN_CACHE_GROUP);
+        }
+        // Encode `$limit` into the cache key so callers asking for
+        // different bounds don't trample each other (only the default
+        // limit is in production paths today; future callers stay safe).
+        return self::NONOPEN_CACHE_KEY_LIST . ':' . $limit . ':' . $gen;
+    }
+
+    /**
      * Activity heat metrics (post count + last activity timestamp) for
      * a set of groups, restricted to the last $sinceSeconds window.
      *
-     * Joins peepso_activities → wp_posts (act_id = posts.ID) and filters
-     * to act_module_id = 8 (PeepSoGroups::MODULE_ID, group activity rows).
-     * Only `publish` posts count toward heat; pending / draft / trashed
-     * are excluded so reported / removed posts don't inflate counts.
+     * Counts user-authored posts that landed inside each group. PeepSo
+     * stores the group association as `peepso_group_id` post-meta on the
+     * wp_post (status / photo / GIF / etc. — same pattern the §F3 feed
+     * pipeline uses for group-context decoration via
+     * {@see \BCC\Trust\Core\Services\Feed\FeedRankingService::hydrateGroupContexts}).
      *
-     * Used by the holder-groups suggestion surface (PR 2) and the
-     * groups-discovery sort. Groups with zero posts in the window are
+     * The query mirrors the postmeta-JOIN scoping pattern PR 1
+     * established in {@see PeepSoActivityRepository::getActivities}'s
+     * `$onlyForGroupId` branch — single source of truth for "activities
+     * inside a PeepSo group." We join through wp_posts on
+     * `act_external_id` (the canonical activity → backing-post FK; the
+     * activity table's own PK is `act_id`, which is NOT a wp_posts.ID)
+     * and through postmeta to scope the candidate set. No `act_module_id`
+     * filter — restricting to a single module would drop legitimate
+     * non-status content (photo, GIF, future kinds) from heat counts;
+     * the postmeta JOIN already constrains us to the right surface.
+     *
+     * Only `publish` posts count toward heat; pending / draft / trashed
+     * are excluded so reported / removed content doesn't inflate counts.
+     *
+     * Used by the holder-groups suggestion surface and the groups
+     * discovery + detail sort. Groups with zero posts in the window are
      * absent from the map — caller treats absence as cold/zero.
+     *
+     * Historical note: the prior implementation joined `p.ID = a.act_id`
+     * (wrong column — `act_id` is the activity PK) and filtered by
+     * `act_module_id = 8` (the PeepSoGroups system module, which carries
+     * group-meta events like banner-changed, NOT user content). Both
+     * bugs together meant the query returned zero rows for every group,
+     * so every surface silently emitted "Quiet" / heat=cold regardless
+     * of real activity. Fixed 2026-05-08.
      *
      * @param int[] $groupIds
      * @return array<int, object{posts: int, last_at: string|null}>
@@ -493,23 +699,33 @@ final class PeepSoGroupRepository
 
         global $wpdb;
         $activities   = $wpdb->prefix . 'peepso_activities';
-        $placeholders = implode(',', array_fill(0, count($groupIds), '%d'));
+        $placeholders = implode(',', array_fill(0, count($groupIds), '%s'));
         $cutoff       = gmdate('Y-m-d H:i:s', time() - max(60, $sinceSeconds));
 
-        $args = array_merge($groupIds, [$cutoff]);
-        $sql  = $wpdb->prepare(
-            "SELECT a.act_external_id AS group_id,
+        // Cast group ids to strings so the postmeta `meta_value` (varchar)
+        // index is usable. Same convention as PeepSoActivityRepository's
+        // `$onlyForGroupId` branch — postmeta's tightest index is
+        // (post_id, meta_key), and meta_value comparison stays string-typed.
+        $params = [];
+        foreach ($groupIds as $id) {
+            $params[] = (string) (int) $id;
+        }
+        $params[] = $cutoff;
+
+        $sql = $wpdb->prepare(
+            "SELECT pm.meta_value AS group_id,
                     COUNT(*) AS posts,
                     MAX(p.post_date_gmt) AS last_at
                FROM {$activities} a
-         INNER JOIN {$wpdb->posts} p ON p.ID = a.act_id
-              WHERE a.act_module_id   = 8
-                AND a.act_external_id IN ({$placeholders})
+         INNER JOIN {$wpdb->posts}    p  ON p.ID       = a.act_external_id
+         INNER JOIN {$wpdb->postmeta} pm ON pm.post_id  = p.ID
+                                         AND pm.meta_key = 'peepso_group_id'
+              WHERE pm.meta_value     IN ({$placeholders})
                 AND p.post_status     = 'publish'
                 AND p.post_date_gmt   >= %s
-              GROUP BY a.act_external_id
+              GROUP BY pm.meta_value
               LIMIT 500",
-            ...$args
+            ...$params
         );
 
         /** @var list<object{group_id: numeric-string, posts: numeric-string, last_at: string|null}>|null $rows */
@@ -523,6 +739,125 @@ final class PeepSoGroupRepository
             ];
         }
         return $map;
+    }
+
+    /**
+     * Active members of a single group, ordered by role rank then
+     * joined_at DESC.
+     *
+     * Backs the §4.7.7 group-members endpoint behind the Next.js
+     * `/groups/[slug]` roster strip. Single-graph rule: this is the
+     * canonical seam for "who is in this group" reads — any future
+     * caller (admin tools, holder reconciler, etc.) routes through
+     * here rather than re-querying `peepso_group_members`.
+     *
+     * Active-only filter: `gm_user_status LIKE 'member%'` matches
+     * `member`, `member_owner`, `member_moderator`, `member_manager`,
+     * `member_readonly` (excludes `pending_*`, `banned`, `block_invites`).
+     * Same convention as `findUserMemberships` so cross-method counts
+     * agree.
+     *
+     * Order: a `CASE WHEN` synthesises a numeric `role_rank` so the
+     * sort happens in SQL, not PHP — owner (1) → moderator/manager (2)
+     * → everyone else (3), tiebroken by `gm_create_date DESC` (newest
+     * joins first within rank). Ordering in PHP would force a full
+     * candidate scan even for paginated reads.
+     *
+     * Bounded query (§4): `LIMIT $limit OFFSET $offset` with the cap
+     * enforced by the caller (max 100 per the §4.7.7 contract). No
+     * cache layer — PeepSo owns the write path entirely (member_join /
+     * member_leave / member_remove on PeepSoGroupUsers), so a
+     * generation counter we'd never bump from our code would surface
+     * stale rosters after every PeepSo write. Every existing read
+     * method on this repository follows the same uncached-read
+     * convention for this reason.
+     *
+     * @return list<object{user_id: numeric-string, role: string, joined_at: string}>
+     */
+    public static function listGroupMembers(int $groupId, int $offset, int $limit): array
+    {
+        if ($groupId <= 0 || $limit <= 0) {
+            return [];
+        }
+        if ($offset < 0) {
+            $offset = 0;
+        }
+        if ($limit > 100) {
+            $limit = 100;
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $sql = $wpdb->prepare(
+            "SELECT gm_user_id     AS user_id,
+                    gm_user_status AS role,
+                    gm_create_date AS joined_at,
+                    CASE
+                        WHEN gm_user_status = 'member_owner'                              THEN 1
+                        WHEN gm_user_status IN ('member_moderator', 'member_manager')     THEN 2
+                        ELSE 3
+                    END AS role_rank
+               FROM {$members}
+              WHERE gm_group_id = %d
+                AND gm_user_status LIKE %s
+              ORDER BY role_rank ASC, gm_create_date DESC, gm_id DESC
+              LIMIT %d OFFSET %d",
+            $groupId,
+            self::ACTIVE_MEMBER_STATUS,
+            $limit,
+            $offset
+        );
+
+        /** @var list<object{user_id: numeric-string, role: string, joined_at: string, role_rank: numeric-string}>|null $rows */
+        $rows = $wpdb->get_results($sql);
+
+        $out = [];
+        foreach ($rows ?: [] as $row) {
+            // Drop the synthetic role_rank from the wire shape — caller
+            // doesn't need it; the stable contract is {user_id, role, joined_at}.
+            $out[] = (object) [
+                'user_id'   => $row->user_id,
+                'role'      => $row->role,
+                'joined_at' => $row->joined_at,
+            ];
+        }
+        return $out;
+    }
+
+    /**
+     * Total active-member count for one group. Drives the
+     * `pagination.total` + `has_more` fields on §4.7.7.
+     *
+     * NOT reading PeepSo's `peepso_group_members_count` post_meta
+     * because (a) that meta counts only `member`-rank rows in some
+     * PeepSo paths and the full-active-set count in others — convention
+     * varies across PeepSo modules; (b) it's recomputed lazily by
+     * PeepSoGroupUsers::update_members_count() on writes, so a
+     * subscription burst that races the recompute would show a stale
+     * total. A direct COUNT(*) on the same `gm_user_status LIKE 'member%'`
+     * filter is one PK-indexed read and stays consistent with
+     * `listGroupMembers`.
+     */
+    public static function countGroupMembers(int $groupId): int
+    {
+        if ($groupId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $sql = $wpdb->prepare(
+            "SELECT COUNT(*)
+               FROM {$members}
+              WHERE gm_group_id = %d
+                AND gm_user_status LIKE %s",
+            $groupId,
+            self::ACTIVE_MEMBER_STATUS
+        );
+
+        return (int) $wpdb->get_var($sql);
     }
 
     /**

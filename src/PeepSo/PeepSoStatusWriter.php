@@ -44,17 +44,41 @@ final class PeepSoStatusWriter
      *   - ['ok' => false, 'reason' => 'persist_failed']         wp_insert_post or activity insert failed
      */
     /**
-     * Create a status post on $authorId's own wall.
+     * Create a status post on $authorId's own wall, or on a group wall
+     * when $groupId > 0.
      *
-     * The wp_post is created with post_type = peepso-activity-status
-     * and post_status = publish. The activity row is inserted with
+     * The wp_post is created with post_type = peepso-post and
+     * post_status = publish. The activity row is inserted with
      * act_module_id = PeepSoActivity::MODULE_ID (integer 1) and
      * act_external_id pointing at the post id — the same shape PeepSo's
      * own UI produces.
      *
+     * Group-wall write path: when $groupId > 0 the caller has already
+     * verified existence + viewer membership upstream (PostsService
+     * gates via {@see GroupsService::resolveGroupAccess}). We do NOT
+     * pass $groupId to PeepSo's `add_post` as the `$owner` parameter:
+     * `PeepSoActivity::add_post` runs `PeepSo::check_permissions($owner,
+     * PERM_POST, $author)`, which interprets `$owner` as a user_id
+     * (resolves via `get_user_meta`) — passing a group_id there would
+     * cause `check_permissions` to deny the write almost universally.
+     *
+     * Instead we use PeepSo's documented integration surface for
+     * group-scoped posts — write the post normally, then stamp
+     * `peepso_group_id` post-meta and fire `peepso_groups_new_post`.
+     * That mirrors what PeepSoGroupsPlugin::after_add_post does at
+     * peepso-groups/groups.php:1600 when its $_POST-driven flow fires.
+     * Driving the same `$_POST['group_id'] + module_id=8` path here
+     * was considered but rejected — it would still work, but would
+     * leak group state into request superglobals AND collide with
+     * `module_id` driving when this writer is shared with future
+     * group-photo / group-gif paths. Stamping the post-meta directly
+     * is the smaller seam that satisfies all read-side consumers
+     * (FeedRankingService::hydrateGroupContexts, /groups/{id}/feed,
+     * group-followers notifications via the action) uniformly.
+     *
      * @return array{ok: true, post_id: int, act_id: int}|array{ok: false, reason: string}
      */
-    public static function createSelfStatus(int $authorId, string $content): array
+    public static function createSelfStatus(int $authorId, string $content, int $groupId = 0): array
     {
         if ($authorId <= 0) {
             return ['ok' => false, 'reason' => 'forbidden'];
@@ -88,11 +112,46 @@ final class PeepSoStatusWriter
             return ['ok' => false, 'reason' => 'persist_failed'];
         }
 
+        if ($groupId > 0) {
+            self::attachToGroup($postId, $groupId);
+        }
+
         return [
             'ok'      => true,
             'post_id' => $postId,
             'act_id'  => $actId,
         ];
+    }
+
+    /**
+     * Stamp `peepso_group_id` post-meta and fire `peepso_groups_new_post`
+     * so all downstream consumers see this post as group-scoped:
+     *
+     *   - {@see \BCC\Trust\Core\Services\Feed\FeedRankingService::hydrateGroupContexts}
+     *     decorates the FeedItem with the {id, type, verification} block.
+     *   - The /groups/{id}/feed endpoint's postmeta-JOIN scoping picks
+     *     it up.
+     *   - PeepSoGroupsPlugin's group-followers notification handler
+     *     (registered against `peepso_groups_new_post` at
+     *     peepso-groups/groups.php:543) fans out to followers.
+     *   - PeepSo's popular-posts widget cache invalidates (the
+     *     `after_add_post` body at line 1630).
+     *
+     * Mirrors the side effects PeepSoGroupsPlugin::after_add_post would
+     * have produced if we'd driven the $_POST['group_id'] + module_id=8
+     * path. We don't drive that path because (a) it would also stamp
+     * the post-meta — second source of truth → race risk; (b) the
+     * module_id slot conflicts with the photo/gif writers when this
+     * helper is reused for future group-photo / group-gif paths.
+     */
+    public static function attachToGroup(int $postId, int $groupId): void
+    {
+        if ($postId <= 0 || $groupId <= 0) {
+            return;
+        }
+
+        update_post_meta($postId, 'peepso_group_id', (string) $groupId);
+        do_action('peepso_groups_new_post', $groupId, $postId);
     }
 
     /**

@@ -55,6 +55,14 @@ final class PeepSoActivityRepository
     private const TABLE_SUFFIX = 'peepso_activities';
 
     /**
+     * Hard cap on the `$excludedGroupIds` IN-clause size. Mirrors the
+     * default LIMIT of {@see PeepSoGroupRepository::getNonOpenGroupIds()}
+     * — if non-open groups exceed 500 across the whole install we have a
+     * scaling decision to make at that source, not by widening this cap.
+     */
+    private const EXCLUDED_GROUP_IDS_CAP = 500;
+
+    /**
      * Explicit SELECT list — peepso_activities columns plus the three
      * fields synthesized from the wp_posts JOIN. Aliases keep the row
      * shape stable for the rest of the codebase (FeedItemNormalizer,
@@ -78,6 +86,8 @@ final class PeepSoActivityRepository
      * @param list<string>|null $moduleIds      null = all modules; [] = no posts; non-empty list = only those modules.
      * @param list<int>|null $excludedAuthorIds null/[] = no exclusion; non-empty list = drop these authors. Used by the feed ranker to apply §O4.1 caution/risky shadow-limit without coupling bcc-core to bcc-trust's tier concept.
      * @param list<int>|null $excludedActIds    null/[] = no exclusion; non-empty list = drop these specific act_ids. Used by §K1 Phase C moderation hide so individual posts can be suppressed without touching their author or module. Same coupling-avoidance pattern as $excludedAuthorIds — bcc-core stays unaware of WHY the ids are hidden.
+     * @param int|null $onlyForGroupId          null = no group filter; positive int = only activities whose backing wp_post lives in this PeepSo group (joined via `peepso_group_id` post-meta). Used by /bcc/v1/groups/{id}/feed for the group-scoped feed; bcc-trust's caller handles the privacy gate before invoking this.
+     * @param list<int>|null $excludedGroupIds  null/[] = no exclusion; non-empty list = drop activities whose backing wp_post carries `peepso_group_id` post-meta matching one of these IDs. Posts NOT inside any group are preserved (LEFT-JOIN-with-NULL-passthrough). Used by /bcc/v1/feed and /bcc/v1/feed/hot to hide closed/secret/NFT-gated group posts from non-members. Same coupling-avoidance pattern as $excludedAuthorIds / $excludedActIds — bcc-core stays unaware of WHY the ids are excluded; bcc-trust computes the list from (non-open groups) - (viewer memberships). Capped at {@see EXCLUDED_GROUP_IDS_CAP} to keep the IN clause bounded; if more group IDs need to be excluded, the candidate pool sourcing should narrow before reaching this layer.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
      */
@@ -88,13 +98,18 @@ final class PeepSoActivityRepository
         ?int $cursorActId = null,
         int $limit = 20,
         ?array $excludedAuthorIds = null,
-        ?array $excludedActIds = null
+        ?array $excludedActIds = null,
+        ?int $onlyForGroupId = null,
+        ?array $excludedGroupIds = null
     ): array {
         global $wpdb;
 
         // Empty filter set means "no possible matches" — short-circuit before
         // building a SQL IN () clause that would otherwise be invalid.
         if ($authorIds === [] || $moduleIds === []) {
+            return [];
+        }
+        if ($onlyForGroupId !== null && $onlyForGroupId <= 0) {
             return [];
         }
 
@@ -145,11 +160,60 @@ final class PeepSoActivityRepository
             $params[] = $cursorActId;
         }
 
+        // Group scope: filter to activities whose backing wp_post lives in
+        // a specific PeepSo group. PeepSo writes `peepso_group_id` post-meta
+        // when a status / photo / GIF post is created inside a group; the
+        // INNER JOIN here is the cheapest way to scope the candidate set
+        // server-side (uses postmeta's (post_id, meta_key) index, which
+        // is one of WP's tightest). The caller (bcc-trust GroupsService)
+        // is responsible for the privacy gate — secret/closed groups must
+        // never reach this filter for non-members.
+        $groupJoin = '';
+        if ($onlyForGroupId !== null) {
+            $groupJoin = ' INNER JOIN ' . $wpdb->postmeta . ' gm_pm
+                              ON gm_pm.post_id   = p.ID
+                             AND gm_pm.meta_key  = \'peepso_group_id\'
+                             AND gm_pm.meta_value = %s ';
+            $params[]  = (string) $onlyForGroupId;
+        }
+
+        // Group exclusion: drop activities whose backing wp_post lives
+        // inside a group on the exclusion list (closed/secret/NFT-gated
+        // groups the viewer is not a member of). LEFT JOIN with
+        // NULL-passthrough so non-group posts (no `peepso_group_id`
+        // meta row at all) are preserved unconditionally — only posts
+        // explicitly in a gated group are dropped. Skip this branch
+        // entirely when `$onlyForGroupId` is set (there the INNER JOIN
+        // already constrains us to a single group; an exclude-list pass
+        // is redundant and would risk excluding the very group we're
+        // reading) or when the list is empty.
+        $groupExcludeJoin = '';
+        if ($onlyForGroupId === null
+            && $excludedGroupIds !== null
+            && $excludedGroupIds !== []
+        ) {
+            // Cap the list — defensive against pathological caller input.
+            $cappedExclude = array_slice($excludedGroupIds, 0, self::EXCLUDED_GROUP_IDS_CAP);
+            $groupExcludeJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' gx_pm
+                                     ON gx_pm.post_id   = p.ID
+                                    AND gx_pm.meta_key  = \'peepso_group_id\' ';
+            $excludePlaceholders = implode(',', array_fill(0, count($cappedExclude), '%s'));
+            $where[] = "(gx_pm.meta_value IS NULL OR gx_pm.meta_value NOT IN ({$excludePlaceholders}))";
+            // meta_value is varchar — cast IDs to strings so the comparison
+            // stays on the postmeta `meta_value` index path. Same convention
+            // as the $onlyForGroupId branch above.
+            foreach ($cappedExclude as $gid) {
+                $params[] = (string) (int) $gid;
+            }
+        }
+
         $params[] = $limit;
 
         $sql = 'SELECT ' . self::COLUMNS . '
                   FROM ' . self::table() . ' a
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
+                  ' . $groupJoin . '
+                  ' . $groupExcludeJoin . '
                  WHERE ' . implode(' AND ', $where) . '
                  ORDER BY p.post_date_gmt DESC, a.act_id DESC
                  LIMIT %d';

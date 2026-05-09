@@ -110,6 +110,31 @@ register_activation_hook(__FILE__, function () {
 // immediately instead of waiting for the 60-second cache TTL.
 \BCC\Core\Permissions\Permissions::registerHooks();
 
+// ── Non-open group cache invalidation ──────────────────────────
+// PeepSoGroupRepository::getNonOpenGroupIds() backs the §4.7.x main-
+// feed leak gate (closed/secret/NFT-gated group posts hidden from
+// non-members in /bcc/v1/feed and /bcc/v1/feed/hot). The list is
+// cached via the §5 generation-counter pattern; any write to a
+// group's `peepso_group_privacy` post-meta must bump the generation
+// so the next read recomputes. Bound to all three meta-write hooks
+// (added / updated / deleted) for defense-in-depth — PeepSo's
+// privacy-toggle path uses `update_post_meta` which fires either
+// `added_post_meta` (first write) or `updated_post_meta`
+// (subsequent), and a privacy-row deletion (rare, but possible via
+// admin tools) leaves the group as "no row = open" so the cache
+// must drop it from the non-open list.
+// First positional arg differs across the three actions (int meta_id
+// for added/updated, list<string> meta_ids for deleted). We don't read
+// it, so leave it untyped on the closure signature.
+$bccBustNonOpenGroupCache = static function ($_metaIdOrIds, $_objectId, $metaKey): void {
+    if (is_string($metaKey) && $metaKey === 'peepso_group_privacy') {
+        \BCC\Core\Repositories\PeepSoGroupRepository::bustNonOpenGroupIdsCache();
+    }
+};
+add_action('added_post_meta',   $bccBustNonOpenGroupCache, 10, 3);
+add_action('updated_post_meta', $bccBustNonOpenGroupCache, 10, 3);
+add_action('deleted_post_meta', $bccBustNonOpenGroupCache, 10, 3);
+
 // ── Legacy option cleanup (post-consolidation one-shot) ─────────
 // bcc-disputes and bcc-onchain-signals were merged into bcc-trust.
 // Their option rows in wp_options (settings, counters, transients)

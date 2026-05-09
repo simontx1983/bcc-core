@@ -69,9 +69,17 @@ final class PeepSoGifWriter
      *   - ['ok' => false, 'reason' => 'invalid_url']       URL doesn't contain giphy.com
      *   - ['ok' => false, 'reason' => 'persist_failed']    add_post returned 0/false OR resolve query came back empty
      *
+     * Group-wall variant: when $groupId > 0 the caller has already
+     * verified existence + viewer membership upstream (PostsService
+     * via {@see \BCC\Trust\Core\Services\GroupsService::resolveGroupAccess}).
+     * After the post is persisted we stamp `peepso_group_id` post-meta
+     * and fire `peepso_groups_new_post` via
+     * {@see PeepSoStatusWriter::attachToGroup} — same uniform group-
+     * attach path the status / photo writers use.
+     *
      * @return array{ok: true, post_id: int, act_id: int}|array{ok: false, reason: string}
      */
-    public static function createSelfGifPost(int $authorId, string $url, string $caption): array
+    public static function createSelfGifPost(int $authorId, string $url, string $caption, int $groupId = 0): array
     {
         if ($authorId <= 0) {
             return ['ok' => false, 'reason' => 'forbidden'];
@@ -131,6 +139,12 @@ final class PeepSoGifWriter
         $actId = self::resolveActIdForPost($postId);
         if ($actId <= 0) {
             return ['ok' => false, 'reason' => 'persist_failed'];
+        }
+
+        if ($groupId > 0) {
+            // Reuse the canonical group-attach helper (per §11) rather
+            // than duplicating the post-meta + action-fire pair.
+            PeepSoStatusWriter::attachToGroup($postId, $groupId);
         }
 
         return [

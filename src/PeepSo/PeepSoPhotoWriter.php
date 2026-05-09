@@ -101,10 +101,21 @@ final class PeepSoPhotoWriter
      * `wp_check_filetype_and_ext`) so widening the parameter to
      * `array<string, mixed>` is honest about the runtime contract.
      *
+     * Group-wall variant: when $groupId > 0 the caller has already
+     * verified existence + viewer membership upstream (PostsService
+     * via {@see \BCC\Trust\Core\Services\GroupsService::resolveGroupAccess}).
+     * We keep $_POST['module_id'] = PeepSoSharePhotos::MODULE_ID (4)
+     * so PeepSo's photos plugin still stamps act_module_id=4 (without
+     * which the post wouldn't render as a photo card). After the post
+     * is persisted we stamp `peepso_group_id` post-meta and fire
+     * `peepso_groups_new_post` via {@see PeepSoStatusWriter::attachToGroup}
+     * — same uniform group-attach path the status writer uses, no
+     * conflict with the photos module_id slot.
+     *
      * @param array<string, mixed> $file
      * @return array{ok: true, post_id: int, act_id: int, photo_id: int}|array{ok: false, reason: string}
      */
-    public static function createSelfPhotoPost(int $authorId, array $file, string $caption): array
+    public static function createSelfPhotoPost(int $authorId, array $file, string $caption, int $groupId = 0): array
     {
         if ($authorId <= 0) {
             return ['ok' => false, 'reason' => 'forbidden'];
@@ -244,6 +255,14 @@ final class PeepSoPhotoWriter
 
         if ($actId <= 0) {
             return ['ok' => false, 'reason' => 'persist_failed'];
+        }
+
+        if ($groupId > 0) {
+            // Single source of truth for "stamp group-meta + fire
+            // peepso_groups_new_post." Lives on PeepSoStatusWriter;
+            // this writer reuses it (per §11) rather than duplicating
+            // the post-meta + action-fire pair.
+            PeepSoStatusWriter::attachToGroup($postId, $groupId);
         }
 
         return [

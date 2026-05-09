@@ -40,6 +40,7 @@ final class ActivityFeedService
     public const SCOPE_FOR_YOU   = 'for_you';
     public const SCOPE_FOLLOWING = 'following';
     public const SCOPE_SIGNALS   = 'signals';
+    public const SCOPE_GROUP     = 'group';
 
     /** @var list<string> */
     public const VALID_SCOPES = [self::SCOPE_FOR_YOU, self::SCOPE_FOLLOWING, self::SCOPE_SIGNALS];
@@ -55,9 +56,11 @@ final class ActivityFeedService
      * @param int $viewerId 0 for anonymous viewers (only valid on hot-feed contexts; per contract /feed requires auth).
      * @param list<int>|null $excludedAuthorIds Optional shadow-limit list (per §O4.1). Caller (bcc-trust's FeedRankingService) precomputes this; bcc-core does not know about reputation tiers.
      * @param list<int>|null $excludedActIds Optional moderation-hide list (per §K1 Phase C). Same coupling-avoidance pattern: caller decides which act_ids to drop, bcc-core just applies the filter.
+     * @param int|null $onlyForGroupId Optional group-scope filter — when non-null and positive, restricts the candidate set to activities whose backing wp_post carries `peepso_group_id` post-meta matching this group. Used by /bcc/v1/groups/{id}/feed; bcc-trust enforces the privacy gate before invoking. The scope param is overridden internally to SCOPE_GROUP semantics (no follower / module filtering — every activity inside the group is in scope).
+     * @param list<int>|null $excludedGroupIds Optional group-exclusion list — drop activities whose backing wp_post lives inside one of these PeepSo groups. Used by /bcc/v1/feed and /bcc/v1/feed/hot to suppress closed/secret/NFT-gated group posts from non-members. Same coupling-avoidance pattern as the other exclusion params: bcc-trust computes the list (non-open groups minus viewer memberships) and passes it through; bcc-core stays unaware of the privacy semantics. Ignored when `$onlyForGroupId` is set.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null): array
+    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null): array
     {
         if (!in_array($scope, self::VALID_SCOPES, true)) {
             $scope = self::SCOPE_FOR_YOU;
@@ -66,8 +69,17 @@ final class ActivityFeedService
 
         [$cursorTime, $cursorActId] = self::decodeCursor($cursor);
 
-        $authorIds  = $this->resolveAuthorFilter($viewerId, $scope);
-        $moduleIds  = self::resolveModuleFilter($scope);
+        // Group-scoped feed: skip follower / module narrowing — every
+        // activity inside the group is in scope (chronological ordering).
+        // Author exclusions (§O4.1 caution / §K1 mutual block) and
+        // act_id exclusions (§K1 Phase C moderation hide) still apply.
+        if ($onlyForGroupId !== null && $onlyForGroupId > 0) {
+            $authorIds = null;
+            $moduleIds = null;
+        } else {
+            $authorIds = $this->resolveAuthorFilter($viewerId, $scope);
+            $moduleIds = self::resolveModuleFilter($scope);
+        }
 
         // Over-fetch by 1 to detect has_more without a separate count query.
         $rows = PeepSoActivityRepository::getActivities(
@@ -77,7 +89,9 @@ final class ActivityFeedService
             $cursorActId,
             $limit + 1,
             $excludedAuthorIds,
-            $excludedActIds
+            $excludedActIds,
+            $onlyForGroupId,
+            $excludedGroupIds
         );
 
         $hasMore = count($rows) > $limit;
@@ -120,6 +134,7 @@ final class ActivityFeedService
      *
      * @param list<int>|null $excludedAuthorIds Same §O4.1 shadow-limit channel as `getFeed()`. On a single-author wall, passing the caution-tier list here makes the wall empty when the wall owner is on it — bcc-trust decides whether to apply that policy.
      * @param list<int>|null $excludedActIds    §K1 Phase C per-row moderation hide list.
+     * @param list<int>|null $excludedGroupIds  Group-exclusion list — drop wall posts authored inside a closed/secret/NFT-gated group the viewer doesn't belong to. The wall is the same data stream as `getFeed()`, so the same leak surface applies; the same exclude-list pattern closes it.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
     public function getActivityForAuthor(
@@ -128,7 +143,8 @@ final class ActivityFeedService
         ?string $cursor = null,
         int $limit = 20,
         ?array $excludedAuthorIds = null,
-        ?array $excludedActIds = null
+        ?array $excludedActIds = null,
+        ?array $excludedGroupIds = null
     ): array {
         if ($authorId <= 0) {
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
@@ -145,7 +161,9 @@ final class ActivityFeedService
             $cursorActId,
             $limit + 1,
             $excludedAuthorIds,
-            $excludedActIds
+            $excludedActIds,
+            null,
+            $excludedGroupIds
         );
 
         $hasMore = count($rows) > $limit;
