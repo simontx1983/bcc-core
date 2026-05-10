@@ -370,6 +370,26 @@ add_filter('bcc_system_health', function (array $health): array {
         // bcc-trust subsystems
         'read_model_fallback'  => ['legacy_aggregation'],
         'audit_log_swallow'    => ['score_mutation_before_snapshot'],
+        // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of 9
+        // suspected-dead AJAX handlers (V-08 candidates). Audit found
+        // no caller in any JS / PHP / TS / bcc-frontend. 30-day zero-hit
+        // window → safe to retire per Stabilization Plan V-08 Phase D.
+        // Sustained nonzero activation = an external consumer exists
+        // that the in-repo audit missed (cron / wp-cli / partner script
+        // / cached pre-deploy browser tab) — investigate before retire.
+        'legacy_ajax'          => [
+            // bcc-trust/app/Domain/Onchain/Controllers/WalletController.php
+            'wallet_challenge',
+            'wallet_verify',
+            'wallet_disconnect',
+            'wallet_set_primary',
+            'wallet_list',
+            'collection_toggle_profile',
+            // bcc-trust/app/Domain/Core/Services/UserLifecycleService.php
+            'trust_sync_user',
+            'trust_bulk_sync_users',
+            'trust_init_page_score',
+        ],
     ]);
 
     return $health;
