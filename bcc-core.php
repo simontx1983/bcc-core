@@ -289,6 +289,41 @@ add_action('init', function () {
     }
 }, 99);
 
+// ── System health filter contributors ──────────────────────────
+// Phase 3 of the post-stabilization observability initiative
+// (2026-05-09). Each plugin contributes a top-level block via
+// `add_filter('bcc_system_health', ...)`. bcc-core contributes:
+//   - throttle: full Throttle::health() snapshot (richer than the
+//     inline `cache.rate_limiter_degraded` flag the endpoint already
+//     surfaces — adds backend kind + last_success_ts + readiness).
+//   - degradation_metrics: aggregated current+previous-hour counters
+//     for every subsystem instrumented via DegradationMetrics. The
+//     `any_active` boolean is the single-bit triage signal.
+//
+// The canonical-subsystem list lives here (in bcc-core) and is the
+// single discoverable place where "what subsystems get summarized in
+// /system/health?" is answered. New subsystems wired into
+// DegradationMetrics in any plugin should add their (subsystem, events)
+// tuple to this map AND record themselves in the
+// docs/pattern-registry.md Observability section.
+
+add_filter('bcc_system_health', function (array $health): array {
+    $health['throttle'] = \BCC\Core\Security\Throttle::health();
+
+    $health['degradation_metrics'] = \BCC\Core\Observability\DegradationMetrics::healthSnapshot([
+        // bcc-core subsystems
+        'throttle'             => ['activation'],
+        'null_trust_read'      => ['is_suspended'],
+        'peepso_absence'       => ['group_writer_join'],
+        // bcc-search subsystems
+        'search_lkg'           => ['served', 'unavailable_503'],
+        // bcc-trust subsystems
+        'read_model_fallback'  => ['legacy_aggregation'],
+    ]);
+
+    return $health;
+});
+
 // ── System health endpoint ─────────────────────────────────────
 // Aggregates operational health data from all BCC plugins into a
 // single admin-only endpoint for monitoring, alerting, and debugging.

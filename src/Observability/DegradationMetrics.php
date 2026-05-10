@@ -154,6 +154,88 @@ final class DegradationMetrics
         return $snapshot;
     }
 
+    /**
+     * Aggregate snapshot for the unified `bcc_system_health` envelope.
+     *
+     * Caller passes a `subsystem => [event, ...]` matrix; this returns
+     * the same shape with current-hour and previous-hour totals plus a
+     * top-level "any nonzero?" flag for fast triage. Two hours instead
+     * of one because:
+     *
+     *   - A bout that started 5 minutes ago and is still active shows
+     *     up in the current-hour bucket only — operators want to see
+     *     "yes, currently active."
+     *   - A bout that ended 30 minutes ago shows up only in the
+     *     previous-hour bucket — operators want to see "had an
+     *     incident in the last hour."
+     *
+     * The returned shape is stable and intended to be projected
+     * verbatim into the health endpoint:
+     *
+     *   {
+     *     "any_active": bool,
+     *     "subsystems": {
+     *       "<subsystem>": {
+     *         "current_hour":  { "<event>": int, ... },
+     *         "previous_hour": { "<event>": int, ... }
+     *       },
+     *       ...
+     *     }
+     *   }
+     *
+     * @param array<string, list<string>> $subsystemEvents subsystem => [event, ...]
+     * @param int|null                    $timestamp       Unix ts for the "current" hour;
+     *                                                    defaults to time(). Previous hour is
+     *                                                    derived as $timestamp - 3600.
+     * @return array{any_active: bool, subsystems: array<string, array{current_hour: array<string, int>, previous_hour: array<string, int>}>}
+     */
+    public static function healthSnapshot(array $subsystemEvents, ?int $timestamp = null): array
+    {
+        $now            = $timestamp ?? time();
+        $prev           = $now - 3600;
+        $subsystems     = [];
+        $anyActive      = false;
+
+        foreach ($subsystemEvents as $subsystem => $events) {
+            if (!is_string($subsystem) || $events === []) {
+                continue;
+            }
+            $current  = self::readSnapshot($subsystem, $events, $now);
+            $previous = self::readSnapshot($subsystem, $events, $prev);
+            if ($current === [] && $previous === []) {
+                continue;
+            }
+            $subsystems[$subsystem] = [
+                'current_hour'  => $current,
+                'previous_hour' => $previous,
+            ];
+            // any_active = at least one event in either window had a
+            // nonzero count. Fast triage signal — dashboards can use it
+            // as a single-bit "is anything degraded right now?" check.
+            if (!$anyActive) {
+                foreach ($current as $count) {
+                    if ($count > 0) {
+                        $anyActive = true;
+                        break;
+                    }
+                }
+            }
+            if (!$anyActive) {
+                foreach ($previous as $count) {
+                    if ($count > 0) {
+                        $anyActive = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return [
+            'any_active' => $anyActive,
+            'subsystems' => $subsystems,
+        ];
+    }
+
     private static function buildKey(string $subsystem, string $event, string $hour): string
     {
         return self::KEY_PREFIX . $subsystem . '_' . $event . '_' . $hour;
