@@ -312,8 +312,34 @@ add_filter('bcc_system_health', function (array $health): array {
 
     $health['degradation_metrics'] = \BCC\Core\Observability\DegradationMetrics::healthSnapshot([
         // bcc-core subsystems
-        'throttle'             => ['activation'],
-        'null_trust_read'      => ['is_suspended'],
+        'throttle'                 => ['activation'],
+        // null_trust_read keeps per-method events because the security
+        // posture differs: is_suspended + lock_active_vote_for_dispute
+        // are fail-closed (deny access); other methods are fail-open
+        // empty (UX degraded but not blocking). Operators triage them
+        // differently.
+        'null_trust_read'          => [
+            'activation',
+            'is_suspended',
+            'lock_active_vote_for_dispute',
+            'eligible_panelists',
+        ],
+        // Other NullServices use a single `activation` event per service.
+        // The "is this NullService active?" signal is the operationally
+        // useful one; per-method breakdown is recoverable from logs if
+        // needed. All 10 below activate when bcc-trust is not bound.
+        'null_dispute_adjudication' => ['activation'],
+        'null_score_read'           => ['activation'],
+        'null_score_contributor'    => ['activation'],
+        'null_page_owner'           => ['activation'],
+        'null_wallet_link_read'     => ['activation'],
+        'null_wallet_link_write'    => ['activation'],
+        'null_wallet_signal_write'  => ['activation'],
+        'null_onchain_data_read'    => ['activation'],
+        'null_trending_data'        => ['activation'],
+        // (NullRecalcQueueRead intentionally not instrumented — its
+        // null-return is already detected by the inline health endpoint
+        // as `recalcSource: 'unavailable'`.)
         // peepso_absence — every BCC writer/repo on the PeepSo boundary
         // contributes a unique event so admins see exactly which surface
         // is silently no-opping. Phase 1.5 (2026-05-09) expanded this to
@@ -343,6 +369,7 @@ add_filter('bcc_system_health', function (array $health): array {
         'search_lkg'           => ['served', 'unavailable_503'],
         // bcc-trust subsystems
         'read_model_fallback'  => ['legacy_aggregation'],
+        'audit_log_swallow'    => ['score_mutation_before_snapshot'],
     ]);
 
     return $health;

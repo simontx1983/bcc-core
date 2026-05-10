@@ -10,23 +10,30 @@ if (!defined('ABSPATH')) {
 
 /**
  * No-op implementation returned when bcc-trust is not active.
+ *
+ * Returns empty paginated shapes / zero aggregates so downstream
+ * card-rendering doesn't crash when the onchain read-side is offline.
+ * Sustained activation = validator/collection cards render empty.
  */
 final class NullOnchainDataRead implements OnchainDataReadInterface
 {
     /** @return array{items: array<int, object>, total: int, pages: int} */
     public function getValidatorsForProject(int $projectId, int $page = 1, int $perPage = 8, string $orderBy = 'total_stake'): array
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_onchain_data_read', 'activation');
         return ['items' => [], 'total' => 0, 'pages' => 0];
     }
 
     /** @return array{items: array<int, object>, total: int, pages: int} */
     public function getCollectionsForProject(int $projectId, int $page = 1, int $perPage = 8, string $orderBy = 'total_volume', bool $includeHidden = false): array
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_onchain_data_read', 'activation');
         return ['items' => [], 'total' => 0, 'pages' => 0];
     }
 
     public function getValidatorAggregateStats(int $projectId): array
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_onchain_data_read', 'activation');
         return [
             'active_count'     => 0,
             'chains_count'     => 0,
@@ -39,6 +46,7 @@ final class NullOnchainDataRead implements OnchainDataReadInterface
     /** @return array{items: array<int, object>, total: int, pages: int} */
     public function getAllCollectionsForProject(int $projectId): array
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_onchain_data_read', 'activation');
         return ['items' => [], 'total' => 0, 'pages' => 0];
     }
 
@@ -48,6 +56,7 @@ final class NullOnchainDataRead implements OnchainDataReadInterface
      */
     public function enrichCollectionsWithBadges(array $items, int $ownerId, int $viewerId = 0): array
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_onchain_data_read', 'activation');
         return $items;
     }
 
@@ -58,6 +67,7 @@ final class NullOnchainDataRead implements OnchainDataReadInterface
      */
     public function mergeCollectionsWithManual(array $onchainItems, array $manualRows): array
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_onchain_data_read', 'activation');
         return $onchainItems;
     }
 }

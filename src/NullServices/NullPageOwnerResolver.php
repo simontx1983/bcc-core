@@ -23,6 +23,7 @@ final class NullPageOwnerResolver implements PageOwnerResolverInterface
 {
     public function getPageOwner(int $pageId): int
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_page_owner', 'activation');
         $post = get_post($pageId);
         if (!$post || $post->post_type !== 'peepso-page') {
             return 0;
@@ -32,6 +33,7 @@ final class NullPageOwnerResolver implements PageOwnerResolverInterface
 
     public function getPageForOwner(int $userId): int
     {
+        \BCC\Core\Observability\DegradationMetrics::record('null_page_owner', 'activation');
         $pages = get_posts([
             'author'         => $userId,
             'post_type'      => 'peepso-page',

@@ -18,6 +18,9 @@ final class NullScoreContributor implements ScoreContributorInterface
 {
     public function applyBonus(int $pageId, string $source, float $value): bool
     {
+        // Sustained activation = score-bonus writes silently dropped (the
+        // Onchain bonus retry queue picks them up once bcc-trust is back).
+        \BCC\Core\Observability\DegradationMetrics::record('null_score_contributor', 'activation');
         return false;
     }
 }
