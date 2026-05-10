@@ -77,6 +77,11 @@ final class PeepSoMessageWriter
             return null;
         }
         if (!class_exists('PeepSoMessagesModel')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return null;
         }
 
@@ -138,6 +143,11 @@ final class PeepSoMessageWriter
             return 0;
         }
         if (!class_exists('PeepSoMessagesModel')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return 0;
         }
 

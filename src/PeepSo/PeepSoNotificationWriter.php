@@ -95,6 +95,11 @@ final class PeepSoNotificationWriter
         // it itself for some types via internal block-self checks.)
 
         if (!class_exists('PeepSoNotifications')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return ['ok' => false, 'reason' => 'unavailable'];
         }
 

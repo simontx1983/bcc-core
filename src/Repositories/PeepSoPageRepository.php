@@ -28,6 +28,13 @@ if (!defined('ABSPATH')) {
  *
  * No SELECT *. Queries bounded by user_id IN (...) on caller-paginated
  * sets. No writes — PeepSo owns the write path.
+ *
+ * Same-name sibling: this class shares its short name with
+ * {@see \BCC\PeepSo\Repositories\PeepSoPageRepository}, which reads the
+ * shadow-CPT category-relation rows. Different responsibility — that
+ * class supports the shadow-CPT sync layer; this class is the trust
+ * read-side for page ownership and categorization. Do not collapse —
+ * see docs/pattern-registry.md "Same-name-different-class index".
  */
 final class PeepSoPageRepository
 {

@@ -229,7 +229,15 @@ final class PeepSoMessageRepository
      */
     public static function getUnreadConversationCountForUser(int $userId): int
     {
-        if ($userId <= 0 || !class_exists('PeepSoMessageRecipients')) {
+        if ($userId <= 0) {
+            return 0;
+        }
+        if (!class_exists('PeepSoMessageRecipients')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return 0;
         }
         $recipients = new \PeepSoMessageRecipients();
@@ -243,7 +251,15 @@ final class PeepSoMessageRepository
      */
     public static function userIsParticipant(int $userId, int $rootMsgId): bool
     {
-        if ($userId <= 0 || $rootMsgId <= 0 || !class_exists('PeepSoMessageParticipants')) {
+        if ($userId <= 0 || $rootMsgId <= 0) {
+            return false;
+        }
+        if (!class_exists('PeepSoMessageParticipants')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return false;
         }
         $part = new \PeepSoMessageParticipants();
@@ -258,7 +274,15 @@ final class PeepSoMessageRepository
      */
     public static function findRootConversationId(int $msgId): int
     {
-        if ($msgId <= 0 || !class_exists('PeepSoMessagesModel')) {
+        if ($msgId <= 0) {
+            return 0;
+        }
+        if (!class_exists('PeepSoMessagesModel')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return 0;
         }
         $model = new \PeepSoMessagesModel();
@@ -277,7 +301,15 @@ final class PeepSoMessageRepository
      */
     public static function getParticipantUserIds(int $rootMsgId, ?int $viewerId = null): array
     {
-        if ($rootMsgId <= 0 || !class_exists('PeepSoMessageParticipants')) {
+        if ($rootMsgId <= 0) {
+            return [];
+        }
+        if (!class_exists('PeepSoMessageParticipants')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return [];
         }
         $part = new \PeepSoMessageParticipants();
@@ -394,7 +426,15 @@ final class PeepSoMessageRepository
      */
     public static function markConversationAsViewed(int $userId, int $rootMsgId): void
     {
-        if ($userId <= 0 || $rootMsgId <= 0 || !class_exists('PeepSoMessageRecipients')) {
+        if ($userId <= 0 || $rootMsgId <= 0) {
+            return;
+        }
+        if (!class_exists('PeepSoMessageRecipients')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return;
         }
         $recipients = new \PeepSoMessageRecipients();

@@ -47,6 +47,11 @@ final class PeepSoReactionWriter
             return false;
         }
         if (!class_exists('PeepSoReactionsModel')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return false;
         }
 
@@ -70,6 +75,11 @@ final class PeepSoReactionWriter
             return false;
         }
         if (!class_exists('PeepSoReactionsModel')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return false;
         }
 

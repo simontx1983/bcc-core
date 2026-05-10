@@ -85,6 +85,11 @@ final class PeepSoGifWriter
             return ['ok' => false, 'reason' => 'forbidden'];
         }
         if (!class_exists('PeepSoActivity') || !class_exists('PeepSoGiphy')) {
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
             return ['ok' => false, 'reason' => 'unavailable'];
         }
 
