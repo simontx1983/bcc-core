@@ -233,6 +233,7 @@ final class PeepSoMessageRepository
             return 0;
         }
         if (!class_exists('PeepSoMessageRecipients')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'message_repo_unread_count');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
@@ -255,6 +256,7 @@ final class PeepSoMessageRepository
             return false;
         }
         if (!class_exists('PeepSoMessageParticipants')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'message_repo_is_participant');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
@@ -278,6 +280,7 @@ final class PeepSoMessageRepository
             return 0;
         }
         if (!class_exists('PeepSoMessagesModel')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'message_repo_root_conversation_id');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
@@ -305,6 +308,7 @@ final class PeepSoMessageRepository
             return [];
         }
         if (!class_exists('PeepSoMessageParticipants')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'message_repo_participants');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
@@ -430,6 +434,7 @@ final class PeepSoMessageRepository
             return;
         }
         if (!class_exists('PeepSoMessageRecipients')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'message_repo_mark_viewed');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);

@@ -84,6 +84,7 @@ final class PeepSoStatusWriter
             return ['ok' => false, 'reason' => 'forbidden'];
         }
         if (!class_exists('PeepSoActivity')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'status_writer_create');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);

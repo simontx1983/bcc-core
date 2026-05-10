@@ -125,6 +125,7 @@ final class PeepSoPhotoWriter
             || !class_exists('PeepSoPhotosModel')
             || !class_exists('PeepSoSharePhotos')
         ) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'photo_writer_create');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);

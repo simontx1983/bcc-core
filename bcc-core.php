@@ -314,7 +314,31 @@ add_filter('bcc_system_health', function (array $health): array {
         // bcc-core subsystems
         'throttle'             => ['activation'],
         'null_trust_read'      => ['is_suspended'],
-        'peepso_absence'       => ['group_writer_join'],
+        // peepso_absence — every BCC writer/repo on the PeepSo boundary
+        // contributes a unique event so admins see exactly which surface
+        // is silently no-opping. Phase 1.5 (2026-05-09) expanded this to
+        // cover all 18 V-11 guards across bcc-core/src/PeepSo/* +
+        // bcc-core/src/Repositories/PeepSoMessageRepository.
+        'peepso_absence'       => [
+            'status_writer_create',
+            'comment_writer_add',
+            'gif_writer_create',
+            'photo_writer_create',
+            'follow_writer_follow',
+            'follow_writer_unfollow',
+            'group_writer_join',
+            'group_writer_leave',
+            'notification_writer_send',
+            'reaction_writer_set',
+            'reaction_writer_remove',
+            'message_writer_send_new',
+            'message_writer_send_in_conversation',
+            'message_repo_unread_count',
+            'message_repo_is_participant',
+            'message_repo_root_conversation_id',
+            'message_repo_participants',
+            'message_repo_mark_viewed',
+        ],
         // bcc-search subsystems
         'search_lkg'           => ['served', 'unavailable_503'],
         // bcc-trust subsystems

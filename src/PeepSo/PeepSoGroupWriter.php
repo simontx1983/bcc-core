@@ -109,6 +109,7 @@ final class PeepSoGroupWriter
             return false;
         }
         if (!class_exists('PeepSoGroupUser')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_leave');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);

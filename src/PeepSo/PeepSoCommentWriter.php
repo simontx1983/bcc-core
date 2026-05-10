@@ -84,6 +84,7 @@ final class PeepSoCommentWriter
             return 0;
         }
         if (!class_exists('PeepSoActivity')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'comment_writer_add');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);

@@ -49,6 +49,7 @@ final class PeepSoFollowWriter
             return 0;
         }
         if (!class_exists('PeepSoUserFollower')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'follow_writer_follow');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
@@ -93,6 +94,7 @@ final class PeepSoFollowWriter
             return false;
         }
         if (!class_exists('PeepSoUserFollower')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'follow_writer_unfollow');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
