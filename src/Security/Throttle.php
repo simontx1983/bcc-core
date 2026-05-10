@@ -122,6 +122,13 @@ final class Throttle
      */
     private static function markSharedDegraded(): void
     {
+        // Observability counter — records every transition into degraded
+        // mode so operators can detect "we were degraded for N minutes
+        // last hour" before users notice. Recorded BEFORE the option-write
+        // throttle so every request hitting a degraded path contributes
+        // to the per-hour bucket; the option write itself stays throttled.
+        \BCC\Core\Observability\DegradationMetrics::record('throttle');
+
         $now       = time();
         $existing  = (int) get_option(self::DEGRADED_OPTION_KEY, 0);
         // Only write if the existing marker is absent, expired, or about to

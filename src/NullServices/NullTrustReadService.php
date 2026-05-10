@@ -55,6 +55,10 @@ final class NullTrustReadService implements TrustReadServiceInterface
      */
     public function isSuspended(int $userId): bool
     {
+        // Observability counter — records every fail-closed deny so
+        // operators can detect "we've been blocking everyone as suspended
+        // for N minutes" before non-admin users start filing tickets.
+        \BCC\Core\Observability\DegradationMetrics::record('null_trust_read', 'is_suspended');
         return true;
     }
 

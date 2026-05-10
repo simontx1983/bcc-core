@@ -44,6 +44,7 @@ return array(
     'BCC\\Core\\NullServices\\NullWalletLinkRead' => $baseDir . '/src/NullServices/NullWalletLinkRead.php',
     'BCC\\Core\\NullServices\\NullWalletLinkWrite' => $baseDir . '/src/NullServices/NullWalletLinkWrite.php',
     'BCC\\Core\\NullServices\\NullWalletSignalWrite' => $baseDir . '/src/NullServices/NullWalletSignalWrite.php',
+    'BCC\\Core\\Observability\\DegradationMetrics' => $baseDir . '/src/Observability/DegradationMetrics.php',
     'BCC\\Core\\PeepSo\\PeepSo' => $baseDir . '/src/PeepSo/PeepSo.php',
     'BCC\\Core\\PeepSo\\PeepSoBlockWriter' => $baseDir . '/src/PeepSo/PeepSoBlockWriter.php',
     'BCC\\Core\\PeepSo\\PeepSoCommentWriter' => $baseDir . '/src/PeepSo/PeepSoCommentWriter.php',

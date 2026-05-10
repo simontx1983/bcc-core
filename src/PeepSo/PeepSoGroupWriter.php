@@ -60,6 +60,13 @@ final class PeepSoGroupWriter
             return false;
         }
         if (!class_exists('PeepSoGroupUser') || !class_exists('PeepSoGroupUsers')) {
+            // Observability counter: PeepSo absence on a writer hot path
+            // (holder-group join). Recorded on every call — the per-method
+            // static below dedups the log line, but the metric counter is
+            // intentionally per-call so operators see "the join writer
+            // silently no-opped 1247 times in the last hour" rather than
+            // "we logged it once."
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_join');
             static $loggedOnce = false;
             if (!$loggedOnce) {
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);

@@ -71,6 +71,7 @@ class ComposerStaticInitc0a9cfb88672e1d95cb2e199729f673a
         'BCC\\Core\\NullServices\\NullWalletLinkRead' => __DIR__ . '/../..' . '/src/NullServices/NullWalletLinkRead.php',
         'BCC\\Core\\NullServices\\NullWalletLinkWrite' => __DIR__ . '/../..' . '/src/NullServices/NullWalletLinkWrite.php',
         'BCC\\Core\\NullServices\\NullWalletSignalWrite' => __DIR__ . '/../..' . '/src/NullServices/NullWalletSignalWrite.php',
+        'BCC\\Core\\Observability\\DegradationMetrics' => __DIR__ . '/../..' . '/src/Observability/DegradationMetrics.php',
         'BCC\\Core\\PeepSo\\PeepSo' => __DIR__ . '/../..' . '/src/PeepSo/PeepSo.php',
         'BCC\\Core\\PeepSo\\PeepSoBlockWriter' => __DIR__ . '/../..' . '/src/PeepSo/PeepSoBlockWriter.php',
         'BCC\\Core\\PeepSo\\PeepSoCommentWriter' => __DIR__ . '/../..' . '/src/PeepSo/PeepSoCommentWriter.php',
