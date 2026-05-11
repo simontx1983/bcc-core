@@ -369,7 +369,16 @@ add_filter('bcc_system_health', function (array $health): array {
         'search_lkg'           => ['served', 'unavailable_503'],
         // bcc-trust subsystems
         'read_model_fallback'  => ['legacy_aggregation'],
-        'audit_log_swallow'    => ['score_mutation_before_snapshot'],
+        // audit_log_swallow — silent-catch read paths that are supposed
+        // to be reliable. Sustained activation = the read is unhealthy
+        // on a hot path; admins see it via /system/health before users
+        // notice missing data. Phase 1.8 (2026-05-11) added the two
+        // owner-lookup swallow events.
+        'audit_log_swallow'    => [
+            'score_mutation_before_snapshot',   // Phase 1 — ScoreMutationLogger::readCurrentScore
+            'discovery_owner_verified_status',  // Phase 1.8 — PageDiscoveryService verified-badge lookup
+            'leaderboard_owner_fallback',       // Phase 1.8 — EndorsementLeaderboardEndpoint owner resolver fallback
+        ],
         // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of 9
         // suspected-dead AJAX handlers (V-08 candidates). Audit found
         // no caller in any JS / PHP / TS / bcc-frontend. 30-day zero-hit
