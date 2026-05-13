@@ -390,6 +390,68 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * Inverse of getPrimaryLocalForUsers. Given a Local group_id, return
+     * every user who's designated it as primary. Used by the
+     * "post in your primary Local" notification dispatcher (bcc-trust)
+     * to fan out to the recipient set.
+     *
+     * The meta key string is hardcoded here rather than imported from
+     * bcc-trust's LocalsService::META_PRIMARY_GROUP because bcc-core
+     * cannot depend on bcc-trust. The two declarations are intentionally
+     * paired: changing one without the other is a §VIII pattern
+     * violation — see getPrimaryLocalForUsers above for the same
+     * coupling note.
+     *
+     * Bounded by $limit per §5 (no unbounded SELECT). The default 1000
+     * is well above today's typical primary-Local membership; revisit
+     * with cursor pagination when a real Local crosses ~500 primary
+     * members.
+     *
+     * Order: server-defined (by user_id ascending). Deduped via the
+     * meta-key uniqueness contract — `bcc_primary_local_group_id` is
+     * a singleton per user (one row max, written via update_user_meta
+     * in LocalsService::setPrimaryLocal).
+     *
+     * @return list<int> user IDs (positive integers), bounded by $limit
+     */
+    public static function findUsersByPrimaryLocal(int $groupId, int $limit = 1000): array
+    {
+        if ($groupId <= 0 || $limit <= 0) {
+            return [];
+        }
+
+        global $wpdb;
+
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col(
+            $wpdb->prepare(
+                "SELECT user_id
+                   FROM {$wpdb->usermeta}
+                  WHERE meta_key = %s
+                    AND meta_value = %s
+                  ORDER BY user_id ASC
+                  LIMIT %d",
+                'bcc_primary_local_group_id',
+                (string) $groupId,
+                $limit
+            )
+        );
+
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $value) {
+            $userId = (int) $value;
+            if ($userId > 0) {
+                $out[] = $userId;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Bulk-fetch the viewer's active memberships across a set of
      * group_ids. Used by LocalsService to enrich the catalog with
      * per-row viewer_membership without an N+1.
