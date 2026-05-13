@@ -320,4 +320,72 @@ final class PeepSoPageRepository
             'dao'       => count($byType['dao']),
         ];
     }
+
+    /**
+     * Reverse owner-to-pages lookup: given a set of user_ids, return
+     * the `member_owner` page_ids they own. Caller-paginated set;
+     * result is capped defensively (default 500).
+     *
+     * Drives §O2.1 EXTERNAL-slot resolver in HighlightsService, which
+     * needs "pages owned by everyone the viewer follows" before
+     * querying score_events on those pages. The viewer's binder is
+     * user-keyed; the score-event stream is page-keyed — this method
+     * is the bridge.
+     *
+     * Empty `$userIds` short-circuits (no SQL). The ordering by
+     * `pm_id DESC` keeps newest memberships first so the most recently
+     * established ownership pages surface earlier when the caller's
+     * downstream LIMIT clips the list.
+     *
+     * @param list<int> $userIds Bounded by caller (typical 200 follows
+     *                           from PeepSoFollowerRepository::getFollowing).
+     * @param int       $limit   Defensive cap on returned page_ids.
+     * @return list<int>
+     */
+    public static function getPageIdsOwnedByUsers(array $userIds, int $limit = 500): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $clean[$i] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        $cappedLimit = min(max($limit, 1), 1000);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        /** @var list<array{page_id: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT pm_page_id AS page_id
+                   FROM {$wpdb->prefix}peepso_page_members
+                  WHERE pm_user_id IN ({$placeholders})
+                    AND pm_user_status = 'member_owner'
+                  ORDER BY pm_id DESC
+                  LIMIT %d",
+                ...array_merge($idList, [$cappedLimit])
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $pid = (int) $row['page_id'];
+            if ($pid > 0) {
+                $out[] = $pid;
+            }
+        }
+        return $out;
+    }
 }
