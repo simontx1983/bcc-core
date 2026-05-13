@@ -370,14 +370,19 @@ add_filter('bcc_system_health', function (array $health): array {
         // bcc-trust subsystems
         'read_model_fallback'  => ['legacy_aggregation'],
         // audit_log_swallow — silent-catch read paths that are supposed
-        // to be reliable. Sustained activation = the read is unhealthy
-        // on a hot path; admins see it via /system/health before users
-        // notice missing data. Phase 1.8 (2026-05-11) added the two
-        // owner-lookup swallow events.
+        // to be reliable, plus the WRITE path inside AuditLogger::log()
+        // itself (the only swallow that §VIII.30 deliberately requires:
+        // an audit-log write failure must NEVER break the mutation
+        // path). Sustained activation = the audit subsystem is
+        // unhealthy; admins see it via /system/health before forensic
+        // queries discover the gap on incident review. Phase 1.8
+        // (2026-05-11) added the two owner-lookup swallow events;
+        // 2026-05-13 added the log_write_failed write-path source.
         'audit_log_swallow'    => [
             'score_mutation_before_snapshot',   // Phase 1 — ScoreMutationLogger::readCurrentScore
             'discovery_owner_verified_status',  // Phase 1.8 — PageDiscoveryService verified-badge lookup
             'leaderboard_owner_fallback',       // Phase 1.8 — EndorsementLeaderboardEndpoint owner resolver fallback
+            'log_write_failed',                 // 2026-05-13 — AuditLogger::log insert returned false
         ],
         // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of 9
         // suspected-dead AJAX handlers (V-08 candidates). Audit found
