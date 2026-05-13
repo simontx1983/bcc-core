@@ -384,6 +384,22 @@ add_filter('bcc_system_health', function (array $health): array {
             'leaderboard_owner_fallback',       // Phase 1.8 — EndorsementLeaderboardEndpoint owner resolver fallback
             'log_write_failed',                 // 2026-05-13 — AuditLogger::log insert returned false
         ],
+        // account_security_mail — bcc-trust AccountSecurityMailer wp_mail
+        // failures. These are the side-channel emails that warn a user
+        // their credentials / identity-bearing artifacts changed (email,
+        // password, delete, wallet link/unlink). Sustained activation =
+        // mail subsystem unhealthy on a security-critical surface; ops
+        // should treat this as a P1 alert, not just a warning. Per
+        // AccountSecurityMailer's docblock, failures here mean the user
+        // who was supposed to receive a canary signal did not — the
+        // audit_log row is the only remaining trail.
+        'account_security_mail' => [
+            'email_changed_send_failed',
+            'password_changed_send_failed',
+            'account_deleted_send_failed',
+            'wallet_linked_send_failed',
+            'wallet_unlinked_send_failed',
+        ],
         // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of 9
         // suspected-dead AJAX handlers (V-08 candidates). Audit found
         // no caller in any JS / PHP / TS / bcc-frontend. 30-day zero-hit
