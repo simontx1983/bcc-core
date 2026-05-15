@@ -381,7 +381,6 @@ add_filter('bcc_system_health', function (array $health): array {
         'audit_log_swallow'    => [
             'score_mutation_before_snapshot',   // Phase 1 — ScoreMutationLogger::readCurrentScore
             'discovery_owner_verified_status',  // Phase 1.8 — PageDiscoveryService verified-badge lookup
-            'leaderboard_owner_fallback',       // Phase 1.8 — EndorsementLeaderboardEndpoint owner resolver fallback
             'log_write_failed',                 // 2026-05-13 — AuditLogger::log insert returned false
         ],
         // account_security_mail — bcc-trust AccountSecurityMailer wp_mail
