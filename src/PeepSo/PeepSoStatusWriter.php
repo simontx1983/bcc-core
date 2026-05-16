@@ -175,21 +175,38 @@ final class PeepSoStatusWriter
      *
      * Storage:
      *   - post_type    = peepso-activity-status (reused, no CPT registration)
-     *   - post_status  = publish
+     *   - post_status  = $status (validated 'draft'|'publish')
+     *   - post_title   = sanitize_text_field($title) or '' when $title is null
      *   - post_excerpt = §D6 excerpt (300–500 chars; Floor renders this)
      *   - post_content = §D6 full_text (no cap; blog tab renders this)
      *   - post_author  = $authorId
      *
+     * PR-A (§D6 crypto-blog composer) widened the signature to accept
+     * an optional title + status. Legacy 2-string callers continue to
+     * work unchanged. The status param is the gate that lets the
+     * caller persist a draft — drafts must NOT fire
+     * `bcc_blog_post_created`; the BlogStatusTransitionHandler does
+     * that on draft→publish.
+     *
      * Returns the wp_post ID on success or 0 on failure. Caller
      * (PostsService) writes any sidecar metadata + fires the §A3 event.
+     *
+     * @throws \InvalidArgumentException When $status is not 'draft' or 'publish'.
      */
     public static function createSelfBlogPost(
         int $authorId,
         string $excerpt,
-        string $fullText
+        string $fullText,
+        ?string $title = null,
+        string $status = 'publish'
     ): int {
         if ($authorId <= 0) {
             return 0;
+        }
+        if ($status !== 'draft' && $status !== 'publish') {
+            throw new \InvalidArgumentException(
+                "PeepSoStatusWriter::createSelfBlogPost: status must be 'draft' or 'publish', got " . $status
+            );
         }
 
         $excerpt  = trim($excerpt);
@@ -198,11 +215,26 @@ final class PeepSoStatusWriter
             return 0;
         }
 
+        // Title sanitization: caller passes `null` for the legacy
+        // shape (no title) and a string otherwise. Sanitization runs
+        // inside the writer so external callers can't bypass it.
+        $titleField = '';
+        if (is_string($title) && trim($title) !== '') {
+            $titleField = sanitize_text_field($title);
+        }
+
+        // post_type = PeepSo's canonical CPT slug `peepso-post` (11
+        // chars). WP's wp_posts.post_type column is varchar(20); the
+        // string `peepso-activity-status` (22 chars) that earlier code
+        // tried fails the strict length validation WP 6.7+ added.
+        // Blog vs status discrimination is handled downstream by the
+        // `_bcc_activity_module='blog'` post_meta marker, NOT by the
+        // post_type field — see BlogStatusTransitionHandler.
         $postId = wp_insert_post([
-            'post_type'    => 'peepso-activity-status',
-            'post_status'  => 'publish',
+            'post_type'    => 'peepso-post',
+            'post_status'  => $status,
             'post_author'  => $authorId,
-            'post_title'   => '',
+            'post_title'   => $titleField,
             // wp_kses_post on save protects against script injection in the
             // body. Markdown stays as-is; the frontend handles rendering.
             'post_excerpt' => wp_kses_post($excerpt),

@@ -18,7 +18,7 @@
  * available (PeepSo is a hard sibling-plugin dependency for BCC).
  *
  * @package BCC\Core\PeepSo
- * @since V1 (2026-04, Binder Phase 2)
+ * @since V1 (2026-04, watch-graph Phase 2)
  */
 
 namespace BCC\Core\PeepSo;
@@ -80,9 +80,10 @@ final class PeepSoFollowWriter
      *
      * PeepSo's convention is to keep the row alive and flip the flag
      * (NOT DELETE the row). The bcc_pull_meta sidecar references
-     * uf_id, so the row must persist; the binder's read query already
-     * filters by uf_follow=1 so flipped rows naturally drop out of
-     * the binder view. Deleting bcc_pull_meta is the caller's job.
+     * uf_id, so the row must persist; the watch-graph's read query
+     * already filters by uf_follow=1 so flipped rows naturally drop
+     * out of the watchlist view. Deleting bcc_pull_meta is the
+     * caller's job.
      *
      * Returns:
      *   - true  when the relationship existed and was flipped (or was already 0)

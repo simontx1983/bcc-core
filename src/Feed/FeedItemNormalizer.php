@@ -56,17 +56,28 @@ final class FeedItemNormalizer
      * will all flow through here. Keep entries explicit; do NOT rely
      * on the `?? 'status'` fallback as a feature.
      *
-     * String-keyed entries (`'review'`, `'pull_batch'`, etc.) are
-     * historic BCC-owned modules that the BCC writer was supposed to
-     * stamp on `act_module_id`. There's an open caveat that the
-     * underlying column is SMALLINT and string writes coerce to 0,
-     * so those keys are effectively dormant on most installs and the
-     * affected rows currently fall through to 'status' via the
-     * default. Surfacing that as a pre-existing bug worth a separate
-     * fix; this map keeps the keys for the day the writer is fixed.
+     * Integer-keyed entries (cast to string by the lookup) are the
+     * actual numeric `act_module_id` values written to peepso_activities.
+     * Two namespaces share this map:
      *
-     * Integer-keyed entries (cast to string by the lookup) are PeepSo's
-     * native module IDs as actually stored:
+     *   • 1, 4, …  — PeepSo's native module IDs as PeepSo emits them.
+     *   • 200+     — BCC-owned numeric IDs assigned by
+     *                `PeepSoActivityWriter::MODULE_ID_BY_NAME`. The
+     *                writer translates a string name ('blog', 'review')
+     *                to its integer id before INSERT because the column
+     *                is SMALLINT — string writes coerce to 0 and lose
+     *                discrimination on the read side. The 200-range is
+     *                deliberately outside PeepSo's known modules to
+     *                guarantee no collision.
+     *
+     * String-keyed entries (`'review'`, `'pull_batch'`, etc.) below are
+     * a historical record from before the 2026-05-15 SMALLINT fix —
+     * they NEVER fired in practice (the broken writes coerced to 0),
+     * so the lookup fell through to 'status'. Kept here so callers
+     * passing string module names see a deterministic mapping; any
+     * future writer that legitimately stamps strings can land safely.
+     *
+     * PeepSo's native module ID legend (as actually stored):
      *   1    = PeepSoActivity     (status)             — explicit since v1.5
      *   4    = PeepSoSharePhotos  (photo)              — added in v1.5
      *
@@ -83,9 +94,21 @@ final class FeedItemNormalizer
         '1' => 'status',
         '4' => 'photo',
 
-        // BCC-owned modules — string keys (see caveat above re: SMALLINT
-        // coercion bug). Kept for forward compatibility once the writer
-        // is fixed to stamp string values correctly.
+        // BCC-owned modules — integer keys (200-range). Must stay in
+        // lockstep with PeepSoActivityWriter::MODULE_ID_BY_NAME.
+        '200' => 'pull_batch',
+        '201' => 'page_claim',
+        '202' => 'review',
+        '203' => 'dispute_signed',
+        '204' => 'blog_excerpt',
+
+        // BCC-owned modules — string keys (legacy fallback). The
+        // pre-2026-05-15 writer wrote these as strings, but the
+        // SMALLINT column coerced them to 0 — so no production row
+        // ever matched these keys. Kept for callers that pass the
+        // string name through {ReactionGrammarMap::deriveFromRow},
+        // which lets the kind resolve uniformly regardless of how the
+        // moduleId arrived.
         'status'     => 'status',
         'review'     => 'review',
         'pull_batch' => 'pull_batch',

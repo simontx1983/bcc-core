@@ -456,4 +456,33 @@ final class PeepSoActivityRepository
         }
         return $map;
     }
+
+    /**
+     * Lifetime count of `act_module_id = 'blog'` activities authored by
+     * $userId. Joins against wp_posts so deleted / unpublished blog
+     * posts don't inflate the count — a published-only count matches
+     * what the /u/:handle/blog tab actually shows.
+     *
+     * Returns 0 for invalid userId or zero rows.
+     */
+    public static function countBlogsByAuthor(int $userId): int
+    {
+        if ($userId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+
+        $sql = $wpdb->prepare(
+            'SELECT COUNT(*)
+               FROM ' . self::table() . ' a
+               INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
+              WHERE p.post_author     = %d
+                AND a.act_module_id   = \'blog\'
+                AND p.post_status     = \'publish\'',
+            $userId
+        );
+
+        return (int) $wpdb->get_var($sql);
+    }
 }

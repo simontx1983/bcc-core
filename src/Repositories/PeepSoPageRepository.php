@@ -328,7 +328,7 @@ final class PeepSoPageRepository
      *
      * Drives §O2.1 EXTERNAL-slot resolver in HighlightsService, which
      * needs "pages owned by everyone the viewer follows" before
-     * querying score_events on those pages. The viewer's binder is
+     * querying score_events on those pages. The viewer's watchlist is
      * user-keyed; the score-event stream is page-keyed — this method
      * is the bridge.
      *

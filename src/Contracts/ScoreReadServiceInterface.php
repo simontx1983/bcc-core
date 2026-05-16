@@ -36,8 +36,9 @@ interface ScoreReadServiceInterface
      *
      * Like getScoresForPageIds() but includes additional fields from the
      * read model needed for unified ranking across search and discovery.
-     * The ranking_score uses the same composite formula as /bcc/v1/discover
-     * so consumers get consistent trust-based ordering.
+     * The ranking_score uses the same composite formula
+     * PageDiscoveryService applies on the /cards listing so consumers
+     * get consistent trust-based ordering across surfaces.
      *
      * Each entry contains:
      * - total_score       (float)  Raw trust score (0–100).
