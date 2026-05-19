@@ -1,5 +1,11 @@
-# Dependencies
-/vendor/
+# Dependencies — production vendor/ IS committed for GitHub-based deploys
+# (Deployer for Git ships the zip from the repo, doesn't run composer
+# server-side). Dev-only paths below are gitignored so running
+# `composer install` locally to restore phpstan doesn't dirty git status.
+/vendor/bin/phpstan
+/vendor/bin/phpstan.phar
+/vendor/phpstan/
+/vendor/szepeviktor/
 
 # OS / IDE
 .DS_Store

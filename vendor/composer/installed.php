@@ -1,0 +1,23 @@
+<?php return array(
+    'root' => array(
+        'name' => 'bcc/core',
+        'pretty_version' => 'dev-main',
+        'version' => 'dev-main',
+        'reference' => '011085bc5a820ba3fdb4df6c60a179a8eb2ae33b',
+        'type' => 'wordpress-plugin',
+        'install_path' => __DIR__ . '/../../',
+        'aliases' => array(),
+        'dev' => false,
+    ),
+    'versions' => array(
+        'bcc/core' => array(
+            'pretty_version' => 'dev-main',
+            'version' => 'dev-main',
+            'reference' => '011085bc5a820ba3fdb4df6c60a179a8eb2ae33b',
+            'type' => 'wordpress-plugin',
+            'install_path' => __DIR__ . '/../../',
+            'aliases' => array(),
+            'dev_requirement' => false,
+        ),
+    ),
+);
