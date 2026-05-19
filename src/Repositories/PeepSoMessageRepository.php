@@ -447,6 +447,94 @@ final class PeepSoMessageRepository
     }
 
     /**
+     * For each `$rootMsgId` in `$rootIds` where `$userId` IS a
+     * participant, return the latest message's id + posted_at_gmt.
+     * Threads where the viewer isn't a participant are absent from
+     * the map (server-side auth gate — never trust the frontend's
+     * `open_threads` query param). Used by the §4.31 /me/badges
+     * endpoint to give the frontend a "your open conversation moved
+     * forward" hint without polling the conversation read endpoint
+     * every 5s.
+     *
+     * Bounded by the caller (BadgesService caps `$rootIds` at 5).
+     *
+     * @param list<int> $rootIds
+     * @return array<int, array{latest_message_id: int, posted_at: string}>
+     */
+    public static function getLatestPerThreadForViewer(int $userId, array $rootIds): array
+    {
+        if ($userId <= 0 || $rootIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($rootIds as $id) {
+            $i = (int) $id;
+            if ($i > 0) {
+                $clean[$i] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $ids = array_slice(array_keys($clean), 0, self::INBOX_BATCH_MAX);
+
+        global $wpdb;
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+        $args = $ids;
+        array_unshift($args, $userId);
+
+        // INNER JOIN against peepso_message_participants is the auth
+        // gate — only roots where the viewer has a participant row
+        // get a hint. Correlated MAX(mrec_msg_id) returns the
+        // newest message id the viewer can see (mrec_deleted = 0
+        // respects per-user inbox state).
+        $sql = $wpdb->prepare(
+            "SELECT
+                mpart.mpart_msg_id   AS root_msg_id,
+                latest.ID            AS latest_message_id,
+                latest.post_date_gmt AS posted_at
+             FROM {$wpdb->prefix}peepso_message_participants AS mpart
+             INNER JOIN {$wpdb->posts} AS latest
+                ON latest.ID = (
+                    SELECT MAX(mrec.mrec_msg_id)
+                    FROM {$wpdb->prefix}peepso_message_recipients AS mrec
+                    INNER JOIN {$wpdb->posts} AS p
+                        ON p.ID = mrec.mrec_msg_id
+                    WHERE mrec.mrec_user_id = %d
+                      AND mrec.mrec_deleted = 0
+                      AND (mrec.mrec_parent_id = mpart.mpart_msg_id
+                           OR mrec.mrec_msg_id = mpart.mpart_msg_id)
+                      AND p.post_status = 'publish'
+                      AND p.post_type IN ('peepso-message', 'peepso-message-notic')
+                )
+             WHERE mpart.mpart_user_id = %d
+               AND mpart.mpart_msg_id IN ({$placeholders})",
+            ...$args
+        );
+
+        /** @var list<array{root_msg_id: string, latest_message_id: string, posted_at: string}>|null $rows */
+        $rows = $wpdb->get_results($sql, ARRAY_A);
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $rootId = (int) ($row['root_msg_id'] ?? 0);
+            if ($rootId <= 0) {
+                continue;
+            }
+            $out[$rootId] = [
+                'latest_message_id' => (int) ($row['latest_message_id'] ?? 0),
+                'posted_at'         => (string) ($row['posted_at'] ?? ''),
+            ];
+        }
+        return $out;
+    }
+
+    /**
      * Count messages authored by `$authorId` in the last
      * `$windowSeconds` — drives the §4.X.send rate limit. Bounded:
      * the post_date index keeps this a range scan, never a full
