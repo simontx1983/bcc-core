@@ -402,25 +402,59 @@ add_filter('bcc_system_health', function (array $health): array {
             'wallet_unlinked_send_failed',
             'sessions_revoked_all_send_failed',  // Tier D (2026-05-16) — /auth/logout-everywhere confirmation
         ],
-        // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of 9
+        // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of
         // suspected-dead AJAX handlers (V-08 candidates). Audit found
         // no caller in any JS / PHP / TS / bcc-frontend. 30-day zero-hit
         // window → safe to retire per Stabilization Plan V-08 Phase D.
         // Sustained nonzero activation = an external consumer exists
         // that the in-repo audit missed (cron / wp-cli / partner script
         // / cached pre-deploy browser tab) — investigate before retire.
+        //
+        // 2026-05-25: the 6 wallet/collection AJAX handlers (wallet_challenge,
+        // wallet_verify, wallet_disconnect, wallet_set_primary, wallet_list,
+        // collection_toggle_profile) were retired under the fresh-install
+        // policy without waiting for the full 30-day window; SPA + claim
+        // flows have always used the REST surface.
         'legacy_ajax'          => [
-            // bcc-trust/app/Domain/Onchain/Controllers/WalletController.php
-            'wallet_challenge',
-            'wallet_verify',
-            'wallet_disconnect',
-            'wallet_set_primary',
-            'wallet_list',
-            'collection_toggle_profile',
             // bcc-trust/app/Domain/Core/Services/UserLifecycleService.php
             'trust_sync_user',
             'trust_bulk_sync_users',
             'trust_init_page_score',
+        ],
+        // cron_dispatch — soft failures from wp_schedule_single_event /
+        // AsyncDispatcher::enqueueAsync on the trust async surface. A `false`
+        // return from wp-cron's options-table write (or AS returning 0)
+        // means the worker never fires. Most post-mutation paths have a
+        // reconciliation sweep that re-enqueues (DisputeScheduler::doReconcile
+        // for panelist notify, the recurring graph/recalc/stats sweeps for
+        // routine work) — the two events below are the surfaces where loss
+        // is unrecoverable without manual replay:
+        //   - endorsement_fraud_analyzer: per-endorsement fraud rescoring.
+        //     No reconciliation; a missed enqueue means the endorser keeps
+        //     a trust bonus they should not.
+        //   - vote_job_dispatcher: the composite `bcc_trust_async_post_vote`
+        //     job that fans out to fraud analysis + trust graph + recalc +
+        //     stats refresh. A miss strands all four sub-tasks for that vote.
+        // Sustained nonzero activation = wp_options is unhealthy on the
+        // hot mutation path — read like an incident, not a warning.
+        'cron_dispatch'        => [
+            'endorsement_fraud_analyzer',
+            'vote_job_dispatcher',
+        ],
+        // polkadot_verify — sr25519/ed25519/ecdsa signature verification
+        // is delegated to the bcc-frontend Next.js app (PHP has no native
+        // schnorrkel). Activations here mean the internal verify route
+        // is unreachable, misconfigured, or returned an error response.
+        // Sustained nonzero counts = Polkadot wallet linking is broken;
+        // the Helius-style "always-200 + audit-log" posture does NOT
+        // apply (this is an authenticated internal call, not a public
+        // webhook). See PolkadotSignatureVerifier.
+        'polkadot_verify'      => [
+            'secret_missing',       // BCC_INTERNAL_VERIFY_SECRET not defined
+            'frontend_url_missing', // BCC_FRONTEND_INTERNAL_URL not defined
+            'route_unreachable',    // network/SSRF/transport error
+            'route_error_status',   // non-200 response from the route
+            'route_malformed_body', // response body wasn't the expected shape
         ],
     ]);
 
