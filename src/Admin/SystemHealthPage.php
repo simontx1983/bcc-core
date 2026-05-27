@@ -84,6 +84,7 @@ final class SystemHealthPage
         self::renderTrustSubsystem($data['trust_subsystem'] ?? []);
         self::renderWpCron($data['wp_cron'] ?? []);
         self::renderPluginHealth($data['plugins'] ?? []);
+        self::renderVersions();
         self::renderRawJson($data);
 
         echo '</div>';
@@ -326,6 +327,27 @@ final class SystemHealthPage
         }
 
         echo '</tbody></table>';
+    }
+
+    /**
+     * Build versions block. Lets an operator confirm at a glance which
+     * version of each BCC plugin is live after a Git Updater pull.
+     */
+    private static function renderVersions(): void
+    {
+        $versions = [
+            'bcc-core'   => defined('BCC_CORE_VERSION')   ? BCC_CORE_VERSION   : null,
+            'bcc-trust'  => defined('BCC_TRUST_VERSION')  ? BCC_TRUST_VERSION  : null,
+            'bcc-search' => defined('BCC_SEARCH_VERSION') ? BCC_SEARCH_VERSION : null,
+        ];
+
+        $rows = [];
+        foreach ($versions as $plugin => $v) {
+            $rows[(string) $plugin] = $v === null
+                ? self::badgeText('not active', '#dba617')
+                : self::badgeText((string) $v, '#2271b1');
+        }
+        self::renderKeyValueTable('Build versions', $rows);
     }
 
     /** @param array<string,mixed> $data */
