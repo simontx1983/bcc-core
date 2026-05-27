@@ -441,6 +441,32 @@ add_filter('bcc_system_health', function (array $health): array {
             'endorsement_fraud_analyzer',
             'vote_job_dispatcher',
         ],
+        // gated_group_provision — `bcc_gated_group_provision` cron
+        // sweep failure modes. The sweep iterates verified collections
+        // and creates a closed PeepSo group per unprovisioned one;
+        // failed provisions are retried on the next tick (daily cadence),
+        // so persistent activation here means the retry path is not
+        // catching up. Three events cover the operationally distinct
+        // failure modes:
+        //   - peepso_absent: PeepSoGroup class missing entirely. Whole
+        //     sweep short-circuits; daily activation = PeepSo plugin
+        //     state is broken on the site (different from the per-
+        //     writer `peepso_absence` subsystem because the failure
+        //     surface is the SWEEP, not a writer call).
+        //   - no_admin_owner: no administrator user exists to own
+        //     auto-provisioned groups. Whole sweep short-circuits;
+        //     persistent activation = administrative-account state
+        //     is broken (rare; typically only after destructive ops).
+        //   - group_create_failed: `new PeepSoGroup` returned a 0-id
+        //     group OR its constructor threw. PER-COLLECTION event so
+        //     the counter scales with the size of the failed batch;
+        //     sustained activation = PeepSo Groups subsystem unhealthy
+        //     even though the class loaded.
+        'gated_group_provision' => [
+            'peepso_absent',
+            'no_admin_owner',
+            'group_create_failed',
+        ],
         // helius_dedup — Helius Solana webhook replay-protection
         // activations. Recorded inside HeliusWebhookEndpoint::handle
         // every time HeliusSeenSignaturesRepository::markSeen returns
