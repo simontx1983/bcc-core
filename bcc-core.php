@@ -148,6 +148,14 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
 // "Developer".
 \BCC\Core\Admin\DeveloperPage::register();
 
+// ── Hide WP defaults (two-engineer audit follow-up) ─────────────
+// Removes Posts / Comments / Media / WP Pages CPT / Appearance and
+// the Reading / Discussion / Permalinks / Writing Settings
+// sub-pages — BCC is headless, none of these are used. Filter
+// hooks (bcc_hide_wp_defaults_enabled / *_menus / *_settings_sub)
+// expose the behavior to operators who want to opt back in.
+\BCC\Core\Admin\HideWpDefaults::register();
+
 // bcc-core's own secret: the shared challenge for the internal
 // Polkadot signature verifier route (called by
 // PolkadotSignatureVerifier → bcc-frontend /api/internal/verify-
