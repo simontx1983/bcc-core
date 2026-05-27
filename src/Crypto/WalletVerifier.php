@@ -46,6 +46,11 @@ final class WalletVerifier
         'thorchain' => 'cosmos',
         // Solana
         'solana'    => 'solana',
+        // Polkadot — sr25519/ed25519/ecdsa via SS58 addresses. PHP has
+        // no native schnorrkel, so verification is delegated to the
+        // bcc-frontend Next.js app's @polkadot/util-crypto via an
+        // authenticated internal route. See PolkadotSignatureVerifier.
+        'polkadot'  => 'polkadot',
     ];
 
     /**
@@ -79,6 +84,7 @@ final class WalletVerifier
                 $extra['pub_key']    ?? '',
                 $extra['chain_id']   ?? 'cosmoshub-4'
             ),
+            'polkadot' => PolkadotSignatureVerifier::verify($message, $signature, $address),
             default => false,
         };
     }
