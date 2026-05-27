@@ -141,6 +141,13 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
 // "API Keys".
 \BCC\Core\Admin\ApiKeysPage::register();
 
+// ── Developer admin page (Operator OS v1 Phase 3) ───────────────
+// Engineer-grade internals — filter-based panel registry. Each
+// plugin contributes its own panel via apply_filters(
+// 'bcc_developer_panels', []). Sub-menu under "BCC System" →
+// "Developer".
+\BCC\Core\Admin\DeveloperPage::register();
+
 // bcc-core's own secret: the shared challenge for the internal
 // Polkadot signature verifier route (called by
 // PolkadotSignatureVerifier → bcc-frontend /api/internal/verify-
