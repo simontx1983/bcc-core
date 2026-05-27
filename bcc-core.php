@@ -118,6 +118,23 @@ register_activation_hook(__FILE__, function () {
 // have to curl the JSON. Top-level menu "BCC System" → "Health".
 \BCC\Core\Admin\SystemHealthPage::register();
 
+// ── Cron admin page (Operator OS v1 Phase 2) ──────────────────
+// wp-admin renderer for the cron-system state + drift detector for
+// the V2-NFT cron-drift class. Sub-menu under "BCC System" → "Cron".
+\BCC\Core\Admin\CronPage::register();
+
+// bcc-core's own canonical cron hook (rate-limiter cleanup). Other
+// bcc-* plugins contribute their own via the bcc_expected_cron_hooks
+// filter at boot.
+add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
+    $hooks['bcc_core_rl_cleanup'] = [
+        'interval'    => 'bcc_thirty_minutes',
+        'source'      => 'bcc-core',
+        'description' => 'Rate-limiter wp_options + transient cleanup',
+    ];
+    return $hooks;
+});
+
 // ── Cross-plugin suspension cache invalidation ─────────────────
 // Trust-engine fires `bcc_user_suspension_changed` when a user's
 // suspension status changes. This ensures Permissions picks it up
