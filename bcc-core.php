@@ -135,6 +135,25 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
     return $hooks;
 });
 
+// ── API Keys status admin page (Operator OS v1 Phase 2) ─────────
+// wp-admin renderer for the secret/API-key inventory. STATUS ONLY —
+// never editable, never raw values. Sub-menu under "BCC System" →
+// "API Keys".
+\BCC\Core\Admin\ApiKeysPage::register();
+
+// bcc-core's own secret: the shared challenge for the internal
+// Polkadot signature verifier route (called by
+// PolkadotSignatureVerifier → bcc-frontend /api/internal/verify-
+// wallet-signature). Missing = Polkadot wallet-link broken.
+add_filter('bcc_api_keys_inventory', function (array $inventory): array {
+    $inventory['BCC_INTERNAL_VERIFY_SECRET'] = [
+        'source'      => 'bcc-core',
+        'severity'    => 'critical',
+        'description' => 'Internal-route shared challenge for Polkadot signature verifier (PolkadotSignatureVerifier → Next.js verify route).',
+    ];
+    return $inventory;
+});
+
 // ── Cross-plugin suspension cache invalidation ─────────────────
 // Trust-engine fires `bcc_user_suspension_changed` when a user's
 // suspension status changes. This ensures Permissions picks it up
