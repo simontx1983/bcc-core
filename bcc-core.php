@@ -113,6 +113,11 @@ register_activation_hook(__FILE__, function () {
 // wp-config.php.
 \BCC\Core\Admin\EnvBanner::register();
 
+// ── System Health admin page (Operator OS v1 Phase 2) ──────────
+// wp-admin renderer for /bcc/v1/system/health so operators don't
+// have to curl the JSON. Top-level menu "BCC System" → "Health".
+\BCC\Core\Admin\SystemHealthPage::register();
+
 // ── Cross-plugin suspension cache invalidation ─────────────────
 // Trust-engine fires `bcc_user_suspension_changed` when a user's
 // suspension status changes. This ensures Permissions picks it up
