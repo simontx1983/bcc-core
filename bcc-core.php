@@ -441,6 +441,22 @@ add_filter('bcc_system_health', function (array $health): array {
             'endorsement_fraud_analyzer',
             'vote_job_dispatcher',
         ],
+        // helius_dedup — Helius Solana webhook replay-protection
+        // activations. Recorded inside HeliusWebhookEndpoint::handle
+        // every time HeliusSeenSignaturesRepository::markSeen returns
+        // false (signature already seen). The dedup itself is *working*
+        // — the replay was correctly refused — but sustained nonzero
+        // activation is operationally interesting:
+        //   - Legitimate: Helius double-sent. Their dashboard often
+        //     shows it; we just want it visible on /system/health too.
+        //   - Hostile: attacker stole the auth header and is replaying
+        //     known signatures (always-200 endpoint, so they can't
+        //     distinguish dedup-skip from real ingest by response shape;
+        //     this counter is how operators discover the attempt).
+        // Distinct from the admin-panel `bcc_helius_signature_seen_total`
+        // wp_options counter that drives the Helius admin tile —
+        // /system/health is the canonical operator surface.
+        'helius_dedup'         => ['replay_skipped'],
         // polkadot_verify — sr25519/ed25519/ecdsa signature verification
         // is delegated to the bcc-frontend Next.js app (PHP has no native
         // schnorrkel). Activations here mean the internal verify route
