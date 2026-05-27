@@ -106,6 +106,13 @@ register_activation_hook(__FILE__, function () {
     }
 });
 
+// ── Environment banner (Operator OS v1 Phase 1) ────────────────
+// Shows a colored banner on every wp-admin page identifying the
+// environment (prod/staging/dev), so an operator cannot confuse
+// envs while performing a destructive action. Reads BCC_ENV from
+// wp-config.php.
+\BCC\Core\Admin\EnvBanner::register();
+
 // ── Cross-plugin suspension cache invalidation ─────────────────
 // Trust-engine fires `bcc_user_suspension_changed` when a user's
 // suspension status changes. This ensures Permissions picks it up
