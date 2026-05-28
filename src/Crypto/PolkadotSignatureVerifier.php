@@ -60,6 +60,21 @@ final class PolkadotSignatureVerifier
     private const MAX_MESSAGE_LENGTH = 1024;
 
     /**
+     * Canonical prefix-0 SS58 form of the address from the LAST verify()
+     * call that returned true. Set inside verify() (reset to null at the
+     * start of every call so stale state from a prior request cannot
+     * leak between requests on the same PHP-FPM worker).
+     *
+     * Callers must read this IMMEDIATELY AFTER a verify() that returned
+     * true — there is no other valid window. Used by AuthEndpoint /
+     * WalletIdentityService to swap the user-submitted (possibly
+     * prefix-42 or prefix-2) address for the canonical prefix-0 form so
+     * downstream storage dedups by underlying public key regardless of
+     * which SS58 encoding the wallet rendered.
+     */
+    public static ?string $lastCanonicalAddress = null;
+
+    /**
      * Verify a Polkadot wallet signature by delegating to the
      * bcc-frontend internal verify route.
      *
@@ -73,6 +88,10 @@ final class PolkadotSignatureVerifier
      */
     public static function verify(string $message, string $signature, string $address): bool
     {
+        // Reset stash on every call so stale canonical from a prior
+        // request on the same PHP-FPM worker cannot leak to this one.
+        self::$lastCanonicalAddress = null;
+
         if ($message === '' || $signature === '' || $address === '') {
             return false;
         }
@@ -145,7 +164,21 @@ final class PolkadotSignatureVerifier
             return false;
         }
 
-        return (bool) $decoded['isValid'];
+        $valid = (bool) $decoded['isValid'];
+
+        // Stash the canonical prefix-0 SS58 returned by the route on a
+        // successful verify so the calling controller can use it for
+        // downstream storage / lookup. Absence is logged but does not
+        // fail the verify — a route version that pre-dates this contract
+        // would still verify correctly; the caller falls back to the
+        // user-submitted address (matches pre-canonicalisation behaviour).
+        if ($valid && isset($decoded['canonical_address']) && is_string($decoded['canonical_address']) && $decoded['canonical_address'] !== '') {
+            self::$lastCanonicalAddress = $decoded['canonical_address'];
+        } elseif ($valid) {
+            self::log('warning', 'verify route returned isValid:true without canonical_address — route version pre-dates contract', []);
+        }
+
+        return $valid;
     }
 
     private static function secret(): string

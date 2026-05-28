@@ -279,11 +279,22 @@ final class WalletIdentityService
             ];
         }
 
+        // For Polkadot, replace the user-submitted address with the
+        // canonical prefix-0 SS58 form returned by the verifier. Dedups
+        // storage by underlying public key — a user whose wallet renders
+        // in prefix 42 (the Polkadot.js "Substrate" default) signs up to
+        // the same row as a wallet rendering in prefix 0. Other chains
+        // pass through unchanged.
+        $effectiveAddress = $req->walletAddress;
+        if ($req->chainType === 'polkadot' && \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress !== null) {
+            $effectiveAddress = \BCC\Core\Crypto\PolkadotSignatureVerifier::$lastCanonicalAddress;
+        }
+
         // 3. Link wallet via the canonical write contract.
         $walletLinkId = ServiceLocator::resolveWalletLinkWrite()->linkWallet(
             $req->userId,
             $req->chainSlug,
-            $req->walletAddress,
+            $effectiveAddress,
             $req->postId,
             $req->walletType,
             $req->label
@@ -305,7 +316,7 @@ final class WalletIdentityService
         //    Listeners:
         //    - bcc-trust Core CronService: creates bcc_onchain_signals scoring row
         //    - bcc-trust Onchain WalletSeedService: populates on-chain data
-        do_action('bcc_wallet_verified', $req->userId, $req->chainSlug, $req->walletAddress);
+        do_action('bcc_wallet_verified', $req->userId, $req->chainSlug, $effectiveAddress);
 
         return [
             'success'        => true,
