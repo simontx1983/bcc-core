@@ -556,7 +556,7 @@ add_filter('bcc_system_health', function (array $health): array {
         // webhook). See PolkadotSignatureVerifier.
         'polkadot_verify'      => [
             'secret_missing',       // BCC_INTERNAL_VERIFY_SECRET not defined
-            'frontend_url_missing', // BCC_FRONTEND_INTERNAL_URL not defined
+            'frontend_url_missing', // BCC_FRONTEND_ORIGIN not defined
             'route_unreachable',    // network/SSRF/transport error
             'route_error_status',   // non-200 response from the route
             'route_malformed_body', // response body wasn't the expected shape
