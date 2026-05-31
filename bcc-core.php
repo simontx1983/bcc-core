@@ -463,7 +463,8 @@ add_filter('bcc_system_health', function (array $health): array {
             'account_deleted_send_failed',
             'wallet_linked_send_failed',
             'wallet_unlinked_send_failed',
-            'sessions_revoked_all_send_failed',  // Tier D (2026-05-16) — /auth/logout-everywhere confirmation
+            'sessions_revoked_all_send_failed',     // Tier D (2026-05-16) — /auth/logout-everywhere confirmation
+            'password_reset_requested_send_failed', // 2026-05-30 — /auth/forgot-password reset-link email
         ],
         // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of
         // suspected-dead AJAX handlers (V-08 candidates). Audit found
