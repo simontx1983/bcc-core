@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blue Collar Crypto – Core
  * Description: Shared infrastructure for the BCC plugin ecosystem: permissions, PeepSo adapter, DB helpers, caching, logging, and utilities. Production requires a persistent object cache (Redis/Memcached) for rate limiting and API budget enforcement.
- * Version:     1.0.8
+ * Version:     1.0.9
  * Author:      Blue Collar Labs LLC
  * Text Domain: bcc-core
  * Requires at least: 5.8
@@ -37,7 +37,7 @@ if (file_exists(__DIR__ . '/vendor/autoload.php')) {
 
 // ── Constants (defined only after core is fully functional) ──────
 
-define('BCC_CORE_VERSION', '1.0.8');
+define('BCC_CORE_VERSION', '1.0.9');
 define('BCC_CORE_PATH', plugin_dir_path(__FILE__));
 define('BCC_CORE_URL', plugin_dir_url(__FILE__));
 
@@ -465,6 +465,17 @@ add_filter('bcc_system_health', function (array $health): array {
             'wallet_unlinked_send_failed',
             'sessions_revoked_all_send_failed',     // Tier D (2026-05-16) — /auth/logout-everywhere confirmation
             'password_reset_requested_send_failed', // 2026-05-30 — /auth/forgot-password reset-link email
+        ],
+        // auth_mail — BccMailer HTML transactional email failures.
+        // Used by auth flows that send signup / verification email.
+        // Sustained activation = WP Mail SMTP Pro or the wp_mail stack
+        // is unhealthy on a critical onboarding path; ops should treat
+        // this as a P1 alert. Per BccMailer's constraints, failure here
+        // means a newly registered user did not receive their verification
+        // email — they can resend from /verify-email, but the root cause
+        // should be investigated immediately.
+        'auth_mail' => [
+            'verify_email_send_failed', // 2026-06-02 — /auth/signup + /auth/resend-verification
         ],
         // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of
         // suspected-dead AJAX handlers (V-08 candidates). Audit found
