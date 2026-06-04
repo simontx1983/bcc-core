@@ -264,9 +264,31 @@ final class CosmosSignatureVerifier {
     }
 
     /**
+     * Bech32 HRPs whose chains derive the account address the Ethermint
+     * (Ethereum) way — Keccak-256 of the uncompressed secp256k1 pubkey,
+     * last 20 bytes — instead of the standard Cosmos SHA-256→RIPEMD-160.
+     *
+     * Injective signs with `eth_secp256k1`; Keplr still produces an
+     * ADR-036 secp256k1 signature (so the signature check is unchanged),
+     * but the address↔pubkey binding uses the Ethereum hash. Deriving the
+     * standard Cosmos address for these chains yields the WRONG address
+     * and every signature is rejected at the ownership check.
+     *
+     * Other Ethermint/EVM-Cosmos chains (Evmos `evmos`, Dymension `dym`,
+     * etc.) share this derivation; add their HRPs here if/when onboarded.
+     *
+     * @var array<string, true>
+     */
+    private const ETHERMINT_HRPS = [
+        'inj' => true,
+    ];
+
+    /**
      * Derive a Cosmos bech32 address from a compressed secp256k1 public key.
      *
-     * Steps: SHA-256 → RIPEMD-160 → bech32-encode with the chain's HRP.
+     * Standard Cosmos chains: SHA-256 → RIPEMD-160 → bech32(HRP).
+     * Ethermint chains (Injective): Keccak-256(uncompressed pubkey)[-20:]
+     * → bech32(HRP), matching Ethereum's address derivation.
      *
      * @param string $pubKeyRaw  33-byte compressed public key.
      * @param string $address    The claimed bech32 address (used to extract the HRP).
@@ -282,17 +304,98 @@ final class CosmosSignatureVerifier {
         }
         $hrp = substr($address, 0, $separatorPos);
 
-        // Cosmos address = RIPEMD160(SHA256(compressed_pubkey))
-        $sha256Hash   = hash('sha256', $pubKeyRaw, true);
-        $ripemd160Hash = hash('ripemd160', $sha256Hash, true);
+        if (isset(self::ETHERMINT_HRPS[$hrp])) {
+            $hash20 = self::ethermintHash160($pubKeyRaw);
+            if ($hash20 === null) {
+                return '';
+            }
+        } else {
+            // Cosmos address = RIPEMD160(SHA256(compressed_pubkey))
+            $sha256Hash = hash('sha256', $pubKeyRaw, true);
+            $hash20     = hash('ripemd160', $sha256Hash, true);
+        }
 
         // Convert the 20-byte hash from 8-bit groups to 5-bit groups for bech32.
-        $converted = self::convertBits($ripemd160Hash, 8, 5, true);
+        $converted = self::convertBits($hash20, 8, 5, true);
         if ($converted === null) {
             return '';
         }
 
         return self::bech32Encode($hrp, $converted);
+    }
+
+    /**
+     * Ethermint address bytes: Keccak-256 of the 64-byte UNCOMPRESSED
+     * public key (x‖y, no 0x04 prefix), keeping the last 20 bytes — the
+     * same scheme Ethereum uses, just bech32-encoded downstream instead
+     * of hex. Returns null if the compressed point can't be decompressed.
+     *
+     * @param string $pubKeyRaw 33-byte compressed secp256k1 public key.
+     * @return string|null 20 raw bytes, or null on failure.
+     */
+    private static function ethermintHash160(string $pubKeyRaw): ?string
+    {
+        $uncompressed = self::decompressPubKey($pubKeyRaw);
+        if ($uncompressed === null) {
+            return null;
+        }
+        // Keccak256::hash(..., true) returns 32 raw bytes; take the last 20.
+        $keccak = Keccak256::hash($uncompressed, true);
+        if (strlen($keccak) !== 32) {
+            return null;
+        }
+        return substr($keccak, 12);
+    }
+
+    /**
+     * Decompress a 33-byte compressed secp256k1 public key to its 64-byte
+     * uncompressed X‖Y form (no 0x04 prefix). Solves y² = x³ + 7 (mod p)
+     * and picks the root whose parity matches the compression prefix
+     * (0x02 = even y, 0x03 = odd y). Pure GMP — no external libraries.
+     *
+     * @param string $compressed 33 raw bytes (prefix byte + 32-byte X).
+     * @return string|null 64 raw bytes (X‖Y), or null on invalid input.
+     */
+    private static function decompressPubKey(string $compressed): ?string
+    {
+        if (strlen($compressed) !== 33 || !extension_loaded('gmp')) {
+            return null;
+        }
+        $prefix = ord($compressed[0]);
+        if ($prefix !== 0x02 && $prefix !== 0x03) {
+            return null;
+        }
+
+        // secp256k1 field prime.
+        $p = gmp_init('fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f', 16);
+        $x = gmp_init(bin2hex(substr($compressed, 1)), 16);
+        if (gmp_cmp($x, $p) >= 0) {
+            return null;
+        }
+
+        // rhs = x^3 + 7 (mod p)
+        $rhs = gmp_mod(gmp_add(gmp_powm($x, gmp_init(3), $p), gmp_init(7)), $p);
+        // p ≡ 3 (mod 4) ⇒ sqrt = rhs^((p+1)/4) mod p
+        $exp = gmp_div_q(gmp_add($p, gmp_init(1)), gmp_init(4));
+        $y   = gmp_powm($rhs, $exp, $p);
+
+        // Reject if y is not a real square root (point not on curve).
+        if (gmp_cmp(gmp_powm($y, gmp_init(2), $p), $rhs) !== 0) {
+            return null;
+        }
+
+        // Match parity to the prefix; flip to p - y otherwise.
+        $wantOdd = ($prefix === 0x03);
+        $isOdd   = (gmp_intval(gmp_mod($y, gmp_init(2))) === 1);
+        if ($wantOdd !== $isOdd) {
+            $y = gmp_sub($p, $y);
+        }
+
+        $xHex = str_pad(gmp_strval($x, 16), 64, '0', STR_PAD_LEFT);
+        $yHex = str_pad(gmp_strval($y, 16), 64, '0', STR_PAD_LEFT);
+        $bin  = hex2bin($xHex . $yHex);
+
+        return $bin === false ? null : $bin;
     }
 
     /**
