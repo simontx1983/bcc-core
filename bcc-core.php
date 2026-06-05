@@ -476,6 +476,7 @@ add_filter('bcc_system_health', function (array $health): array {
         // should be investigated immediately.
         'auth_mail' => [
             'verify_email_send_failed', // 2026-06-02 — /auth/signup + /auth/resend-verification
+            'welcome_email_send_failed', // 2026-06-04 — /auth/verify-email (post-confirmation)
         ],
         // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of
         // suspected-dead AJAX handlers (V-08 candidates). Audit found
