@@ -79,8 +79,13 @@ final class PeepSoGifWriter
      *
      * @return array{ok: true, post_id: int, act_id: int}|array{ok: false, reason: string}
      */
-    public static function createSelfGifPost(int $authorId, string $url, string $caption, int $groupId = 0): array
-    {
+    public static function createSelfGifPost(
+        int $authorId,
+        string $url,
+        string $caption,
+        int $groupId = 0,
+        string $visibility = 'members_only'
+    ): array {
         if ($authorId <= 0) {
             return ['ok' => false, 'reason' => 'forbidden'];
         }
@@ -150,7 +155,7 @@ final class PeepSoGifWriter
         if ($groupId > 0) {
             // Reuse the canonical group-attach helper (per §11) rather
             // than duplicating the post-meta + action-fire pair.
-            PeepSoStatusWriter::attachToGroup($postId, $groupId);
+            PeepSoStatusWriter::attachToGroup($postId, $groupId, $visibility);
         }
 
         return [

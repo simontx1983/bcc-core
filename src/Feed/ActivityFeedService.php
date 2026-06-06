@@ -58,9 +58,10 @@ final class ActivityFeedService
      * @param list<int>|null $excludedActIds Optional moderation-hide list (per §K1 Phase C). Same coupling-avoidance pattern: caller decides which act_ids to drop, bcc-core just applies the filter.
      * @param int|null $onlyForGroupId Optional group-scope filter — when non-null and positive, restricts the candidate set to activities whose backing wp_post carries `peepso_group_id` post-meta matching this group. Used by /bcc/v1/groups/{id}/feed; bcc-trust enforces the privacy gate before invoking. The scope param is overridden internally to SCOPE_GROUP semantics (no follower / module filtering — every activity inside the group is in scope).
      * @param list<int>|null $excludedGroupIds Optional group-exclusion list — drop activities whose backing wp_post lives inside one of these PeepSo groups. Used by /bcc/v1/feed and /bcc/v1/feed/hot to suppress closed/secret/NFT-gated group posts from non-members. Same coupling-avoidance pattern as the other exclusion params: bcc-trust computes the list (non-open groups minus viewer memberships) and passes it through; bcc-core stays unaware of the privacy semantics. Ignored when `$onlyForGroupId` is set.
+     * @param list<string>|null $groupVisibilityIn Optional per-post visibility allow-list for the GROUP-SCOPED path (`$onlyForGroupId` set). null = no visibility filter (member read → every post incl members_only). Non-null = restrict to posts whose `_bcc_post_visibility` post-meta is one of these values (bcc-trust passes ['public_group','public_all'] for a non-member teaser). Enforced as an INNER JOIN downstream so posts with absent visibility meta are EXCLUDED for non-members — the security invariant. Only applies on the `$onlyForGroupId` path; ignored for the global feed (which has its own per-post visibility gate keyed on 'public_all').
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null): array
+    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null, ?array $groupVisibilityIn = null): array
     {
         if (!in_array($scope, self::VALID_SCOPES, true)) {
             $scope = self::SCOPE_FOR_YOU;
@@ -91,7 +92,8 @@ final class ActivityFeedService
             $excludedAuthorIds,
             $excludedActIds,
             $onlyForGroupId,
-            $excludedGroupIds
+            $excludedGroupIds,
+            $groupVisibilityIn
         );
 
         $hasMore = count($rows) > $limit;

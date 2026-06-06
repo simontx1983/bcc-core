@@ -55,14 +55,6 @@ final class PeepSoActivityRepository
     private const TABLE_SUFFIX = 'peepso_activities';
 
     /**
-     * Hard cap on the `$excludedGroupIds` IN-clause size. Mirrors the
-     * default LIMIT of {@see PeepSoGroupRepository::getNonOpenGroupIds()}
-     * — if non-open groups exceed 500 across the whole install we have a
-     * scaling decision to make at that source, not by widening this cap.
-     */
-    private const EXCLUDED_GROUP_IDS_CAP = 500;
-
-    /**
      * Explicit SELECT list — peepso_activities columns plus the three
      * fields synthesized from the wp_posts JOIN. Aliases keep the row
      * shape stable for the rest of the codebase (FeedItemNormalizer,
@@ -87,7 +79,8 @@ final class PeepSoActivityRepository
      * @param list<int>|null $excludedAuthorIds null/[] = no exclusion; non-empty list = drop these authors. Used by the feed ranker to apply §O4.1 caution/risky shadow-limit without coupling bcc-core to bcc-trust's tier concept.
      * @param list<int>|null $excludedActIds    null/[] = no exclusion; non-empty list = drop these specific act_ids. Used by §K1 Phase C moderation hide so individual posts can be suppressed without touching their author or module. Same coupling-avoidance pattern as $excludedAuthorIds — bcc-core stays unaware of WHY the ids are hidden.
      * @param int|null $onlyForGroupId          null = no group filter; positive int = only activities whose backing wp_post lives in this PeepSo group (joined via `peepso_group_id` post-meta). Used by /bcc/v1/groups/{id}/feed for the group-scoped feed; bcc-trust's caller handles the privacy gate before invoking this.
-     * @param list<int>|null $excludedGroupIds  null/[] = no exclusion; non-empty list = drop activities whose backing wp_post carries `peepso_group_id` post-meta matching one of these IDs. Posts NOT inside any group are preserved (LEFT-JOIN-with-NULL-passthrough). Used by /bcc/v1/feed and /bcc/v1/feed/hot to hide closed/secret/NFT-gated group posts from non-members. Same coupling-avoidance pattern as $excludedAuthorIds / $excludedActIds — bcc-core stays unaware of WHY the ids are excluded; bcc-trust computes the list from (non-open groups) - (viewer memberships). Capped at {@see EXCLUDED_GROUP_IDS_CAP} to keep the IN clause bounded; if more group IDs need to be excluded, the candidate pool sourcing should narrow before reaching this layer.
+     * @param list<int>|null $excludedGroupIds  INERT for global-feed inclusion as of the per-post-visibility phase. The non-group (global) feed now syndicates a group-tagged post ONLY when it carries `_bcc_post_visibility = 'public_all'` post-meta; non-group posts (no `peepso_group_id`) are always included. The old "(non-open groups) - (viewer memberships)" exclusion-list no longer drives the WHERE — the per-post visibility gate supersedes it. The param is retained in the signature so existing callers (which still pass a computed list) keep working without churn, but it is intentionally unused in the query. Removed cleanly when the call sites stop computing the list.
+     * @param list<string>|null $groupVisibilityIn Per-post visibility allow-list for the GROUP-SCOPED path. Only applies when non-null AND `$onlyForGroupId !== null`. Adds an INNER JOIN on `_bcc_post_visibility` post-meta restricting to the given values (bcc-trust passes ['public_group','public_all'] for a non-member teaser feed). INNER (not LEFT) JOIN: posts with absent `_bcc_post_visibility` meta are EXCLUDED for non-members — absent ⇒ members_only ⇒ hidden — which is the security invariant. When null (member read) the join is omitted so members see every post in the group. Ignored on the global path (`$onlyForGroupId === null`), which has its own 'public_all' gate.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
      */
@@ -100,7 +93,8 @@ final class PeepSoActivityRepository
         ?array $excludedAuthorIds = null,
         ?array $excludedActIds = null,
         ?int $onlyForGroupId = null,
-        ?array $excludedGroupIds = null
+        ?array $excludedGroupIds = null,
+        ?array $groupVisibilityIn = null
     ): array {
         global $wpdb;
 
@@ -118,7 +112,14 @@ final class PeepSoActivityRepository
         // (nonexistent) act_status filter — soft-deleted PeepSo activities
         // are reflected via post_status changes (trash, draft).
         $where  = ["p.post_status = 'publish'"];
-        $params = [];
+        // $wpdb->prepare binds placeholders strictly left-to-right against
+        // the argument list. JOIN clauses render BEFORE the WHERE clause in
+        // the final SQL string, so any JOIN-bound params MUST precede the
+        // WHERE-bound params in the argument list. We collect JOIN params in
+        // a separate bucket and prepend them at the end (see $params merge
+        // before prepare()).
+        $joinParams = [];
+        $params     = [];
 
         if ($authorIds !== null) {
             $placeholders = implode(',', array_fill(0, count($authorIds), '%d'));
@@ -174,52 +175,92 @@ final class PeepSoActivityRepository
                               ON gm_pm.post_id   = p.ID
                              AND gm_pm.meta_key  = \'peepso_group_id\'
                              AND gm_pm.meta_value = %s ';
-            $params[]  = (string) $onlyForGroupId;
+            $joinParams[] = (string) $onlyForGroupId;
         }
 
-        // Group exclusion: drop activities whose backing wp_post lives
-        // inside a group on the exclusion list (closed/secret/NFT-gated
-        // groups the viewer is not a member of). LEFT JOIN with
-        // NULL-passthrough so non-group posts (no `peepso_group_id`
-        // meta row at all) are preserved unconditionally — only posts
-        // explicitly in a gated group are dropped. Skip this branch
-        // entirely when `$onlyForGroupId` is set (there the INNER JOIN
-        // already constrains us to a single group; an exclude-list pass
-        // is redundant and would risk excluding the very group we're
-        // reading) or when the list is empty.
-        $groupExcludeJoin = '';
-        if ($onlyForGroupId === null
-            && $excludedGroupIds !== null
-            && $excludedGroupIds !== []
-        ) {
-            // Cap the list — defensive against pathological caller input.
-            $cappedExclude = array_slice($excludedGroupIds, 0, self::EXCLUDED_GROUP_IDS_CAP);
-            $groupExcludeJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' gx_pm
-                                     ON gx_pm.post_id   = p.ID
-                                    AND gx_pm.meta_key  = \'peepso_group_id\' ';
-            $excludePlaceholders = implode(',', array_fill(0, count($cappedExclude), '%s'));
-            $where[] = "(gx_pm.meta_value IS NULL OR gx_pm.meta_value NOT IN ({$excludePlaceholders}))";
-            // meta_value is varchar — cast IDs to strings so the comparison
-            // stays on the postmeta `meta_value` index path. Same convention
-            // as the $onlyForGroupId branch above.
-            foreach ($cappedExclude as $gid) {
-                $params[] = (string) (int) $gid;
+        // Per-post visibility scope (group-scoped path only).
+        //
+        // When a non-member reads the group teaser, bcc-trust passes
+        // $groupVisibilityIn = ['public_group','public_all']. We add an
+        // INNER JOIN on `_bcc_post_visibility` restricting to those values.
+        //
+        // INNER (not LEFT) JOIN is the security invariant: a post with NO
+        // `_bcc_post_visibility` meta row (absent ⇒ members_only ⇒ hidden)
+        // produces no joined row and is therefore EXCLUDED — members_only
+        // and absent-meta posts can never reach a non-member. A distinct
+        // alias (`vis_in_pm`) avoids colliding with the global-feed
+        // `vis_pm` LEFT JOIN above.
+        //
+        // Member reads pass $groupVisibilityIn = null → the join is omitted
+        // → members see every post including members_only. Only meaningful
+        // on the group-scoped path; the guard requires $onlyForGroupId.
+        $visibilityInJoin = '';
+        if ($groupVisibilityIn !== null && $groupVisibilityIn !== [] && $onlyForGroupId !== null) {
+            $visPlaceholders  = implode(',', array_fill(0, count($groupVisibilityIn), '%s'));
+            $visibilityInJoin = ' INNER JOIN ' . $wpdb->postmeta . ' vis_in_pm
+                                     ON vis_in_pm.post_id   = p.ID
+                                    AND vis_in_pm.meta_key  = \'_bcc_post_visibility\'
+                                    AND vis_in_pm.meta_value IN (' . $visPlaceholders . ') ';
+            foreach ($groupVisibilityIn as $vis) {
+                $joinParams[] = (string) $vis;
             }
         }
 
-        $params[] = $limit;
+        // Global-feed visibility gate (non-group path only).
+        //
+        // Rule: a group-tagged post (one carrying `peepso_group_id`
+        // post-meta) appears in the GLOBAL feed ONLY when it also carries
+        // `_bcc_post_visibility = 'public_all'`. Posts NOT inside any
+        // group (no `peepso_group_id` meta row at all) are preserved
+        // unconditionally.
+        //
+        // Two LEFT JOINs with NULL-passthrough:
+        //   - gx_pm  → the `peepso_group_id` marker. NULL ⇒ non-group post.
+        //   - vis_pm → the `_bcc_post_visibility` marker. NULL ⇒ treat as
+        //              members_only (no migration; absent meta is the
+        //              conservative default), so a group post with no
+        //              visibility meta is correctly excluded.
+        //
+        // WHERE: (gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')
+        //   - non-group post                → gx_pm NULL → included.
+        //   - group post, public_all        → vis_pm matches → included.
+        //   - group post, members_only/etc. → both clauses false → dropped.
+        //
+        // This supersedes the old `$excludedGroupIds` NOT-IN exclusion —
+        // the per-post visibility marker is the single source of truth for
+        // global syndication now, so the membership-derived exclude list
+        // is no longer consulted (the param is kept inert in the signature
+        // for caller compatibility). Skipped entirely when `$onlyForGroupId`
+        // is set — that INNER JOIN already constrains to one group and the
+        // group-scoped read gate (Phase 2/3) is unchanged here.
+        $groupVisibilityJoin = '';
+        if ($onlyForGroupId === null) {
+            $groupVisibilityJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' gx_pm
+                                        ON gx_pm.post_id  = p.ID
+                                       AND gx_pm.meta_key = \'peepso_group_id\'
+                                     LEFT JOIN ' . $wpdb->postmeta . ' vis_pm
+                                        ON vis_pm.post_id  = p.ID
+                                       AND vis_pm.meta_key = \'_bcc_post_visibility\' ';
+            // meta_value is varchar — compare against the literal string.
+            $where[] = "(gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')";
+        }
+
+        // Final argument order mirrors placeholder appearance in $sql:
+        // JOIN params (gm_pm, then vis_in_pm) → WHERE params → LIMIT.
+        $allParams = array_merge($joinParams, $params, [$limit]);
 
         $sql = 'SELECT ' . self::COLUMNS . '
                   FROM ' . self::table() . ' a
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                   ' . $groupJoin . '
-                  ' . $groupExcludeJoin . '
+                  ' . $visibilityInJoin . '
+                  ' . $groupVisibilityJoin . '
                  WHERE ' . implode(' AND ', $where) . '
                  ORDER BY p.post_date_gmt DESC, a.act_id DESC
                  LIMIT %d';
 
         /** @phpstan-var list<ActivityRow>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
+        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$allParams));
         return $rows ?: [];
     }
 

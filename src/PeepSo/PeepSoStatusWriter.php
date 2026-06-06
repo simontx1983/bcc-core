@@ -78,8 +78,12 @@ final class PeepSoStatusWriter
      *
      * @return array{ok: true, post_id: int, act_id: int}|array{ok: false, reason: string}
      */
-    public static function createSelfStatus(int $authorId, string $content, int $groupId = 0): array
-    {
+    public static function createSelfStatus(
+        int $authorId,
+        string $content,
+        int $groupId = 0,
+        string $visibility = 'members_only'
+    ): array {
         if ($authorId <= 0) {
             return ['ok' => false, 'reason' => 'forbidden'];
         }
@@ -119,7 +123,7 @@ final class PeepSoStatusWriter
         }
 
         if ($groupId > 0) {
-            self::attachToGroup($postId, $groupId);
+            self::attachToGroup($postId, $groupId, $visibility);
         }
 
         return [
@@ -149,14 +153,25 @@ final class PeepSoStatusWriter
      * the post-meta — second source of truth → race risk; (b) the
      * module_id slot conflicts with the photo/gif writers when this
      * helper is reused for future group-photo / group-gif paths.
+     *
+     * `$visibility` is the per-post visibility marker (members_only |
+     * public_group | public_all). It's stamped as `_bcc_post_visibility`
+     * post-meta and drives whether the post syndicates to the GLOBAL
+     * feed (only `public_all` does — see
+     * {@see \BCC\Core\Repositories\PeepSoActivityRepository::getActivities}).
+     * Absent meta is treated as `members_only` downstream, so callers
+     * that don't care can omit it. Validation of the value set is the
+     * caller's responsibility (PostsService clamps it); the writer
+     * stores whatever it's given.
      */
-    public static function attachToGroup(int $postId, int $groupId): void
+    public static function attachToGroup(int $postId, int $groupId, string $visibility = 'members_only'): void
     {
         if ($postId <= 0 || $groupId <= 0) {
             return;
         }
 
         update_post_meta($postId, 'peepso_group_id', (string) $groupId);
+        update_post_meta($postId, '_bcc_post_visibility', $visibility);
         do_action('peepso_groups_new_post', $groupId, $postId);
     }
 
