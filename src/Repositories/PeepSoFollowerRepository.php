@@ -127,6 +127,95 @@ final class PeepSoFollowerRepository
     }
 
     /**
+     * Second-degree follow candidates for $viewerId, with the mutual-
+     * follow count that connects each to the viewer.
+     *
+     * "People followed by people you follow" — the canonical friend-of-
+     * a-friend pool for a who-to-follow recommender. For each candidate
+     * `C` (the passive side of a follow edge whose active side is someone
+     * the viewer follows), the returned `mutualCount` is how many of the
+     * viewer's followees also follow `C`. That count IS the strength of
+     * the second-degree connection — the recommender weights on it.
+     *
+     * Self and the viewer's direct followees are NOT excluded here — the
+     * candidate `C` can legitimately be someone the viewer already
+     * follows (they'd just be dropped by the caller's already-following
+     * exclusion set). The repository stays a single-purpose graph-walk
+     * seam; WHY to drop a candidate is the caller's decision (same
+     * convention as PeepSoActivityRepository's `$excludedAuthorIds`).
+     *
+     * Bounded (§4): the inner edge scan is capped by `$followCap` (the
+     * viewer's followees considered — index seek on uf_active_user_id),
+     * and the grouped candidate set by `$limit`. Both are hard ceilings;
+     * a viewer following tens of thousands of accounts is pathological
+     * and the cap keeps the join predictable. ORDER BY is recency-stable
+     * (MAX(a2.uf_id) DESC) so the truncation at `$limit` keeps the
+     * freshest edges — NOT ranked by mutualCount, popularity, or trust
+     * (scoring/ranking is the service layer's job, never the repo's).
+     *
+     * @return array<int, int> candidate user_id => mutual-follow count
+     */
+    public static function getSecondDegreeCandidates(
+        int $viewerId,
+        int $limit = 200,
+        int $followCap = 200
+    ): array {
+        if ($viewerId <= 0 || $limit <= 0) {
+            return [];
+        }
+        if ($limit > 500) {
+            $limit = 500;
+        }
+        if ($followCap <= 0 || $followCap > 500) {
+            $followCap = 200;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        // a1: the viewer's follow edges (bounded to $followCap of them).
+        // a2: follow edges whose active side is one of those followees.
+        // The passive side of a2 is the candidate; COUNT(DISTINCT active)
+        // is the mutual-follow count. The viewer themselves is excluded
+        // as a candidate (a2.uf_passive_user_id != viewerId).
+        $sql = $wpdb->prepare(
+            "SELECT a2.uf_passive_user_id AS candidate_id,
+                    COUNT(DISTINCT a2.uf_active_user_id) AS mutual_count
+               FROM (
+                       SELECT uf_passive_user_id
+                         FROM {$table}
+                        WHERE uf_active_user_id = %d
+                          AND uf_follow = 1
+                        ORDER BY uf_id DESC
+                        LIMIT %d
+                    ) AS a1
+               INNER JOIN {$table} AS a2
+                       ON a2.uf_active_user_id = a1.uf_passive_user_id
+                      AND a2.uf_follow = 1
+                      AND a2.uf_passive_user_id <> %d
+              GROUP BY a2.uf_passive_user_id
+              ORDER BY MAX(a2.uf_id) DESC
+              LIMIT %d",
+            $viewerId,
+            $followCap,
+            $viewerId,
+            $limit
+        );
+
+        /** @var list<array{candidate_id: string, mutual_count: string}>|null $rows */
+        $rows = $wpdb->get_results($sql, ARRAY_A);
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $candidateId = (int) $row['candidate_id'];
+            if ($candidateId > 0) {
+                $out[$candidateId] = (int) $row['mutual_count'];
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Counts only — used for view-model headlines and badges.
      *
      * @return array{following: int, followers: int}

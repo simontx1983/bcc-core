@@ -598,6 +598,103 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * Co-members of a set of groups: for every active member of any
+     * group in `$groupIds`, return how many of those groups they share
+     * and one representative shared group_id. Drives the who-to-follow
+     * recommender's "in a Local / holder community with you" affinity
+     * signal — the caller passes the VIEWER's own group_ids and gets
+     * back the people who overlap, with the overlap count as the
+     * signal strength.
+     *
+     * The viewer is excluded (`gm_user_id != $excludeUserId`) so they
+     * never recommend themselves. Active-membership filter only
+     * (`gm_user_status LIKE 'member%'`) — same convention as the rest of
+     * this repository.
+     *
+     * `shared_group_id` is the group with the lowest id among the shared
+     * set (deterministic, MIN()) — the caller resolves it to a display
+     * name and classifies it (Local vs holder community) via the group
+     * title/marker. We return ONE representative rather than the full
+     * list because the recommender's reason line names a single group;
+     * the `shared_count` carries the strength.
+     *
+     * Bounded (§4): `$groupIds` is the viewer's membership (already
+     * capped at ~200 by getUserMemberGroupIds), and the grouped
+     * candidate set by `$limit`. ORDER BY is by shared_count DESC then
+     * user_id — this is a SELECTION bound (keep the strongest overlaps
+     * within the cap), NOT a popularity ranking of the output; the
+     * service layer re-scores with its own affinity weights and never
+     * trusts this order for the final result.
+     *
+     * @param int[] $groupIds  The viewer's group memberships.
+     * @return array<int, array{shared_count: int, shared_group_id: int}>
+     *         candidate user_id => overlap info
+     */
+    public static function getCoMembersOfGroups(
+        array $groupIds,
+        int $excludeUserId,
+        int $limit = 300
+    ): array {
+        if ($groupIds === [] || $limit <= 0) {
+            return [];
+        }
+        if ($limit > 500) {
+            $limit = 500;
+        }
+
+        // Sanitize + dedupe the group id list.
+        $clean = [];
+        foreach ($groupIds as $gid) {
+            $intVal = (int) $gid;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $members      = self::membersTable();
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        $params = $idList;
+        $params[] = self::ACTIVE_MEMBER_STATUS;
+        $params[] = $excludeUserId;
+        $params[] = $limit;
+
+        $sql = $wpdb->prepare(
+            "SELECT gm_user_id            AS user_id,
+                    COUNT(DISTINCT gm_group_id) AS shared_count,
+                    MIN(gm_group_id)      AS shared_group_id
+               FROM {$members}
+              WHERE gm_group_id IN ({$placeholders})
+                AND gm_user_status LIKE %s
+                AND gm_user_id <> %d
+              GROUP BY gm_user_id
+              ORDER BY shared_count DESC, gm_user_id ASC
+              LIMIT %d",
+            ...$params
+        );
+
+        /** @var list<array{user_id: string, shared_count: string, shared_group_id: string}>|null $rows */
+        $rows = $wpdb->get_results($sql, ARRAY_A);
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $userId = (int) $row['user_id'];
+            if ($userId > 0) {
+                $out[$userId] = [
+                    'shared_count'    => (int) $row['shared_count'],
+                    'shared_group_id' => (int) $row['shared_group_id'],
+                ];
+            }
+        }
+        return $out;
+    }
+
+    /**
      * IDs of all published peepso-groups whose privacy is NOT open —
      * `peepso_group_privacy` post-meta IN ('1', '2'), i.e. closed OR
      * secret (NFT-gated groups are a closed-privacy subset).
