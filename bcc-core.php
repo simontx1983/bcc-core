@@ -574,6 +574,25 @@ add_filter('bcc_system_health', function (array $health): array {
             'route_error_status',   // non-200 response from the route
             'route_malformed_body', // response body wasn't the expected shape
         ],
+        // nft_indexer — NftEthIndexerWorker forward-progress stalls. The
+        // worker walks confirmed Transfer events per clamped block range,
+        // advancing wp_bcc_chain_checkpoints only over fully-read blocks.
+        // On a partial drain (page budget hit before the range emptied) it
+        // safe-advances to (maxBlockSeen - 1) so every block strictly below
+        // the page-boundary block is durably checkpointed — guaranteeing
+        // monotonic progress whenever the read pages span >= 2 blocks.
+        //   - dense_block_stall: the PATHOLOGICAL edge where even the first
+        //     block of the range carried more transfers than the per-tick
+        //     page budget (MAX_PAGES_PER_TICK × ALCHEMY_MAX_COUNT) can read,
+        //     so safe-advance would still skip an unread tail of that same
+        //     block. The worker holds the checkpoint (no data loss) and
+        //     bumps this counter. Sustained activation = a chain is wedged
+        //     on a dense block and cannot make forward progress within the
+        //     current page budget; operator must raise MAX_PAGES_PER_TICK /
+        //     narrow BLOCKS_PER_TICK for that chain or investigate the
+        //     contract. Near-impossible under block gas limits — a nonzero
+        //     value is a real incident, not noise.
+        'nft_indexer'          => ['dense_block_stall'],
     ]);
 
     return $health;
