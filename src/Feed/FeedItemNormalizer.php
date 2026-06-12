@@ -209,11 +209,17 @@ final class FeedItemNormalizer
     /** @return array<string, array{allowed: bool, unlock_hint: ?string}> */
     private static function defaultPermissions(): array
     {
-        // Conservative default — service should override per viewer.
+        // can_report is the only real feed-action gate today —
+        // FeedRankingService::hydrateViewerPermissions overrides it per
+        // viewer (authed + not-the-author) and ReportButton reads it; the
+        // conservative false here is the fallback for any normalize() path
+        // that doesn't hydrate. can_react / can_reply / can_share were
+        // removed (2026-06-11): never overridden per viewer, never read by
+        // the frontend, share has no feature, and react/reply shipped
+        // `false` while both actually work — a documented-but-unbacked
+        // trap. Re-add a gate here only when the action is real AND a
+        // consumer reads it.
         return [
-            'can_react'  => ['allowed' => false, 'unlock_hint' => null],
-            'can_reply'  => ['allowed' => false, 'unlock_hint' => null],
-            'can_share'  => ['allowed' => true,  'unlock_hint' => null],
             'can_report' => ['allowed' => false, 'unlock_hint' => null],
         ];
     }
