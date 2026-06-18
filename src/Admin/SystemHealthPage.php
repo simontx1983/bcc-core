@@ -90,6 +90,7 @@ final class SystemHealthPage
         echo '</div>';
     }
 
+    /** @return array<string, mixed> */
     private static function fetchHealth(): array
     {
         $request  = new \WP_REST_Request('GET', '/bcc/v1/system/health');
@@ -113,6 +114,7 @@ final class SystemHealthPage
     // Section renderers
     // ────────────────────────────────────────────────────────────
 
+    /** @param array<string, mixed> $data */
     private static function renderHeader(array $data): void
     {
         $status = (string) ($data['status'] ?? 'unknown');
