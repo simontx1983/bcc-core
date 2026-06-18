@@ -200,6 +200,28 @@ add_action('added_post_meta',   $bccBustNonOpenGroupCache, 10, 3);
 add_action('updated_post_meta', $bccBustNonOpenGroupCache, 10, 3);
 add_action('deleted_post_meta', $bccBustNonOpenGroupCache, 10, 3);
 
+// ── PeepSo media (avatar/cover) cache invalidation ─────────────
+// PeepSoMediaCache caches resolved avatar + cover-photo URLs (each costs
+// a per-user peepso_users SELECT + file_exists stat via PeepSoUser, plus
+// a lazy usr_avatar_custom write). PeepSo writes `peepso_avatar_hash` /
+// `peepso_cover_hash` via update_user_meta on change, and
+// `peepso_use_gravatar` toggles the avatar branch — so bust that user's
+// entries whenever any of those keys is added/updated/deleted. Staleness
+// is cosmetic (a stale URL 404s to the monogram / default cover), so a
+// missed path is backstopped by the cache TTL. Mirrors the non-open-group
+// bust above. (Relocated from bcc-trust so the bcc-core activity feed can
+// share the same cache — bcc-trust depends on bcc-core, not vice versa.)
+$bccBustPeepSoMediaCache = static function ($_metaIdOrIds, $objectId, $metaKey): void {
+    if (is_string($metaKey)
+        && \BCC\Core\PeepSo\PeepSoMediaCache::isBustMetaKey($metaKey)
+    ) {
+        \BCC\Core\PeepSo\PeepSoMediaCache::bust((int) $objectId);
+    }
+};
+add_action('added_user_meta',   $bccBustPeepSoMediaCache, 10, 3);
+add_action('updated_user_meta', $bccBustPeepSoMediaCache, 10, 3);
+add_action('deleted_user_meta', $bccBustPeepSoMediaCache, 10, 3);
+
 // ── Legacy option cleanup (post-consolidation one-shot) ─────────
 // bcc-disputes and bcc-onchain-signals were merged into bcc-trust.
 // Their option rows in wp_options (settings, counters, transients)

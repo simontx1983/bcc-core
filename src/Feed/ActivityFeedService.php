@@ -393,10 +393,12 @@ final class ActivityFeedService
 
     private static function resolveAvatarUrl(int $userId): string
     {
-        // PeepSo stores avatars at a known path; get_avatar_url is the safe
-        // cross-plugin abstraction. Always returns absolute URL per §1.7.
-        $url = get_avatar_url($userId);
-        return is_string($url) ? $url : '';
+        // Cached seam (§11). Plain get_avatar_url() here runs PeepSo's
+        // get_avatar_url filter, which constructs a PeepSoUser and calls
+        // get_avatar('full') per author — a per-user peepso_users SELECT +
+        // usr_avatar_custom write on every feed page. PeepSoMediaCache
+        // returns the identical URL, cached + busted on avatar-meta change.
+        return \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
     }
 
     /**
