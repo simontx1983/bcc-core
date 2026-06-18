@@ -193,6 +193,31 @@ final class ActivityFeedService
     }
 
     /**
+     * Single-activity fetch for permalink reads (`GET /bcc/v1/feed/{id}`).
+     * Same hydration as the list path (`hydrateRows`) so a permalink and
+     * a feed card normalize identically; unpublished rows (trashed/draft)
+     * are excluded the same way the list query's `post_status = 'publish'`
+     * filter excludes them — `getById` itself has no such filter, so it's
+     * enforced here instead.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function getActivityById(int $actId, int $viewerId): ?array
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+
+        $row = PeepSoActivityRepository::getById($actId);
+        if ($row === null || (string) $row->act_status !== 'publish') {
+            return null;
+        }
+
+        $items = $this->hydrateRows([$row], $viewerId);
+        return $items[0] ?? null;
+    }
+
+    /**
      * @return list<int>|null  null = no author filter; [] = no posts; non-empty = whitelist.
      */
     private function resolveAuthorFilter(int $viewerId, string $scope): ?array
