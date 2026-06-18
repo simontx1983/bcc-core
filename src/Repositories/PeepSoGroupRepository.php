@@ -571,6 +571,21 @@ final class PeepSoGroupRepository
      * "Active" excludes pending_*, banned, block_invites — same
      * `member%` filter the rest of this repository uses.
      *
+     * INTENTIONALLY UNCACHED — do not add a wp_cache/transient layer.
+     * This feeds FeedRankingService::resolveRestrictedGroupIds(), which
+     * SUBTRACTS the viewer's memberships from the hidden-group set
+     * (closed/secret/NFT-gated). A stale "still a member" entry would
+     * therefore *unhide* gated posts from a user who was removed, banned,
+     * or downgraded — a §4.7.x content leak, not just a stale read.
+     * PeepSo owns several membership write paths (member_modify role
+     * changes, ban, group-delete cascade) that fire no hook BCC can
+     * reliably bust on, so a generation counter we'd never bump would
+     * surface stale memberships after those writes. This follows the
+     * same uncached-read convention documented on {@see listGroupMembers}.
+     * The query is a single-user range scan on `INDEX gm_user_id` — cheap.
+     * If this ever needs optimizing, build an authoritatively-invalidated
+     * membership read-model, not a cache-layer shortcut.
+     *
      * @return list<int>
      */
     public static function getUserMemberGroupIds(int $userId, int $limit = 200): array
