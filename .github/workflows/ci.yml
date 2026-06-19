@@ -22,7 +22,8 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: mbstring
+          # gmp is required by EthSignatureVerifier (secp256k1 ecrecover).
+          extensions: mbstring, gmp
           tools: composer:v2
           coverage: none
 
