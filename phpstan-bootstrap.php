@@ -30,3 +30,14 @@ if (!class_exists('PeepSoSharePhotos')) {
         public const MODULE_ID = 4;
     }
 }
+
+// Referenced from src/PeepSo/PeepSoMediaCache.php (avatar/cover resolution).
+if (!class_exists('PeepSoUser')) {
+    class PeepSoUser
+    {
+        public static function get_instance(int $id = 0): self { return new self(); }
+        public function get_avatar(string $suffix = 'full'): string { return ''; }
+        public function has_cover(): bool { return false; }
+        public function get_cover(int $size = 0): string { return ''; }
+    }
+}

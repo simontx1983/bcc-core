@@ -249,8 +249,12 @@ final class CronPage
         echo '<thead><tr><th>Slug</th><th>Seconds</th><th>Display</th></tr></thead><tbody>';
 
         foreach ($schedules as $slug => $info) {
-            $seconds = is_array($info) && isset($info['interval']) ? (int) $info['interval']  : 0;
-            $display = is_array($info) && isset($info['display'])  ? (string) $info['display'] : '';
+            // wp_get_schedules() is typed array<string, array{interval:int,
+            // display:string}>, so the first isset narrows $info; a second
+            // is_array() would be redundant (PHPStan function.alreadyNarrowedType).
+            // isset() still guards a malformed cron_schedules filter entry.
+            $seconds = isset($info['interval']) ? (int) $info['interval']  : 0;
+            $display = isset($info['display'])  ? (string) $info['display'] : '';
             $isBcc   = strpos((string) $slug, 'bcc_') === 0;
 
             $rowStyle = $isBcc ? '' : 'color:#888;';
