@@ -1,0 +1,39 @@
+name: Notify cross-repo guards
+
+# On every push to main, ping the root repo so its cross-repo contract /
+# subsystem / cadence / dead-file guards re-run against this repo's new code —
+# closing the "separate repos" blind spot where a route or contract change here
+# would not otherwise re-check the contract docs in the root repo.
+#
+# Requires a DISPATCH_TOKEN repo secret: a fine-grained PAT with
+# "Contents: read and write" on simontx1983/Blue-collar-crypto. Without it this
+# workflow warns and no-ops (non-breaking).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notify-root-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger root cross-repo guards
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::DISPATCH_TOKEN not set — skipping cross-repo guard trigger. See workflow header."
+            exit 0
+          fi
+          gh api --method POST repos/simontx1983/Blue-collar-crypto/dispatches \
+            -f event_type=sibling-push \
+            -f "client_payload[repo]=${{ github.repository }}" \
+            -f "client_payload[sha]=${{ github.sha }}"
+          echo "Triggered cross-repo guards on simontx1983/Blue-collar-crypto."
