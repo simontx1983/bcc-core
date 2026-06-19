@@ -17,3 +17,14 @@ Thumbs.db
 node_modules/
 .env
 
+
+.phpunit.cache/
+
+# Dev-only test deps (PHPUnit tree) — restored via composer install, not shipped.
+/vendor/phpunit/
+/vendor/myclabs/
+/vendor/nikic/
+/vendor/phar-io/
+/vendor/sebastian/
+/vendor/staabm/
+/vendor/theseer/
