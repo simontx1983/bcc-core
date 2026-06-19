@@ -374,7 +374,18 @@ add_action('init', function () {
     if (!wp_next_scheduled('bcc_core_rl_cleanup')) {
         wp_schedule_event(time(), 'bcc_thirty_minutes', 'bcc_core_rl_cleanup');
     }
+    // Degradation alerting: turns the pull-only DegradationMetrics surface into
+    // a push alert when a subsystem stays degraded. Self-heals on updates that
+    // skip a reactivation (same posture as the cleanup cron above).
+    if (!wp_next_scheduled(\BCC\Core\Observability\DegradationAlerter::CRON_HOOK)) {
+        wp_schedule_event(time(), 'bcc_thirty_minutes', \BCC\Core\Observability\DegradationAlerter::CRON_HOOK);
+    }
 }, 99);
+
+add_action(
+    \BCC\Core\Observability\DegradationAlerter::CRON_HOOK,
+    [\BCC\Core\Observability\DegradationAlerter::class, 'evaluate']
+);
 
 // ── System health filter contributors ──────────────────────────
 // Phase 3 of the post-stabilization observability initiative
