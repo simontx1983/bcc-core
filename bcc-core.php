@@ -467,6 +467,13 @@ add_filter('bcc_system_health', function (array $health): array {
         'search_lkg'           => ['served', 'unavailable_503'],
         // bcc-trust subsystems
         'read_model_fallback'  => ['legacy_aggregation'],
+        // contribution_recovery — the daily "Trust Recovery Through
+        // Contribution" evaluator. A per-user failure is isolated (the
+        // batch continues) and recorded here; sustained activation means
+        // the recovery sweep is silently skipping users, so the
+        // caution/risky cohort stops climbing back even when they
+        // contribute. Investigate the evaluator + its read repos.
+        'contribution_recovery' => ['user_eval_failed'],
         // audit_log_swallow — silent-catch read paths that are supposed
         // to be reliable, plus the WRITE path inside AuditLogger::log()
         // itself (the only swallow that §VIII.30 deliberately requires:
