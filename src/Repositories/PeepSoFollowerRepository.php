@@ -301,4 +301,63 @@ final class PeepSoFollowerRepository
         }
         return $out;
     }
+
+    /**
+     * Batched following-count lookup — the active side (uf_active_user_id),
+     * mirroring getFollowersCountForUsers (passive side). Returns the
+     * count of accounts each user *follows*. Used by the batched
+     * feature-access level resolver (pulls = follows per §C2), where
+     * N × getCounts() would issue 2N sequential COUNT queries on the
+     * hot feed author-hydration path.
+     *
+     * Users with zero follows are absent from the map (callers default
+     * to 0). Empty `$userIds` short-circuits to an empty map (no SQL).
+     *
+     * @param list<int> $userIds Bounded by caller (e.g. feed/comment
+     *                           author page cap of 50).
+     * @return array<int, int> user_id → following count
+     */
+    public static function getFollowingCountForUsers(array $userIds): array
+    {
+        if ($userIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($userIds as $id) {
+            $intVal = (int) $id;
+            if ($intVal > 0) {
+                $clean[$intVal] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        $idList = array_keys($clean);
+
+        global $wpdb;
+        $table        = self::table();
+        $placeholders = implode(',', array_fill(0, count($idList), '%d'));
+
+        // One GROUP BY scan replaces N COUNT(*) queries. Mirrors the
+        // passive-side batch; the index on uf_active_user_id keeps it cheap.
+        /** @var list<array{user_id: string, c: string}> $rows */
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT uf_active_user_id AS user_id, COUNT(*) AS c
+                   FROM {$table}
+                  WHERE uf_active_user_id IN ({$placeholders})
+                    AND uf_follow = 1
+                  GROUP BY uf_active_user_id",
+                ...$idList
+            ),
+            ARRAY_A
+        );
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $out[(int) $row['user_id']] = (int) $row['c'];
+        }
+        return $out;
+    }
 }
