@@ -12,7 +12,7 @@
  * are owned (BCC\Trust\Core\Support\ReactionGrammarRegistry).
  *
  * Three grammars:
- *   - trust  — restrained, intentional. Solid / Vouch / Stand-behind.
+ *   - trust  — restrained, intentional. Solid / Vouch.
  *              Reputation-bearing post_kinds.
  *   - social — expressive, emoji-forward. Like / Love / Haha / Wow / Fire.
  *              Culture-formation post_kinds.
@@ -39,10 +39,9 @@ final class ReactionGrammarMap
     public const GRAMMAR_SOCIAL = 'social';
     public const GRAMMAR_TRIBAL = 'tribal';
 
-    /** Trust-grammar kinds — locked since V1 §D5. */
+    /** Trust-grammar kinds (stand_behind retired in Slice 3). */
     public const KIND_SOLID        = 'solid';
     public const KIND_VOUCH        = 'vouch';
-    public const KIND_STAND_BEHIND = 'stand_behind';
 
     /** Social-grammar kinds — v1.5 curated subset (👍 ❤️ 😂 😮 🔥). */
     public const KIND_LIKE = 'like';
@@ -55,7 +54,6 @@ final class ReactionGrammarMap
     public const TRUST_KINDS = [
         self::KIND_SOLID,
         self::KIND_VOUCH,
-        self::KIND_STAND_BEHIND,
     ];
 
     /** @var list<string> */
