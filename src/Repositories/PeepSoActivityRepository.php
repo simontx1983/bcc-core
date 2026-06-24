@@ -299,6 +299,20 @@ final class PeepSoActivityRepository
     }
 
     /**
+     * The post author of the activity's backing wp_post — i.e. who
+     * authored the content the act points at. Returns 0 when the act
+     * is missing (deleted post / stale event). COLUMNS already exposes
+     * `p.post_author AS act_user_id`, so this is a thin wrapper over
+     * getById(). Shared by the Slice 3 vouch pipeline and
+     * NotificationDispatcher's act→author resolution.
+     */
+    public static function getAuthorId(int $actId): int
+    {
+        $row = self::getById($actId);
+        return $row ? (int) ($row->act_user_id ?? 0) : 0;
+    }
+
+    /**
      * Slim single-column lookup for callers that only need the
      * activity's `act_module_id` (no wp_posts JOIN). Used by the
      * v1.5 reactions endpoint to derive the post's grammar — the
