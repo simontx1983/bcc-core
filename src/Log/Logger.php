@@ -154,6 +154,14 @@ final class Logger
     {
         self::ensureInit();
 
+        // Phase 4c: stamp every line with the request-scoped correlation id so a
+        // multi-step failure (REST → async → cron) and cross-tier issues can be
+        // stitched together from the logs. Guarded so logging never depends on
+        // RequestContext; an explicit request_id in $context always wins.
+        if (!array_key_exists('request_id', $context) && class_exists(\BCC\Core\Http\RequestContext::class)) {
+            $context = ['request_id' => \BCC\Core\Http\RequestContext::requestId()] + $context;
+        }
+
         $timestamp = gmdate('Y-m-d H:i:s') . ' UTC';
         $entry     = sprintf('[%s] [%s] %s', $timestamp, $level, $message);
 

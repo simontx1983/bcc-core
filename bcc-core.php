@@ -638,6 +638,22 @@ add_filter('bcc_system_health', function (array $health): array {
     return $health;
 });
 
+// ── Request correlation id (Phase 4c) ──────────────────────────
+// Bind a request-scoped id at the REST boundary so every Logger line and the
+// response share it (X-Request-Id header + the existing _meta.request_id).
+// Adopt a client-supplied X-BCC-Request-Id (sanitised in RequestContext) so the
+// frontend can originate the id; otherwise mint one now so it's fixed before any
+// handler logging runs.
+add_filter('rest_pre_dispatch', static function ($result, $server, $request) {
+    if ($request instanceof \WP_REST_Request) {
+        $inbound = (string) $request->get_header('X-BCC-Request-Id');
+        if ($inbound === '' || !\BCC\Core\Http\RequestContext::setRequestId($inbound)) {
+            \BCC\Core\Http\RequestContext::requestId();
+        }
+    }
+    return $result;
+}, 10, 3);
+
 // ── System health endpoint ─────────────────────────────────────
 // Aggregates operational health data from all BCC plugins into a
 // single admin-only endpoint for monitoring, alerting, and debugging.
