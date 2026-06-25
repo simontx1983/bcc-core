@@ -65,6 +65,17 @@ final class Throttle
     private static array $loggedOnce = [];
 
     /**
+     * Context of the most recent allow() call: {limit, window, at}. Lets a
+     * bcc_rate_limited 429 carry precise Retry-After / X-RateLimit-* values
+     * without every call site threading them (Phase 6 contract fix). Overwritten
+     * on each call; only read on a denial — the endpoint returns immediately on
+     * deny, so this holds the FAILING call's context at that point.
+     *
+     * @var array{limit: int, window: int, at: int}|null
+     */
+    private static ?array $lastDenial = null;
+
+    /**
      * Shared degraded marker: site option storing the UNIX timestamp of the
      * most recent cache-layer failure observed by ANY PHP worker. When the
      * persistent object cache (Redis/Memcached) flaps, every worker
@@ -96,6 +107,17 @@ final class Throttle
         }
         self::loadSharedDegraded();
         return self::$degraded;
+    }
+
+    /**
+     * Context of the most recent allow() call — {limit, window, at} — for the
+     * Envelope to attach Retry-After / X-RateLimit-* to a bcc_rate_limited 429.
+     *
+     * @return array{limit: int, window: int, at: int}|null
+     */
+    public static function lastDenial(): ?array
+    {
+        return self::$lastDenial;
     }
 
     /**
@@ -303,6 +325,10 @@ final class Throttle
      */
     public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
     {
+        // Record this call's limit/window so a resulting 429 can advertise an
+        // accurate Retry-After / X-RateLimit-* (read centrally by the Envelope).
+        self::$lastDenial = ['limit' => $limit, 'window' => $window, 'at' => time()];
+
         // Fail-closed when proxy config is ambiguous AND operator has opted
         // in via BCC_REQUIRE_TRUSTED_PROXY_CONFIG. Without this, a site that
         // sits behind a reverse proxy but has not declared it will resolve
