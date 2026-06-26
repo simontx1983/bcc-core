@@ -474,6 +474,13 @@ add_filter('bcc_system_health', function (array $health): array {
         // caution/risky cohort stops climbing back even when they
         // contribute. Investigate the evaluator + its read repos.
         'contribution_recovery' => ['user_eval_failed'],
+        // attestation_synthesis — folds vouch/stand_behind attestations into
+        // the trust score (Slice E). `event_recompute_failed` = a per-event
+        // recompute (on cast/revoke/reaffirm) threw; `decay_recompute_failed`
+        // = a per-target failure inside the daily decay sweep. Both are
+        // isolated (the event/sweep continues). Sustained activation means
+        // attestation_bonus is going stale — backing stops moving the score.
+        'attestation_synthesis' => ['event_recompute_failed', 'decay_recompute_failed'],
         // audit_log_swallow — silent-catch read paths that are supposed
         // to be reliable, plus the WRITE path inside AuditLogger::log()
         // itself (the only swallow that §VIII.30 deliberately requires:
