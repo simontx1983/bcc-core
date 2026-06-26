@@ -43,6 +43,18 @@ final class DegradationAlerter
     /** DegradationMetric event recorded when this mailer itself fails. */
     private const MAIL_EVENT_SUBSYSTEM = 'degradation_alert_mail';
 
+    /**
+     * Subsystems whose degradation is P1 (page-now). The security/auth mail
+     * paths are the trust anchor a hijacked-session attacker cannot suppress —
+     * if THEY degrade, the out-of-band webhook must carry it ahead of the mail
+     * path that may itself be the failure. Extend (don't replace) via the
+     * `bcc_degradation_p1_subsystems` filter — e.g. bcc-trust adding a
+     * "trust engine down" subsystem.
+     *
+     * @var list<string>
+     */
+    private const P1_SUBSYSTEMS = ['account_security_mail', 'auth_mail'];
+
     // ── Pure decision logic (unit-tested, no WordPress) ─────────────────────
 
     /**
@@ -84,6 +96,34 @@ final class DegradationAlerter
         ];
     }
 
+    /**
+     * Severity for one subsystem given the P1 set. Pure.
+     *
+     * @param list<string> $p1
+     * @return 'P1'|'P2'
+     */
+    public static function severityFor(string $subsystem, array $p1): string
+    {
+        return in_array($subsystem, $p1, true) ? 'P1' : 'P2';
+    }
+
+    /**
+     * Highest severity across a set of subsystems — 'P1' if any is P1. Pure.
+     *
+     * @param list<string> $subsystems
+     * @param list<string> $p1
+     * @return 'P1'|'P2'
+     */
+    public static function maxSeverity(array $subsystems, array $p1): string
+    {
+        foreach ($subsystems as $s) {
+            if (in_array($s, $p1, true)) {
+                return 'P1';
+            }
+        }
+        return 'P2';
+    }
+
     // ── Cron entry point (WordPress wiring) ─────────────────────────────────
 
     public static function evaluate(): void
@@ -122,20 +162,55 @@ final class DegradationAlerter
      */
     private static function dispatch(string $kind, array $subsystems, array $snapshot): void
     {
+        $p1Set    = self::p1Subsystems();
+        $severity = self::maxSeverity($subsystems, $p1Set);
+
+        $severities = [];
+        foreach ($subsystems as $s) {
+            $severities[$s] = self::severityFor($s, $p1Set);
+        }
+
         $site    = function_exists('home_url') ? (string) home_url('/') : '';
         $list    = implode(', ', $subsystems);
         $verb    = $kind === 'RECOVERED' ? 'recovered' : 'entered a sustained degraded state';
-        $subject = sprintf('[BCC] %s: %s', $kind, $list);
+        $subject = sprintf('[BCC][%s] %s: %s', $severity, $kind, $list);
         $body    = sprintf(
-            "<p>The following subsystem(s) %s on %s:</p><ul>%s</ul><p>Snapshot:</p><pre>%s</pre>",
+            "<p><strong>Severity: %s</strong></p><p>The following subsystem(s) %s on %s:</p><ul>%s</ul><p>Snapshot:</p><pre>%s</pre>",
+            $severity,
             $verb,
             $site !== '' ? htmlspecialchars($site) : 'this site',
             implode('', array_map(static fn(string $s): string => '<li>' . htmlspecialchars($s) . '</li>', $subsystems)),
             htmlspecialchars((string) wp_json_encode($snapshot))
         );
 
-        self::email($subject, $body);
-        self::webhook($kind, $subsystems, $site);
+        // Webhook-PRIMARY for P1: send the out-of-band channel FIRST so a
+        // slow/failing mail path (which may itself be the degraded subsystem)
+        // cannot delay or mask a page-now alert. Both are independent
+        // best-effort calls; ordering only matters for P1 urgency.
+        if ($severity === 'P1') {
+            self::webhook($kind, $subsystems, $site, $severity, $severities);
+            self::email($subject, $body);
+        } else {
+            self::email($subject, $body);
+            self::webhook($kind, $subsystems, $site, $severity, $severities);
+        }
+    }
+
+    /**
+     * The P1 subsystem set (constant default, extended via filter).
+     *
+     * @return list<string>
+     */
+    private static function p1Subsystems(): array
+    {
+        $p1 = self::P1_SUBSYSTEMS;
+        if (function_exists('apply_filters')) {
+            $filtered = apply_filters('bcc_degradation_p1_subsystems', $p1);
+            if (is_array($filtered)) {
+                $p1 = array_values(array_filter($filtered, 'is_string'));
+            }
+        }
+        return $p1;
     }
 
     private static function email(string $subject, string $htmlBody): void
@@ -153,17 +228,30 @@ final class DegradationAlerter
     }
 
     /**
-     * @param list<string> $subsystems
+     * @param list<string>          $subsystems
+     * @param 'P1'|'P2'             $severity
+     * @param array<string, string> $severities  subsystem => 'P1'|'P2'
      */
-    private static function webhook(string $kind, array $subsystems, string $site): void
+    private static function webhook(string $kind, array $subsystems, string $site, string $severity = 'P2', array $severities = []): void
     {
         $url = defined('BCC_DEGRADATION_ALERT_WEBHOOK') ? (string) constant('BCC_DEGRADATION_ALERT_WEBHOOK') : '';
         if ($url === '' || !function_exists('wp_remote_post')) {
+            // A P1 alert with no out-of-band channel is itself a gap to record:
+            // the operator is relying solely on a mail path that may be the
+            // failing subsystem.
+            if ($severity === 'P1' && $url === '' && class_exists(Logger::class)) {
+                Logger::warning(
+                    '[bcc-core] P1 degradation with no alert webhook configured',
+                    ['subsystems' => $subsystems]
+                );
+            }
             return;
         }
         $payload = (string) wp_json_encode([
             'kind'       => $kind,
+            'severity'   => $severity,
             'subsystems' => $subsystems,
+            'severities' => $severities,
             'site'       => $site,
         ]);
         $resp = wp_remote_post($url, [

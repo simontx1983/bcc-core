@@ -84,4 +84,21 @@ final class DegradationAlerterTest extends TestCase
         self::assertSame([], $t['newly']);
         self::assertSame(['a', 'b'], $t['recovered']);
     }
+
+    // ── Phase 4d: per-subsystem severity ────────────────────────────────────
+
+    public function testSeverityForClassifiesP1AndP2(): void
+    {
+        $p1 = ['account_security_mail', 'auth_mail'];
+        self::assertSame('P1', DegradationAlerter::severityFor('account_security_mail', $p1));
+        self::assertSame('P2', DegradationAlerter::severityFor('helius_dedup', $p1));
+    }
+
+    public function testMaxSeverityIsP1IfAnySubsystemIsP1(): void
+    {
+        $p1 = ['account_security_mail', 'auth_mail'];
+        self::assertSame('P1', DegradationAlerter::maxSeverity(['helius_dedup', 'auth_mail'], $p1));
+        self::assertSame('P2', DegradationAlerter::maxSeverity(['helius_dedup', 'throttle'], $p1));
+        self::assertSame('P2', DegradationAlerter::maxSeverity([], $p1));
+    }
 }

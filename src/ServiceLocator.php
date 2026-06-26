@@ -11,6 +11,7 @@ use BCC\Core\Contracts\TrustReadServiceInterface;
 use BCC\Core\Contracts\WalletLinkReadInterface;
 use BCC\Core\Contracts\WalletLinkWriteInterface;
 use BCC\Core\Contracts\OnchainDataReadInterface;
+use BCC\Core\Contracts\ChainReadInterface;
 use BCC\Core\Contracts\TrendingDataInterface;
 use BCC\Core\Contracts\WalletSignalWriteInterface;
 
@@ -58,6 +59,7 @@ final class ServiceLocator
         WalletLinkReadInterface::class         => ['BCC\\Trust\\Onchain\\Services\\WalletLinkReadService'],
         WalletLinkWriteInterface::class        => ['BCC\\Trust\\Onchain\\Services\\WalletLinkWriteService'],
         OnchainDataReadInterface::class        => ['BCC\\Trust\\Onchain\\Services\\OnchainDataReadService'],
+        ChainReadInterface::class              => ['BCC\\Trust\\Onchain\\Services\\ChainReadService'],
         WalletSignalWriteInterface::class      => ['BCC\\Trust\\Onchain\\Services\\WalletSignalWriteService'],
         TrendingDataInterface::class           => ['BCC\\Trust\\Core\\Application\\TrendingDataService'],
         RecalcQueueReadInterface::class        => ['BCC\\Trust\\Core\\Application\\RecalcQueueReadService'],
@@ -83,6 +85,7 @@ final class ServiceLocator
         WalletLinkWriteInterface::class        => \BCC\Core\NullServices\NullWalletLinkWrite::class,
         WalletSignalWriteInterface::class      => \BCC\Core\NullServices\NullWalletSignalWrite::class,
         OnchainDataReadInterface::class        => \BCC\Core\NullServices\NullOnchainDataRead::class,
+        ChainReadInterface::class              => \BCC\Core\NullServices\NullChainRead::class,
         TrendingDataInterface::class           => \BCC\Core\NullServices\NullTrendingData::class,
         RecalcQueueReadInterface::class        => \BCC\Core\NullServices\NullRecalcQueueRead::class,
     ];
@@ -132,6 +135,11 @@ final class ServiceLocator
         return self::resolveOnce('bcc.resolve.onchain_data_read', OnchainDataReadInterface::class);
     }
 
+    public static function resolveChainRead(): ChainReadInterface
+    {
+        return self::resolveOnce('bcc.resolve.chain_read', ChainReadInterface::class);
+    }
+
     public static function resolveTrendingData(): TrendingDataInterface
     {
         return self::resolveOnce('bcc.resolve.trending_data', TrendingDataInterface::class);
@@ -161,6 +169,7 @@ final class ServiceLocator
         WalletLinkWriteInterface::class        => 'bcc.resolve.wallet_link_write',
         WalletSignalWriteInterface::class      => 'bcc.resolve.wallet_signal_write',
         OnchainDataReadInterface::class        => 'bcc.resolve.onchain_data_read',
+        ChainReadInterface::class              => 'bcc.resolve.chain_read',
         TrendingDataInterface::class           => 'bcc.resolve.trending_data',
         RecalcQueueReadInterface::class        => 'bcc.resolve.recalc_queue_read',
     ];
