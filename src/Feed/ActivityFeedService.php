@@ -193,6 +193,58 @@ final class ActivityFeedService
     }
 
     /**
+     * Single-activity read for the post-detail permalink
+     * (`GET /bcc/v1/feed/{id}`). Same per-row hydration `getFeed()`
+     * uses (`hydrateRows`), so the returned item is byte-identical to
+     * what the same activity would render as inside a list feed.
+     *
+     * Visibility mirrors `getActivities()`'s global-feed gate (publish
+     * status + non-group-post-or-public_all) — a permalink must never
+     * surface something the list feed itself would have excluded.
+     * Member-aware visibility for closed/secret group posts is out of
+     * scope here, same as the global feed path; the dedicated
+     * group-feed endpoint owns that gate.
+     *
+     * @return array<string, mixed>|null Same per-item shape as a `getFeed()` row; null = not found or not visible.
+     */
+    public function getActivityById(int $actId, int $viewerId): ?array
+    {
+        if ($actId <= 0) {
+            return null;
+        }
+
+        $row = PeepSoActivityRepository::getById($actId);
+        if ($row === null || (string) $row->act_status !== 'publish') {
+            return null;
+        }
+
+        if (!self::isVisibleGlobally((int) $row->act_external_id)) {
+            return null;
+        }
+
+        $items = $this->hydrateRows([$row], $viewerId);
+        return $items[0] ?? null;
+    }
+
+    /**
+     * Mirrors `getActivities()`'s global-feed visibility predicate:
+     * a group-tagged post is visible outside the group only when
+     * explicitly marked `public_all`; non-group posts are always
+     * visible.
+     */
+    private static function isVisibleGlobally(int $postId): bool
+    {
+        if ($postId <= 0) {
+            return false;
+        }
+        $groupId = get_post_meta($postId, 'peepso_group_id', true);
+        if ($groupId === '' || $groupId === false) {
+            return true;
+        }
+        return get_post_meta($postId, '_bcc_post_visibility', true) === 'public_all';
+    }
+
+    /**
      * @return list<int>|null  null = no author filter; [] = no posts; non-empty = whitelist.
      */
     private function resolveAuthorFilter(int $viewerId, string $scope): ?array

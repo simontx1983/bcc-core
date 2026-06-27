@@ -164,7 +164,7 @@ final class FeedItemNormalizer
             'reactions'  => $reactions ?? ReactionGrammarMap::emptyReactionsFor($postKind),
             'permissions' => $permissions !== [] ? $permissions : self::defaultPermissions(),
             'links' => [
-                'self'   => '/p/feed_' . (int) $row->act_id,
+                'self'   => '/post/' . (int) $row->act_id,
                 'author' => isset($author['handle']) ? '/u/' . $author['handle'] : '',
             ],
         ];
