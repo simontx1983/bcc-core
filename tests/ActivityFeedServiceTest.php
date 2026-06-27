@@ -59,6 +59,13 @@ namespace BCC\Core\Feed\Tests {
             self::assertNull(self::service()->getActivityById(-5, 1));
         }
 
+        public function testExclusionListsAreOptional(): void
+        {
+            // Null exclusion lists must not themselves short-circuit —
+            // only the $actId<=0 guard does, at this layer.
+            self::assertNull(self::service()->getActivityById(0, 1, null, null));
+        }
+
         public function testNonGroupPostIsVisible(): void
         {
             // No 'peepso_group_id' meta at all → non-group post → visible.

@@ -205,16 +205,38 @@ final class ActivityFeedService
      * scope here, same as the global feed path; the dedicated
      * group-feed endpoint owns that gate.
      *
+     * `$excludedAuthorIds`/`$excludedActIds` mirror the same opaque
+     * exclusion channels `getFeed()` accepts (§O4.1 shadow-limit / §K1
+     * block invisibility / §K1 Phase C moderation hide) — bcc-trust's
+     * FeedRankingService computes these the same way it does for the
+     * list feed and passes them through, so a moderation-hidden or
+     * blocked-author post can't be reached by going directly to its
+     * permalink even though the SQL `NOT IN` narrowing getFeed() uses
+     * doesn't apply to a single-row-by-id lookup.
+     *
+     * @param list<int>|null $excludedAuthorIds
+     * @param list<int>|null $excludedActIds
      * @return array<string, mixed>|null Same per-item shape as a `getFeed()` row; null = not found or not visible.
      */
-    public function getActivityById(int $actId, int $viewerId): ?array
-    {
+    public function getActivityById(
+        int $actId,
+        int $viewerId,
+        ?array $excludedAuthorIds = null,
+        ?array $excludedActIds = null
+    ): ?array {
         if ($actId <= 0) {
             return null;
         }
 
         $row = PeepSoActivityRepository::getById($actId);
         if ($row === null || (string) $row->act_status !== 'publish') {
+            return null;
+        }
+
+        if ($excludedActIds !== null && in_array((int) $row->act_id, $excludedActIds, true)) {
+            return null;
+        }
+        if ($excludedAuthorIds !== null && in_array((int) $row->act_user_id, $excludedAuthorIds, true)) {
             return null;
         }
 
