@@ -24,7 +24,9 @@ if (!defined('ABSPATH')) {
  * Mapping table — peepso act_module_id -> contract post_kind:
  *   status       -> status
  *   review       -> review        (bcc-trust review post; act_external_id -> bcc_trust_votes row)
- *   pull_batch   -> pull_batch    (bcc emits via §C3 batch close; act_external_id -> bcc_pull_batches.id)
+ *   watch_batch  -> watch_batch   (bcc emits via §C3 batch close; act_external_id -> bcc_watch_batches.id).
+ *                                  The legacy act_module_id string 'pull_batch' is still accepted and
+ *                                  normalizes to the canonical 'watch_batch' (no data migration — mapped on read).
  *   page_claim   -> page_claim    (bcc emits on bcc_page_claimed; act_external_id -> bcc_onchain_claims.id)
  *   dispute      -> dispute_signed
  *   signal       -> signal        (bcc emits via on-chain refresh)
@@ -70,7 +72,7 @@ final class FeedItemNormalizer
      *                deliberately outside PeepSo's known modules to
      *                guarantee no collision.
      *
-     * String-keyed entries (`'review'`, `'pull_batch'`, etc.) below are
+     * String-keyed entries (`'review'`, `'watch_batch'`, etc.) below are
      * a historical record from before the 2026-05-15 SMALLINT fix —
      * they NEVER fired in practice (the broken writes coerced to 0),
      * so the lookup fell through to 'status'. Kept here so callers
@@ -96,7 +98,7 @@ final class FeedItemNormalizer
 
         // BCC-owned modules — integer keys (200-range). Must stay in
         // lockstep with PeepSoActivityWriter::MODULE_ID_BY_NAME.
-        '200' => 'pull_batch',
+        '200' => 'watch_batch',
         '201' => 'page_claim',
         '202' => 'review',
         '203' => 'dispute_signed',
@@ -111,7 +113,12 @@ final class FeedItemNormalizer
         // moduleId arrived.
         'status'     => 'status',
         'review'     => 'review',
-        'pull_batch' => 'pull_batch',
+        // Canonical key + the tolerated legacy 'pull_batch' alias. Both map
+        // to the canonical 'watch_batch' post_kind so pre-existing
+        // peepso_activities.act_module_id rows written before the rename
+        // still normalize correctly (mapped on read; no data migration).
+        'watch_batch' => 'watch_batch',
+        'pull_batch'  => 'watch_batch',
         'page_claim' => 'page_claim',
         'dispute'    => 'dispute_signed',
         'signal'     => 'signal',
@@ -145,7 +152,7 @@ final class FeedItemNormalizer
         $item = [
             'id'         => 'feed_' . (int) $row->act_id,
             'post_kind'  => $postKind,
-            // Module-specific FK (e.g. bcc_pull_batches.id for pull_batch,
+            // Module-specific FK (e.g. bcc_watch_batches.id for watch_batch,
             // bcc_onchain_claims.id for page_claim, wp_posts.ID for status,
             // 0 for system events). Used by hydrators (server-side) and
             // for stable client-side react keys; the frontend treats it

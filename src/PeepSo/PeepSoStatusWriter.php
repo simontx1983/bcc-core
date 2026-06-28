@@ -9,7 +9,7 @@
  *   - inserts the activity_stream row (act_module_id=PeepSoActivity::MODULE_ID,
  *     stored as the integer 1 — NOT the string 'status'; act_module_id is
  *     a numeric column despite BCC-owned modules using string keys like
- *     'review'/'pull_batch')
+ *     'review'/'watch_batch')
  *   - fires `peepso_activity_after_add_post`
  *   - dispatches notifications (when owner != author)
  *   - bookkeeping for post-meta + activity-stream cache
@@ -275,7 +275,7 @@ final class PeepSoStatusWriter
      * activity module), not the string 'status'. Filtering by string
      * always returns 0 rows. Matching by the canonical PeepSoActivity::MODULE_ID
      * constant is the correct lookup. (BCC-owned modules like
-     * 'review'/'pull_batch' DO write strings — those are write paths
+     * 'review'/'watch_batch' DO write strings — those are write paths
      * BCC owns, not PeepSo's native status path.)
      */
     private static function resolveActIdForPost(int $postId): int
