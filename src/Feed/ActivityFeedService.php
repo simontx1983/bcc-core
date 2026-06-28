@@ -193,6 +193,80 @@ final class ActivityFeedService
     }
 
     /**
+     * Single-activity read for the post-detail permalink
+     * (`GET /bcc/v1/feed/{id}`). Same per-row hydration `getFeed()`
+     * uses (`hydrateRows`), so the returned item is byte-identical to
+     * what the same activity would render as inside a list feed.
+     *
+     * Visibility mirrors `getActivities()`'s global-feed gate (publish
+     * status + non-group-post-or-public_all) — a permalink must never
+     * surface something the list feed itself would have excluded.
+     * Member-aware visibility for closed/secret group posts is out of
+     * scope here, same as the global feed path; the dedicated
+     * group-feed endpoint owns that gate.
+     *
+     * `$excludedAuthorIds`/`$excludedActIds` mirror the same opaque
+     * exclusion channels `getFeed()` accepts (§O4.1 shadow-limit / §K1
+     * block invisibility / §K1 Phase C moderation hide) — bcc-trust's
+     * FeedRankingService computes these the same way it does for the
+     * list feed and passes them through, so a moderation-hidden or
+     * blocked-author post can't be reached by going directly to its
+     * permalink even though the SQL `NOT IN` narrowing getFeed() uses
+     * doesn't apply to a single-row-by-id lookup.
+     *
+     * @param list<int>|null $excludedAuthorIds
+     * @param list<int>|null $excludedActIds
+     * @return array<string, mixed>|null Same per-item shape as a `getFeed()` row; null = not found or not visible.
+     */
+    public function getActivityById(
+        int $actId,
+        int $viewerId,
+        ?array $excludedAuthorIds = null,
+        ?array $excludedActIds = null
+    ): ?array {
+        if ($actId <= 0) {
+            return null;
+        }
+
+        $row = PeepSoActivityRepository::getById($actId);
+        if ($row === null || (string) $row->act_status !== 'publish') {
+            return null;
+        }
+
+        if ($excludedActIds !== null && in_array((int) $row->act_id, $excludedActIds, true)) {
+            return null;
+        }
+        if ($excludedAuthorIds !== null && in_array((int) $row->act_user_id, $excludedAuthorIds, true)) {
+            return null;
+        }
+
+        if (!self::isVisibleGlobally((int) $row->act_external_id)) {
+            return null;
+        }
+
+        $items = $this->hydrateRows([$row], $viewerId);
+        return $items[0] ?? null;
+    }
+
+    /**
+     * Mirrors `getActivities()`'s global-feed visibility predicate:
+     * a group-tagged post is visible outside the group only when
+     * explicitly marked `public_all`; non-group posts are always
+     * visible.
+     */
+    private static function isVisibleGlobally(int $postId): bool
+    {
+        if ($postId <= 0) {
+            return false;
+        }
+        $groupId = get_post_meta($postId, 'peepso_group_id', true);
+        if ($groupId === '' || $groupId === false) {
+            return true;
+        }
+        return get_post_meta($postId, '_bcc_post_visibility', true) === 'public_all';
+    }
+
+    /**
      * @return list<int>|null  null = no author filter; [] = no posts; non-empty = whitelist.
      */
     private function resolveAuthorFilter(int $viewerId, string $scope): ?array
