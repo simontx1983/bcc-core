@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
  *
  * Body-shape resolution per kind is intentionally LEFT TO THE NORMALIZER's
  * caller path (this service) because each kind reads from a different
- * source-of-truth (bcc_trust_votes for reviews, bcc_pull_meta for batches,
+ * source-of-truth (bcc_trust_votes for reviews, bcc_watch_meta for batches,
  * bcc_onchain_signals for signals, etc.). Phase 1 ships with the body
  * dispatcher returning {} for non-status kinds; subsequent phases fill them
  * in kind-by-kind without touching this service's signature.
@@ -128,7 +128,7 @@ final class ActivityFeedService
      * and unscoped (every module the user posted into shows up).
      *
      * Module filter is intentionally null — a user's wall surfaces every
-     * kind they have authored (status, review, blog, pull_batch,
+     * kind they have authored (status, review, blog, watch_batch,
      * page_claim, signal, …). Caller can drop kinds out via the normal
      * `excludedActIds` channel if a per-act suppression is needed.
      *
@@ -383,7 +383,7 @@ final class ActivityFeedService
      *
      * `act_module_id` arrives as either a numeric string (PeepSo native
      * modules: '1' for status/PeepSoActivity::MODULE_ID) or a kind
-     * string (BCC modules: 'review', 'pull_batch', 'page_claim',
+     * string (BCC modules: 'review', 'watch_batch', 'page_claim',
      * 'blog'). We accept both shapes for the status branch so a typo
      * in the writer side doesn't silently strip the post body.
      *

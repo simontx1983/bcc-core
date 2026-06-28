@@ -89,6 +89,9 @@ final class ReactionGrammarMap
 
         // Social grammar — culture-formation kinds.
         'status'          => self::GRAMMAR_SOCIAL,
+        'watch_batch'     => self::GRAMMAR_SOCIAL,
+        // Tolerated legacy key: pre-rename activity rows whose post_kind
+        // resolves to 'pull_batch' still grade with the social grammar.
         'pull_batch'      => self::GRAMMAR_SOCIAL,
         'blog_excerpt'    => self::GRAMMAR_SOCIAL,
     ];

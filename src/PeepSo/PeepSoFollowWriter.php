@@ -10,7 +10,7 @@
  * pattern and exposes:
  *
  *   - follow(active, passive): int  → returns the uf_id (the follow_id
- *                                     that bcc_pull_meta will reference)
+ *                                     that bcc_watch_meta will reference)
  *   - unfollow(active, passive): bool
  *
  * The PeepSoUserFollower class is loaded by PeepSo itself; we
@@ -79,10 +79,10 @@ final class PeepSoFollowWriter
      * Set uf_follow=0 on the relationship $activeUserId → $passiveUserId.
      *
      * PeepSo's convention is to keep the row alive and flip the flag
-     * (NOT DELETE the row). The bcc_pull_meta sidecar references
+     * (NOT DELETE the row). The bcc_watch_meta sidecar references
      * uf_id, so the row must persist; the watch-graph's read query
      * already filters by uf_follow=1 so flipped rows naturally drop
-     * out of the watchlist view. Deleting bcc_pull_meta is the
+     * out of the watchlist view. Deleting bcc_watch_meta is the
      * caller's job.
      *
      * Returns:
