@@ -306,6 +306,14 @@ final class SafeHttpClient
 
         try {
             foreach ($wave as $i => $url) {
+                // Guaranteed non-empty by partitionByCanonicalHost (every
+                // fetchable URL has a host), but narrow the type for the
+                // non-empty-string CURLOPT_URL contract.
+                if ($url === '') {
+                    $results[$i] = new \WP_Error('ssrf_invalid_url', 'Invalid URL: empty');
+                    continue;
+                }
+
                 $ch = curl_init();
 
                 curl_setopt($ch, CURLOPT_URL, $url);
