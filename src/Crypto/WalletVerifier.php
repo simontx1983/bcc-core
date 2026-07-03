@@ -38,11 +38,12 @@ final class WalletVerifier
         // bech32, ADR-036 signing); the cosmos verifier handles it
         // transparently because it derives the HRP from the address
         // rather than hardcoding 'cosmos' as the prefix.
+        // ('stargaze' was removed when the stargaze-1 L1 halted after the
+        // 2026 Stargaze → Cosmos Hub migration.)
         'cosmos'    => 'cosmos',
         'osmosis'   => 'cosmos',
         'akash'     => 'cosmos',
         'juno'      => 'cosmos',
-        'stargaze'  => 'cosmos',
         'thorchain' => 'cosmos',
         // Solana
         'solana'    => 'solana',
