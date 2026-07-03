@@ -637,8 +637,19 @@ add_filter('bcc_system_health', function (array $health): array {
         //     on a dense block and cannot make forward progress within the
         //     current page budget; operator must raise MAX_PAGES_PER_TICK /
         //     narrow BLOCKS_PER_TICK for that chain or investigate the
-        //     contract. Near-impossible under block gas limits — a nonzero
-        //     value is a real incident, not noise.
+        //     contract.
+        //     REALITY CHECK (2026-07-02 incident): the fetch is the CHAIN-
+        //     WIDE ERC-721/1155 firehose (alchemy_getAssetTransfers with no
+        //     address scoping; linked-wallet filtering happens at ingest),
+        //     so on busy L2s a single block can routinely exceed the page
+        //     budget — the original "near-impossible under block gas limits"
+        //     claim assumed contract-scoped reads and was wrong. Optimism
+        //     wedged on exactly this for a week. Mitigated in bcc-trust by
+        //     the zero-wallet follow-head gate (chains with no linked
+        //     wallets never page transfers); a stall on a WALLET-BEARING
+        //     chain is still a real incident (the scale fix is wallet-
+        //     scoped reads or address-activity webhooks — see the worker's
+        //     Step 5.5/8 docblocks).
         'nft_indexer'          => ['dense_block_stall'],
     ]);
 
