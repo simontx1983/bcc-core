@@ -63,6 +63,16 @@ final class SafeHttpClient
     /** Maximum response body size (bytes) — caps memory footprint per call. */
     private const DEFAULT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MiB
 
+    /**
+     * Maximum cURL easy-handles in flight at once in a same-host batch.
+     *
+     * A batch of N URLs is drained in waves of at most this many concurrent
+     * sockets, so a 100-URL gallery fetch does not open 100 simultaneous
+     * connections against a single upstream (which upstreams rate-limit and
+     * which would exhaust local fd/socket budget).
+     */
+    private const BATCH_MAX_CONCURRENCY = 12;
+
     /** DNS resolution cache TTL (seconds, request-local only). */
     private const DNS_CACHE_TTL = 60;
 
@@ -134,6 +144,335 @@ final class SafeHttpClient
         } finally {
             self::clearPin($host);
         }
+    }
+
+    /**
+     * Concurrent SSRF-safe GET of multiple URLs that all share ONE host.
+     *
+     * Specialized batch primitive for the "N URLs, one host" shape (e.g. a
+     * gallery of media URLs served by a single CDN). The shared host is
+     * validated, resolved, and DNS-pinned exactly ONCE via the same
+     * `validateAndPinUrl()` path the single-request `get()` uses; every easy
+     * handle then sets `CURLOPT_RESOLVE` to that SAME pin, closing the
+     * TOCTOU/DNS-rebinding window per hop. Any URL whose host differs from the
+     * validated one is rejected with a `WP_Error` for that index only — a
+     * caller cannot smuggle a second, unvalidated host past the single
+     * validation.
+     *
+     * All four single-request protections are preserved in the concurrent
+     * path: (1) scheme/metadata/private-IP validation + public-IP resolution,
+     * (2) the resolved IP pinned via CURLOPT_RESOLVE, (3) redirects disabled
+     * (CURLOPT_FOLLOWLOCATION=false), (4) tight timeout + response-size cap
+     * (aborted mid-transfer via the progress callback).
+     *
+     * Runs raw cURL (curl_multi), NOT wp_remote_*, because we own the pin and
+     * the streaming size cap directly. Fails closed (WP_Error per index) if the
+     * cURL extension is missing. Handles are drained in waves of at most
+     * BATCH_MAX_CONCURRENCY and every handle is cleaned up in a `finally`, so
+     * no socket or pin state leaks across requests on a long-lived worker.
+     *
+     * @param list<string>         $urls all must share the same host
+     * @param array<string, mixed> $args timeout (capped 30s, default 3s),
+     *                                    headers (array<string, string>),
+     *                                    limit_response_size (bytes)
+     * @return array<int, array{code: int, body: string}|\WP_Error> keyed by the
+     *         SAME index as $urls. Each entry is an HTTP result (any status) or
+     *         a WP_Error (SSRF block / transport error / timeout). Empty in → [].
+     */
+    public static function getBatchSameHost(array $urls, array $args = []): array
+    {
+        if ($urls === []) {
+            return [];
+        }
+
+        if (!function_exists('curl_init') || !function_exists('curl_multi_init')) {
+            return self::failEveryIndex(
+                $urls,
+                new \WP_Error(
+                    'ssrf_no_curl',
+                    'SafeHttpClient batch requires the PHP cURL extension.'
+                )
+            );
+        }
+
+        // Validate + resolve + pin the SHARED host exactly once, using the
+        // first URL as the canonical host source. Every other URL is checked
+        // against this host below.
+        $urls   = array_values($urls);
+        $first  = $urls[0];
+        $pin    = self::validateAndPinUrl($first);
+        if ($pin instanceof \WP_Error) {
+            // The shared host itself is blocked/invalid — fail the whole batch.
+            return self::failEveryIndex($urls, $pin);
+        }
+
+        $canonicalHost = strtolower((string) parse_url($first, PHP_URL_HOST));
+        if ($canonicalHost === '') {
+            return self::failEveryIndex(
+                $urls,
+                new \WP_Error('ssrf_invalid_url', 'Invalid URL: missing host')
+            );
+        }
+
+        $timeout  = self::batchTimeout($args);
+        $maxBytes = self::batchMaxBytes($args);
+        $headers  = self::batchHeaders($args);
+        // $pin is null for IP-literal hosts (no DNS to pin); non-null gives the
+        // "host:port:ip" CURLOPT_RESOLVE entry to apply to every handle.
+        $resolveEntry = $pin === null ? null : "{$pin['host']}:{$pin['port']}:{$pin['ip']}";
+
+        // Index-aligned pass: any URL that does not match the single validated
+        // host is rejected here, BEFORE a socket is opened, so it can never be
+        // fetched against the wrong pin. This split is pure (no I/O) and so is
+        // the unit-testable core of the same-host enforcement.
+        [$fetchable, $results] = self::partitionByCanonicalHost($urls, $canonicalHost);
+
+        // Drain fetchable URLs in bounded waves.
+        foreach (array_chunk($fetchable, self::BATCH_MAX_CONCURRENCY, true) as $wave) {
+            foreach (self::runWave($wave, $resolveEntry, $timeout, $maxBytes, $headers) as $i => $res) {
+                $results[$i] = $res;
+            }
+        }
+
+        ksort($results);
+
+        return $results;
+    }
+
+    /**
+     * Split a batch of URLs into the fetchable set (host matches the single
+     * validated host) and a pre-computed WP_Error result map for the rest.
+     *
+     * Pure — no DNS, no sockets. This is the same-host-enforcement gate: a URL
+     * whose host differs from `$canonicalHost`, or which has no host at all, is
+     * rejected as a WP_Error at its OWN index without touching the others, so a
+     * caller cannot smuggle a second unvalidated host into the batch.
+     *
+     * @param list<string> $urls          index-aligned URL list (0-based, contiguous)
+     * @param string       $canonicalHost lowercase host from the validated first URL
+     * @return array{0: array<int, string>, 1: array<int, \WP_Error>}
+     *         [ index→URL to fetch, index→WP_Error already-rejected ]
+     */
+    private static function partitionByCanonicalHost(array $urls, string $canonicalHost): array
+    {
+        /** @var array<int, string> $fetchable */
+        $fetchable = [];
+        /** @var array<int, \WP_Error> $rejected */
+        $rejected = [];
+
+        foreach ($urls as $i => $url) {
+            $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+            if ($host === '') {
+                $rejected[$i] = new \WP_Error('ssrf_invalid_url', 'Invalid URL: missing host');
+                continue;
+            }
+            if ($host !== $canonicalHost) {
+                $rejected[$i] = new \WP_Error(
+                    'ssrf_host_mismatch',
+                    "Batch URL host '{$host}' does not match the validated host '{$canonicalHost}'"
+                );
+                continue;
+            }
+            $fetchable[$i] = $url;
+        }
+
+        return [$fetchable, $rejected];
+    }
+
+    /**
+     * Run one bounded wave of same-host GETs concurrently via curl_multi.
+     *
+     * @param array<int, string>       $wave        index → URL (all same host, pre-validated)
+     * @param string|null              $resolveEntry "host:port:ip" pin, or null for IP-literal hosts
+     * @param array<string, string>    $headers
+     * @return array<int, array{code: int, body: string}|\WP_Error> index → result
+     */
+    private static function runWave(
+        array $wave,
+        ?string $resolveEntry,
+        float $timeout,
+        int $maxBytes,
+        array $headers
+    ): array {
+        $multi = curl_multi_init();
+
+        /** @var array<int, \CurlHandle> $handles index → easy handle */
+        $handles = [];
+        /** @var array<int, int> $bodyLen index → bytes written so far (for the size-cap abort) */
+        $bodyLen = [];
+        /** @var array<int, string> $bodies index → accumulated body */
+        $bodies = [];
+        $results = [];
+
+        try {
+            foreach ($wave as $i => $url) {
+                // Guaranteed non-empty by partitionByCanonicalHost (every
+                // fetchable URL has a host), but narrow the type for the
+                // non-empty-string CURLOPT_URL contract.
+                if ($url === '') {
+                    $results[$i] = new \WP_Error('ssrf_invalid_url', 'Invalid URL: empty');
+                    continue;
+                }
+
+                $ch = curl_init();
+
+                curl_setopt($ch, CURLOPT_URL, $url);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                // No redirects: every hop could re-target a private IP and
+                // slip past the pin.
+                curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+                // HTTP(S) only — refuse file://, gopher://, dict://, etc.,
+                // both for the request and (defensively) any redirect target.
+                curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+                curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+                curl_setopt($ch, CURLOPT_TIMEOUT, (int) ceil($timeout));
+                curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, (int) ceil($timeout));
+                curl_setopt($ch, CURLOPT_NOSIGNAL, true);
+
+                if ($resolveEntry !== null) {
+                    // The shared DNS pin: cURL connects to the pre-resolved
+                    // public IP, not whatever DNS returns at connect time.
+                    curl_setopt($ch, CURLOPT_RESOLVE, [$resolveEntry]);
+                }
+
+                if ($headers !== []) {
+                    $headerLines = [];
+                    foreach ($headers as $name => $value) {
+                        $headerLines[] = "{$name}: {$value}";
+                    }
+                    curl_setopt($ch, CURLOPT_HTTPHEADER, $headerLines);
+                }
+
+                $bodyLen[$i] = 0;
+                $bodies[$i]  = '';
+                // Streaming size cap: accumulate the body ourselves and abort
+                // the transfer (return < length signals cURL to error out)
+                // once we exceed the cap. This bounds per-handle memory even
+                // for a hostile chunked/streamed response with no Content-Length.
+                curl_setopt(
+                    $ch,
+                    CURLOPT_WRITEFUNCTION,
+                    static function ($handle, string $chunk) use (&$bodyLen, &$bodies, $i, $maxBytes): int {
+                        $bodyLen[$i] += strlen($chunk);
+                        if ($bodyLen[$i] > $maxBytes) {
+                            // Returning a short count aborts the transfer.
+                            return -1;
+                        }
+                        $bodies[$i] .= $chunk;
+                        return strlen($chunk);
+                    }
+                );
+
+                $handles[$i] = $ch;
+                curl_multi_add_handle($multi, $ch);
+            }
+
+            // Pump the multi handle until all transfers complete.
+            $running = null;
+            do {
+                $status = curl_multi_exec($multi, $running);
+                if ($running > 0) {
+                    curl_multi_select($multi, 1.0);
+                }
+            } while ($running > 0 && $status === CURLM_OK);
+
+            foreach ($handles as $i => $ch) {
+                $errno = curl_errno($ch);
+                if ($errno !== 0) {
+                    // Distinguish the size-cap abort (WRITEFUNCTION short
+                    // return surfaces as CURLE_WRITE_ERROR) from other
+                    // transport errors for a clearer caller-facing code.
+                    if ($errno === CURLE_WRITE_ERROR && $bodyLen[$i] > $maxBytes) {
+                        $results[$i] = new \WP_Error(
+                            'http_response_too_large',
+                            "Response exceeded {$maxBytes} bytes and was aborted"
+                        );
+                    } else {
+                        $results[$i] = new \WP_Error(
+                            'http_request_failed',
+                            curl_error($ch) !== '' ? curl_error($ch) : "cURL error {$errno}"
+                        );
+                    }
+                    continue;
+                }
+
+                $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+                $results[$i] = ['code' => $code, 'body' => $bodies[$i]];
+            }
+        } finally {
+            // Clean up every handle + the multi handle so no socket or state
+            // leaks across requests on a long-lived PHP-FPM worker.
+            foreach ($handles as $ch) {
+                curl_multi_remove_handle($multi, $ch);
+                curl_close($ch);
+            }
+            curl_multi_close($multi);
+        }
+
+        return $results;
+    }
+
+    /**
+     * Resolve the batch transport timeout: default 3s, capped at 30s.
+     *
+     * @param array<string, mixed> $args
+     */
+    private static function batchTimeout(array $args): float
+    {
+        if (!isset($args['timeout']) || (float) $args['timeout'] <= 0) {
+            return 3.0;
+        }
+        return min((float) $args['timeout'], 30.0);
+    }
+
+    /**
+     * Resolve the batch per-response size cap: default 5 MiB.
+     *
+     * @param array<string, mixed> $args
+     */
+    private static function batchMaxBytes(array $args): int
+    {
+        if (!isset($args['limit_response_size']) || (int) $args['limit_response_size'] <= 0) {
+            return self::DEFAULT_MAX_RESPONSE_BYTES;
+        }
+        return (int) $args['limit_response_size'];
+    }
+
+    /**
+     * Normalise caller-supplied headers into a string→string map.
+     *
+     * @param array<string, mixed> $args
+     * @return array<string, string>
+     */
+    private static function batchHeaders(array $args): array
+    {
+        $raw = $args['headers'] ?? [];
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach ($raw as $name => $value) {
+            if (is_string($name) && (is_string($value) || is_int($value) || is_float($value))) {
+                $out[$name] = (string) $value;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Build an index-aligned result array where every entry is the same error.
+     *
+     * @param list<string> $urls
+     * @return array<int, \WP_Error>
+     */
+    private static function failEveryIndex(array $urls, \WP_Error $error): array
+    {
+        $out = [];
+        foreach (array_keys(array_values($urls)) as $i) {
+            $out[$i] = $error;
+        }
+        return $out;
     }
 
     /**
