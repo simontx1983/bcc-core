@@ -72,11 +72,6 @@ interface WalletSignalWriteInterface
     public function getAllTrustSignalsForUser(int $userId): array;
 
     /**
-     * Sum trust_boost across all chains for a user.
-     */
-    public function getTotalTrustBoost(int $userId): float;
-
-    /**
      * Delete all signal rows for a user (account cleanup).
      */
     public function deleteForUser(int $userId): void;

@@ -59,12 +59,6 @@ final class NullWalletSignalWrite implements WalletSignalWriteInterface
         return [];
     }
 
-    public function getTotalTrustBoost(int $userId): float
-    {
-        \BCC\Core\Observability\DegradationMetrics::record('null_wallet_signal_write', 'activation');
-        return 0.0;
-    }
-
     public function deleteForUser(int $userId): void
     {
         \BCC\Core\Observability\DegradationMetrics::record('null_wallet_signal_write', 'activation');
