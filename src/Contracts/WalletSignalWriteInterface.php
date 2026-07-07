@@ -10,21 +10,20 @@ if (!defined('ABSPATH')) {
  * Write access to wallet-derived trust scoring data.
  *
  * Implemented by bcc-trust's Onchain domain (writes to bcc_onchain_signals).
- * Used by bcc-trust's Core domain to persist trust_boost, fraud_reduction, and
- * role after blockchain RPC role checks — without direct cross-plugin
- * table access.
+ * Used by bcc-trust's Core domain to persist the wallet role and NFT
+ * collection metadata after blockchain RPC checks — without direct
+ * cross-plugin table access. (The role-based trust_boost / fraud_reduction
+ * columns were removed 2026-07-07 with the dead wallet-role boost.)
  */
 interface WalletSignalWriteInterface
 {
     /**
-     * Upsert trust-scoring data for a wallet.
+     * Upsert the role + presence row for a wallet.
      *
      * @param int    $userId
      * @param string $chain           Chain slug (e.g. 'ethereum', 'solana').
      * @param string $walletAddress
      * @param string $role            'creator'|'team'|'holder'|'none'|'pending'
-     * @param float  $trustBoost
-     * @param int    $fraudReduction
      * @param string $contractAddress
      * @param array<string, mixed> $extra Additional metadata.
      */
@@ -33,14 +32,12 @@ interface WalletSignalWriteInterface
         string $chain,
         string $walletAddress,
         string $role,
-        float  $trustBoost,
-        int    $fraudReduction,
         string $contractAddress = '',
         array  $extra = []
     ): void;
 
     /**
-     * Save NFT collection metadata and recalculated trust boost.
+     * Save NFT collection metadata for a wallet.
      *
      * @param list<array<string, mixed>> $collections
      */
@@ -48,8 +45,7 @@ interface WalletSignalWriteInterface
         int    $userId,
         string $chain,
         string $walletAddress,
-        array  $collections,
-        float  $trustBoost
+        array  $collections
     ): void;
 
     /**
@@ -70,11 +66,6 @@ interface WalletSignalWriteInterface
      * @return array<string, object>
      */
     public function getAllTrustSignalsForUser(int $userId): array;
-
-    /**
-     * Sum trust_boost across all chains for a user.
-     */
-    public function getTotalTrustBoost(int $userId): float;
 
     /**
      * Delete all signal rows for a user (account cleanup).
