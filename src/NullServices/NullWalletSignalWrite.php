@@ -24,8 +24,6 @@ final class NullWalletSignalWrite implements WalletSignalWriteInterface
         string $chain,
         string $walletAddress,
         string $role,
-        float  $trustBoost,
-        int    $fraudReduction,
         string $contractAddress = '',
         array  $extra = []
     ): void {
@@ -36,8 +34,7 @@ final class NullWalletSignalWrite implements WalletSignalWriteInterface
         int    $userId,
         string $chain,
         string $walletAddress,
-        array  $collections,
-        float  $trustBoost
+        array  $collections
     ): void {
         \BCC\Core\Observability\DegradationMetrics::record('null_wallet_signal_write', 'activation');
     }
