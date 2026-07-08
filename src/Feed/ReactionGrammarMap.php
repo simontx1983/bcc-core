@@ -39,9 +39,17 @@ final class ReactionGrammarMap
     public const GRAMMAR_SOCIAL = 'social';
     public const GRAMMAR_TRIBAL = 'tribal';
 
-    /** Trust-grammar kinds (stand_behind retired in Slice 3). */
+    /**
+     * Trust-grammar reaction kinds. `solid` is the ONLY trust reaction.
+     *
+     * `vouch` and `stand_behind` are NOT reactions — they belong to the
+     * separate person/entity attestation system (`bcc_trust_attestations`;
+     * the byline "Vouch" toggle + §J profile actions), which moves trust
+     * scores. `stand_behind` was retired as a reaction in Slice 3; `vouch`
+     * was relocated to attestations. Do not re-add them here — a reaction
+     * named `vouch` would shadow the live attestation of the same name.
+     */
     public const KIND_SOLID        = 'solid';
-    public const KIND_VOUCH        = 'vouch';
 
     /** Social-grammar kinds — v1.5 curated subset (👍 ❤️ 😂 😮 🔥). */
     public const KIND_LIKE = 'like';
@@ -53,7 +61,6 @@ final class ReactionGrammarMap
     /** @var list<string> */
     public const TRUST_KINDS = [
         self::KIND_SOLID,
-        self::KIND_VOUCH,
     ];
 
     /** @var list<string> */
