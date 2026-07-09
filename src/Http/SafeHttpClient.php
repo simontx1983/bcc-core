@@ -147,6 +147,33 @@ final class SafeHttpClient
     }
 
     /**
+     * Validate that a URL is a safe public HTTP(S) target, WITHOUT sending it.
+     *
+     * Runs the exact same SSRF checks as `get()`/`post()` — scheme allowlist,
+     * cloud-metadata host block, and private/reserved-IP rejection with public
+     * DNS resolution — but performs no request and registers no cURL pin. Use
+     * this when the actual transport is out of our hands (e.g. a third-party
+     * library holds its own HTTP client) and we can only gate the URL before
+     * handing it over. The single source of truth for what counts as "private"
+     * or "blocked" stays in `validateAndPinUrl()`; callers MUST NOT re-implement
+     * the IP-range logic.
+     *
+     * Note: this is a point-in-time check. When the eventual transport
+     * re-resolves DNS at connect time (no pinning), a rebinding window remains —
+     * so this is a strong ingress filter, not a TOCTOU-proof guarantee. For a
+     * fully pinned request, use `get()`/`post()`/`getBatchSameHost()` instead.
+     *
+     * @return \WP_Error|null `null` when the URL is a safe public target;
+     *                        `WP_Error` (codes `ssrf_invalid_url` /
+     *                        `ssrf_invalid_scheme` / `ssrf_blocked`) when blocked.
+     */
+    public static function validatePublicUrl(string $url): ?\WP_Error
+    {
+        $result = self::validateAndPinUrl($url);
+        return $result instanceof \WP_Error ? $result : null;
+    }
+
+    /**
      * Concurrent SSRF-safe GET of multiple URLs that all share ONE host.
      *
      * Specialized batch primitive for the "N URLs, one host" shape (e.g. a
