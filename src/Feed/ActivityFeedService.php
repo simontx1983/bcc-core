@@ -45,6 +45,15 @@ final class ActivityFeedService
     /** @var list<string> */
     public const VALID_SCOPES = [self::SCOPE_FOR_YOU, self::SCOPE_FOLLOWING, self::SCOPE_SIGNALS];
 
+    /**
+     * Author-whitelist cap for the `following` scope. getFollowing() defaults
+     * to 200; a viewer following more than that silently lost every post from
+     * their older follows. This caps far above any realistic follow count so
+     * the following feed is effectively complete, while still bounding the
+     * downstream `WHERE act_user_id IN (...)`. [audit M-B1]
+     */
+    private const FOLLOWING_AUTHOR_CAP = 5000;
+
     private PeepSoGraphService $graph;
 
     public function __construct(PeepSoGraphService $graph)
@@ -282,7 +291,7 @@ final class ActivityFeedService
             return [];
         }
 
-        $following = $this->graph->getFollowing($viewerId);
+        $following = $this->graph->getFollowing($viewerId, self::FOLLOWING_AUTHOR_CAP);
         return $following === [] ? [] : array_values(array_unique(array_map('intval', $following)));
     }
 

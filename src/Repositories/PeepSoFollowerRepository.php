@@ -96,6 +96,54 @@ final class PeepSoFollowerRepository
     }
 
     /**
+     * Of $candidateIds, the subset that $viewerId actively follows.
+     *
+     * A bounded membership probe on the specific candidates — used by the feed
+     * follow-state hydrator so it stays correct for viewers who follow more
+     * than getFollowing()'s page size. The prior path intersected against the
+     * newest-200 follow set and marked anyone older as "not followed". Feed
+     * pages carry at most a few dozen distinct authors, so the IN() is small.
+     * [audit M-B1]
+     *
+     * @param list<int> $candidateIds
+     * @return list<int>
+     */
+    public static function filterFollowed(int $viewerId, array $candidateIds): array
+    {
+        if ($viewerId <= 0 || $candidateIds === []) {
+            return [];
+        }
+
+        $clean = [];
+        foreach ($candidateIds as $id) {
+            $i = (int) $id;
+            if ($i > 0 && $i !== $viewerId) {
+                $clean[$i] = true;
+            }
+        }
+        if ($clean === []) {
+            return [];
+        }
+        // Bound the IN() defensively — a feed page has a few dozen authors.
+        $ids          = array_slice(array_keys($clean), 0, 500);
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+
+        global $wpdb;
+        $args = $ids;
+        array_unshift($args, $viewerId);
+
+        $rows = $wpdb->get_col($wpdb->prepare(
+            'SELECT uf_passive_user_id
+               FROM ' . self::table() . '
+              WHERE uf_active_user_id = %d
+                AND uf_follow = 1
+                AND uf_passive_user_id IN (' . $placeholders . ')',
+            ...$args
+        ));
+        return array_values(array_map('intval', $rows ?: []));
+    }
+
+    /**
      * Users that $viewerId follows AND that also follow $targetId.
      * I.e. "people you follow who also follow X."
      *
