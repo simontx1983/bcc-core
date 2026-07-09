@@ -142,9 +142,13 @@ final class PeepSoMessageRepository
         }
         global $wpdb;
 
-        // Mirror the WHERE of findConversationsForUser — only count
-        // parents where the viewer has a non-deleted recipient row
-        // somewhere in the conversation's history.
+        // Mirror the WHERE of findConversationsForUser — only count parents
+        // where the viewer has a non-deleted recipient row whose resolved
+        // message post is actually published. The list's INNER JOIN requires
+        // p.post_status='publish' AND post_type IN (message, notice); the
+        // count must apply the SAME post filter or it overcounts conversations
+        // whose only visible recipient rows point at an unpublished/deleted
+        // post, yielding an empty trailing page. [audit L-B1]
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(DISTINCT mpart.mpart_msg_id)
              FROM {$wpdb->prefix}peepso_message_participants AS mpart
@@ -152,10 +156,14 @@ final class PeepSoMessageRepository
                AND EXISTS (
                    SELECT 1
                    FROM {$wpdb->prefix}peepso_message_recipients AS mrec
+                   INNER JOIN {$wpdb->posts} AS p
+                       ON p.ID = mrec.mrec_msg_id
                    WHERE mrec.mrec_user_id = %d
                      AND mrec.mrec_deleted = 0
                      AND (mrec.mrec_parent_id = mpart.mpart_msg_id
                           OR mrec.mrec_msg_id = mpart.mpart_msg_id)
+                     AND p.post_status = 'publish'
+                     AND p.post_type IN ('peepso-message', 'peepso-message-notic')
                )",
             $userId,
             $userId
