@@ -67,32 +67,47 @@ final class PeepSoBlockWriter
         global $wpdb;
         $table = $wpdb->prefix . self::TABLE_SUFFIX;
 
-        // Idempotency check — peepso_blocks has no unique key on the
-        // (blocker, blocked) pair, so we read-then-write rather than
-        // relying on INSERT IGNORE.
-        $existing = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table}
-              WHERE blk_user_id = %d
-                AND blk_blocked_id = %d",
-            $blockerId,
-            $blockedId
-        ));
-        if ($existing > 0) {
-            return 'existing';
+        // peepso_blocks has no unique key on the (blocker, blocked) pair, so
+        // the check-then-insert must be serialized — otherwise two concurrent
+        // block() calls (e.g. a double-click) both pass the COUNT()==0 check
+        // and both INSERT, producing duplicate rows and firing the block
+        // events twice (audit double-count). A per-pair advisory lock closes
+        // the window without altering PeepSo's schema; if the lock can't be
+        // taken we fail open (degrade to the racy path) so the block still
+        // lands. [audit L-B3]
+        $lockKey = 'bcc_block:' . $blockerId . ':' . $blockedId;
+        $locked  = \BCC\Core\DB\AdvisoryLock::acquire($lockKey, 5);
+        try {
+            $existing = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$table}
+                  WHERE blk_user_id = %d
+                    AND blk_blocked_id = %d",
+                $blockerId,
+                $blockedId
+            ));
+            if ($existing > 0) {
+                return 'existing';
+            }
+
+            $inserted = $wpdb->insert(
+                $table,
+                [
+                    'blk_user_id'    => $blockerId,
+                    'blk_blocked_id' => $blockedId,
+                ],
+                ['%d', '%d']
+            );
+            if ($inserted === false) {
+                return 'error';
+            }
+        } finally {
+            if ($locked) {
+                \BCC\Core\DB\AdvisoryLock::release($lockKey);
+            }
         }
 
-        $inserted = $wpdb->insert(
-            $table,
-            [
-                'blk_user_id'    => $blockerId,
-                'blk_blocked_id' => $blockedId,
-            ],
-            ['%d', '%d']
-        );
-        if ($inserted === false) {
-            return 'error';
-        }
-
+        // Events fire AFTER releasing the lock so a slow subscriber can't hold
+        // the DB lock (or deadlock against a lock it takes itself).
         // Legacy PeepSo hook — keeps any third-party subscriber that
         // listens on PeepSo's wire intact.
         do_action('peepso_user_blocked', ['from' => $blockerId, 'to' => $blockedId]);
