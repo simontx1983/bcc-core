@@ -197,7 +197,13 @@ final class ChallengeRepository
             );
         }
 
-        $wpdb->query('START TRANSACTION');
+        if ($wpdb->query('START TRANSACTION') === false) {
+            // Fail closed: without the transaction the FOR UPDATE below is a
+            // plain read, so the nonce wouldn't be atomically consumed and
+            // could be replayed under a concurrent request. Treat the
+            // challenge as unavailable and reject rather than proceed.
+            return null;
+        }
 
         $committed = false;
 
