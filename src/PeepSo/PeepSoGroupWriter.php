@@ -46,13 +46,16 @@ final class PeepSoGroupWriter
      * Behavior:
      *   - No existing row → INSERT with gm_user_status='member'
      *   - Existing 'member%' row → idempotent success (no-op)
-     *   - Existing pending/banned row → upgraded by PeepSo's member_join
-     *     to 'member'; we surface as success
+     *   - Existing 'banned' row → REFUSED (returns false); a group-level
+     *     ban must stick until an admin lifts it
+     *   - Existing pending/block_invites row → upgraded by PeepSo's
+     *     member_join to 'member'; we surface as success
      *
      * Returns:
      *   - true  on success (membership now active)
-     *   - false when PeepSoGroupUser is missing (PeepSo deactivated) or
-     *           inputs are invalid (zero/negative IDs)
+     *   - false when PeepSoGroupUser is missing (PeepSo deactivated),
+     *           inputs are invalid (zero/negative IDs), or the user has
+     *           a banned membership row in this group
      */
     public static function join(int $userId, int $groupId): bool
     {
@@ -72,6 +75,21 @@ final class PeepSoGroupWriter
                 \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
                 $loggedOnce = true;
             }
+            return false;
+        }
+
+        // A group-level ban must stick: PeepSo's member_join falls through
+        // to member_modify('member') on ANY existing row — including
+        // gm_user_status='banned' — so without this guard every caller
+        // (REST joins, auto-join reconcile, future doors) would silently
+        // flip an admin's ban back to full membership. Refuse centrally
+        // here rather than per-caller so the invariant can't be missed.
+        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus($userId, $groupId);
+        if ($status === 'banned') {
+            \BCC\Core\Log\Logger::warning('[bcc-core] group join refused — banned membership row', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
             return false;
         }
 
