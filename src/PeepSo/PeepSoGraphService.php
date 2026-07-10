@@ -116,12 +116,35 @@ final class PeepSoGraphService
             return [];
         }
 
-        $following = $this->getFollowing($viewerId);
-        $followingSet = array_flip($following);
+        // Probe the SPECIFIC page authors, not an intersection against
+        // getFollowing($viewerId) — that defaults to the newest 200 follows,
+        // so a viewer who follows more than 200 accounts rendered any older-
+        // followed author with a "Follow" button (and poisoned isFollowingCache
+        // with false negatives). filterFollowed runs a bounded IN() over just
+        // these ids. [audit M-B1]
+        $lookup = [];
+        foreach ($targetIds as $t) {
+            $t = (int) $t;
+            if ($t > 0 && $t !== $viewerId) {
+                $lookup[$t] = true;
+            }
+        }
+
+        $followedSet = [];
+        if ($lookup !== []) {
+            foreach (PeepSoFollowerRepository::filterFollowed($viewerId, array_keys($lookup)) as $id) {
+                $followedSet[(int) $id] = true;
+            }
+        }
 
         $result = [];
         foreach ($targetIds as $targetId) {
-            $result[$targetId] = isset($followingSet[$targetId]) && $viewerId !== $targetId;
+            $t   = (int) $targetId;
+            $hit = isset($followedSet[$t]);
+            $result[$targetId] = $hit;
+            if ($t > 0 && $t !== $viewerId) {
+                $this->isFollowingCache[$viewerId][$t] = $hit;
+            }
         }
         return $result;
     }
