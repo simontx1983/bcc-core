@@ -42,11 +42,19 @@ final class PeepSo
 
         // Stampede lock: MySQL GET_LOCK is atomic across all DB sessions
         // and auto-releases on connection close, so a crashed worker
-        // cannot leave a stale lock. Losers return null for this request
-        // rather than piling onto the DB.
+        // cannot leave a stale lock.
         $lock_key = 'bcc_po_' . $page_id;
         if (!\BCC\Core\DB\AdvisoryLock::acquire($lock_key, 0)) {
-            return self::$cache[$page_id] = null;
+            // Another request already holds the lock and is resolving this
+            // page's owner. Do NOT cache a WRONG null here — downstream
+            // (Permissions::owns_page, dispute/card gates) treats null as
+            // "no owner" and would deny the real owner. Resolve directly
+            // this once (we forgo the stampede dedup for this request only);
+            // the lock holder still populates the shared object cache. On
+            // the default Redis-less setup wp_cache is request-scoped, so a
+            // direct resolve is the only way to get the correct owner here.
+            $owner = ServiceLocator::resolvePageOwnerResolver()->getPageOwner($page_id);
+            return self::$cache[$page_id] = ($owner ?: null);
         }
 
         try {
