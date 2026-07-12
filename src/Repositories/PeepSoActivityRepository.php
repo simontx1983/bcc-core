@@ -113,7 +113,19 @@ final class PeepSoActivityRepository
         // there. post_status='publish' replaces the historical
         // (nonexistent) act_status filter — soft-deleted PeepSo activities
         // are reflected via post_status changes (trash, draft).
-        $where  = ["p.post_status = 'publish'"];
+        //
+        // Exclude comment activity rows. PeepSo writes a peepso_activities
+        // row for EVERY comment (act_external_id = the comment's own
+        // wp_post, act_comment_object_id = the parent post's id). Without
+        // this guard those rows INNER JOIN a published wp_post and leak
+        // into the feed as if they were top-level posts. This is the exact
+        // inverse of the `act_comment_object_id > 0` predicate every
+        // CommentRepository read uses to SELECT comments. NULL-safe in case
+        // a non-comment row stores NULL rather than 0.
+        $where  = [
+            "p.post_status = 'publish'",
+            '(a.act_comment_object_id = 0 OR a.act_comment_object_id IS NULL)',
+        ];
         // $wpdb->prepare binds placeholders strictly left-to-right against
         // the argument list. JOIN clauses render BEFORE the WHERE clause in
         // the final SQL string, so any JOIN-bound params MUST precede the
