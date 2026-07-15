@@ -28,3 +28,6 @@ node_modules/
 /vendor/sebastian/
 /vendor/staabm/
 /vendor/theseer/
+
+# Local-only agent instructions (not shared via git — see Tia/Phillip agreement 2026-07-08)
+CLAUDE.md
