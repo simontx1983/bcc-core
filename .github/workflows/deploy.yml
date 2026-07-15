@@ -1,0 +1,94 @@
+name: Deploy
+
+# Commit-driven deploy (replaces Git Updater's version-header polling, which
+# silently skipped un-bumped merges — see the umbrella deploy-runbook).
+#
+#   staging    — automatic, AFTER the CI workflow succeeds on a push to main.
+#   production — manual only (workflow_dispatch → environment: production),
+#                so prod stays a deliberate promotion.
+#
+# Plugin-scoped rsync: only wp-content/plugins/bcc-core/ is touched, so the
+# webroot .htaccess (incl. the LSCache Authorization block), uploads/, and
+# wp-config.php are never in range. vendor/ is committed, so there is no build
+# step — the checked-out tree is the deploy artifact.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize deploys per environment; never interrupt an in-flight rsync.
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}-bcc-core
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # workflow_dispatch always runs; workflow_run only for a GREEN push to main.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    env:
+      PLUGIN: bcc-core
+    steps:
+      - name: Resolve target
+        id: t
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENVIRONMENT="${{ github.event.inputs.environment }}"
+            REF="${{ github.ref }}"
+          else
+            ENVIRONMENT="staging"
+            REF="${{ github.event.workflow_run.head_sha }}"
+          fi
+          if [ "$ENVIRONMENT" = "production" ]; then
+            SUBPATH="wp-content/plugins/$PLUGIN"
+          else
+            SUBPATH="stage/wp-content/plugins/$PLUGIN"
+          fi
+          {
+            echo "environment=$ENVIRONMENT"
+            echo "ref=$REF"
+            echo "subpath=$SUBPATH"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying $PLUGIN @ $REF → $ENVIRONMENT ($SUBPATH)"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.t.outputs.ref }}
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "${{ secrets.DEPLOY_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy (plugin-scoped rsync, --delete)
+        run: |
+          TARGET="${{ secrets.DEPLOY_BASE }}/${{ steps.t.outputs.subpath }}"
+          echo "rsync → ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:$TARGET"
+          rsync -az --delete \
+            --exclude='.git' --exclude='.github' \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes" \
+            ./ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:$TARGET/"
+
+      - name: Confirm deployed version
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${{ secrets.DEPLOY_PORT }}" \
+            -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "grep -m1 'Version:' '${{ secrets.DEPLOY_BASE }}/${{ steps.t.outputs.subpath }}/$PLUGIN.php'"
