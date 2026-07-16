@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blue Collar Crypto – Core
  * Description: Shared infrastructure for the BCC plugin ecosystem: permissions, PeepSo adapter, DB helpers, caching, logging, and utilities. Production requires a persistent object cache (Redis/Memcached) for rate limiting and API budget enforcement.
- * Version:     1.2.15
+ * Version:     1.2.16
  * Author:      Blue Collar Labs LLC
  * Text Domain: bcc-core
  * Requires at least: 5.8
@@ -37,7 +37,7 @@ if (file_exists(__DIR__ . '/vendor/autoload.php')) {
 
 // ── Constants (defined only after core is fully functional) ──────
 
-define('BCC_CORE_VERSION', '1.2.15');
+define('BCC_CORE_VERSION', '1.2.16');
 define('BCC_CORE_PATH', plugin_dir_path(__FILE__));
 define('BCC_CORE_URL', plugin_dir_url(__FILE__));
 

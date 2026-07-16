@@ -18,7 +18,7 @@
  * so this writer is the only allowed write path from BCC.
  *
  * Contract:
- *   - addComment(int $parentPostId, int $authorId, string $content, int $parentModuleId): int
+ *   - addComment(int $parentPostId, int $authorId, string $content, int $parentModuleId, bool $hasMedia = false): int
  *       Creates a comment on the parent wp_post. `$parentPostId` is
  *       the parent activity's `act_external_id` (the parent's
  *       wp_posts.ID), NOT its act_id. `$parentModuleId` is the
@@ -30,6 +30,17 @@
  *       defaulting to MODULE_ID=1 (status) silently fails on every
  *       other kind. Returns the new comment's wp_posts.ID on success,
  *       0 on failure.
+ *
+ *       `$hasMedia` (§3.5, bcc-trust media-only comments): PeepSo
+ *       predates that feature and always requires non-empty content —
+ *       both its own internal check and its content-sanitizer's
+ *       "empty after strip" rejection (see the class doc below) fire
+ *       on a literal empty string, regardless of whether the caller
+ *       considers the comment complete because it carries an
+ *       attachment. When `$content` is empty/whitespace-only AND
+ *       `$hasMedia` is true, EMPTY_BODY_PLACEHOLDER is written instead
+ *       so PeepSo's write path succeeds; CommentRepository strips it
+ *       back out on read so it never reaches the API response.
  *
  *   - deleteComment(int $commentPostId): bool
  *       Soft-deletes the comment by trashing the wp_post (post_status
@@ -60,6 +71,20 @@ if (!defined('ABSPATH')) {
 final class PeepSoCommentWriter
 {
     /**
+     * Written in place of empty comment text when a media-only comment
+     * (§3.5, bcc-trust) has no body — see the `$hasMedia` contract note
+     * above. A zero-width space rather than a plain space specifically
+     * because PHP/MySQL `trim()` only strips ASCII whitespace, so a
+     * plain space would fail the exact same "empty after trim" checks
+     * this exists to route around; a ZWSP survives that class of check
+     * while staying invisible. Unverified against PeepSo's own
+     * content-sanitizer internals (no access to its source from here) —
+     * if comments still fail with this in place, that sanitizer may be
+     * stripping it too and a different bypass would be needed.
+     */
+    public const EMPTY_BODY_PLACEHOLDER = "\u{200B}";
+
+    /**
      * Create a comment on the given parent post.
      *
      * @param int    $parentPostId    Parent activity's act_external_id (wp_posts.ID).
@@ -72,15 +97,21 @@ final class PeepSoCommentWriter
      *                                (act_external_id, act_module_id) and
      *                                returns FALSE if the pair doesn't
      *                                resolve.
+     * @param bool   $hasMedia        §3.5 — true when the comment carries a
+     *                                photo attachment or GIF, so empty
+     *                                `$content` is still a complete comment
+     *                                (see EMPTY_BODY_PLACEHOLDER above).
      * @return int wp_posts.ID of the new comment, 0 on failure.
      */
     public static function addComment(
         int $parentPostId,
         int $authorId,
         string $content,
-        int $parentModuleId
+        int $parentModuleId,
+        bool $hasMedia = false
     ): int {
-        if ($parentPostId <= 0 || $authorId <= 0 || $parentModuleId <= 0 || trim($content) === '') {
+        $trimmedContent = trim($content);
+        if ($parentPostId <= 0 || $authorId <= 0 || $parentModuleId <= 0 || ($trimmedContent === '' && !$hasMedia)) {
             return 0;
         }
         if (!class_exists('PeepSoActivity')) {
@@ -92,6 +123,12 @@ final class PeepSoCommentWriter
             }
             return 0;
         }
+
+        // Media-only comment: substitute the placeholder so PeepSo's own
+        // non-empty-content requirement is satisfied (see
+        // EMPTY_BODY_PLACEHOLDER doc). Otherwise pass $content through
+        // unchanged — PeepSo owns sanitizing real text.
+        $writeContent = $trimmedContent === '' ? self::EMPTY_BODY_PLACEHOLDER : $content;
 
         // PeepSoActivity is a singleton with a get_instance() pattern.
         // The method returns the new comment's post.ID on success, or
@@ -106,7 +143,7 @@ final class PeepSoCommentWriter
         $result = \PeepSoActivity::get_instance()->add_comment(
             $parentPostId,
             $authorId,
-            $content,
+            $writeContent,
             ['module_id' => $parentModuleId]
         );
 
