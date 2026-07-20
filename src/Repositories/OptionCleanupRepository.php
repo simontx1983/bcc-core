@@ -59,10 +59,13 @@ final class OptionCleanupRepository
      *
      * The '~' (0x7E) suffix is one codepoint above any normal ASCII
      * character, so the range safely terminates after every key matching
-     * the given prefix. Returns the number of rows deleted, or null on
-     * DB error.
+     * the given prefix. Deletes in LIMIT-chunked batches (matching
+     * deleteExpiredRange) so a large legacy keyspace never holds one
+     * long row-locking DELETE on the options table. Returns the total
+     * number of rows deleted, or null on DB error (partial progress is
+     * discarded from the count; already-deleted rows stay deleted).
      */
-    public static function deleteByPrefix(string $prefix): ?int
+    public static function deleteByPrefix(string $prefix, int $batchSize = 1000): ?int
     {
         global $wpdb;
 
@@ -70,21 +73,35 @@ final class OptionCleanupRepository
             return 0;
         }
 
+        $batchSize  = $batchSize > 0 ? $batchSize : 1000;
         $rangeStart = $prefix;
         $rangeEnd   = $prefix . '~';
 
-        $result = $wpdb->query($wpdb->prepare(
-            "DELETE FROM {$wpdb->options}
-             WHERE option_name >= %s AND option_name < %s",
-            $rangeStart,
-            $rangeEnd
-        ));
+        // Hard iteration ceiling guarantees termination (1000 batches ×
+        // 1000 rows = 1M rows — far beyond any real install); if it is
+        // ever hit, the remainder is swept on the next run.
+        $total = 0;
+        for ($i = 0; $i < 1000; $i++) {
+            $result = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$wpdb->options}
+                 WHERE option_name >= %s AND option_name < %s
+                 LIMIT %d",
+                $rangeStart,
+                $rangeEnd,
+                $batchSize
+            ));
 
-        if ($result === false) {
-            return null;
+            if ($result === false) {
+                return null;
+            }
+
+            $total += (int) $result;
+            if ((int) $result < $batchSize) {
+                break;
+            }
         }
 
-        return (int) $result;
+        return $total;
     }
 
     /**
