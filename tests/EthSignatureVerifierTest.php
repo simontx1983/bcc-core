@@ -114,6 +114,21 @@ final class EthSignatureVerifierTest extends TestCase
         self::assertFalse(EthSignatureVerifier::verify(self::MESSAGE, $sig, self::ADDRESS));
     }
 
+    public function testNonHexSignatureRejected(): void
+    {
+        // 130 chars post-0x, passes the length gate, non-hex → must be a
+        // clean false, not an uncaught ValueError from gmp_init (PHP 8).
+        $sig = '0x' . str_repeat('zz', 65);
+        self::assertFalse(EthSignatureVerifier::verify(self::MESSAGE, $sig, self::ADDRESS));
+    }
+
+    public function testSingleNonHexCharRejected(): void
+    {
+        // Valid r‖s, non-hex v byte — exercises the tail of the string.
+        $sig = '0x' . self::R . self::S . 'g1';
+        self::assertFalse(EthSignatureVerifier::verify(self::MESSAGE, $sig, self::ADDRESS));
+    }
+
     public function testOversizedMessageRejected(): void
     {
         // > MAX_MESSAGE_LENGTH (1024) → early-rejected before any recovery.

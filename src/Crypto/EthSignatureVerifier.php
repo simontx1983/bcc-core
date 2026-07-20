@@ -56,6 +56,13 @@ final class EthSignatureVerifier {
             return null;
         }
 
+        // Reject non-hex payloads before any numeric parsing: gmp_init(..., 16)
+        // throws ValueError on invalid digits (PHP 8), and this string is
+        // user-supplied. This guard is also what makes the hexdec() below safe.
+        if (!ctype_xdigit($sig)) {
+            return null;
+        }
+
         $r = substr($sig, 0, 64);
         $s = substr($sig, 64, 64);
         $v = hexdec(substr($sig, 128, 2));
