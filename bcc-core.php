@@ -132,6 +132,11 @@ add_filter('bcc_expected_cron_hooks', function (array $hooks): array {
         'source'      => 'bcc-core',
         'description' => 'Rate-limiter wp_options + transient cleanup',
     ];
+    $hooks['bcc_core_degradation_alert_check'] = [
+        'interval'    => 'bcc_thirty_minutes',
+        'source'      => 'bcc-core',
+        'description' => 'Degradation alerter — pushes mail/webhook when a subsystem stays degraded',
+    ];
     return $hooks;
 });
 

@@ -48,6 +48,8 @@ $wpdb->query($wpdb->prepare(
     $wpdb->esc_like('_transient_timeout_bcc_wc_') . '%'
 ));
 
-// Remove scheduled cron events.
+// Remove scheduled cron events. Literal hook names — the plugin's
+// autoloader is not available during uninstall, so no class constants.
 wp_clear_scheduled_hook('bcc_core_rl_cleanup');
+wp_clear_scheduled_hook('bcc_core_degradation_alert_check');
 
