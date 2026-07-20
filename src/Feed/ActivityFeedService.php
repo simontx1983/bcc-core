@@ -563,7 +563,15 @@ final class ActivityFeedService
         }
 
         $iso = (string) $data['t'];
-        $ts  = strtotime($iso);
+        // Strict shape check before strtotime — encodeCursor only ever
+        // emits this exact ISO-8601 Zulu form, and strtotime alone would
+        // also accept relative expressions ("now", "+1 year"), letting a
+        // hand-crafted cursor pick an arbitrary time window instead of
+        // getting the clean page-1 reset every other malformed cursor gets.
+        if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', $iso) !== 1) {
+            return [null, null];
+        }
+        $ts = strtotime($iso);
         if ($ts === false) {
             return [null, null];
         }

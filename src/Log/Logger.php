@@ -228,15 +228,17 @@ final class Logger
      * Redact sensitive values from log context arrays.
      *
      * Wallet addresses: show first 6 + last 4 chars (e.g. "0x1234...abcd").
-     * API keys: fully redacted.
+     * Secret-bearing keys (api keys, tokens, passwords, signatures, …):
+     * fully redacted, matched by substring so prefixed names
+     * (`helius_api_key`, `refresh_token`) are covered. NB: only CONTEXT
+     * values are scrubbed — never interpolate a secret into the message
+     * string itself.
      *
      * @param array<string, mixed> $context
      * @return array<string, mixed>
      */
     private static function redactSensitive(array $context): array
     {
-        $sensitiveKeys = ['address', 'wallet_address', 'walletAddress', 'apikey', 'api_key'];
-
         foreach ($context as $key => &$value) {
             if (is_array($value)) {
                 $value = self::redactSensitive($value);
@@ -249,8 +251,13 @@ final class Logger
 
             $lowerKey = strtolower($key);
 
-            // Full redaction for API keys.
-            if (in_array($lowerKey, ['apikey', 'api_key'], true)) {
+            // Full redaction for secret-bearing keys. Substring match:
+            // over-redacting an innocent 'tokens_total' style key costs a
+            // log detail; under-redacting costs a secret on disk.
+            if (preg_match(
+                '/api_?key|token|secret|password|passwd|signature|authorization|bearer|private_key|mnemonic|credential/',
+                $lowerKey
+            ) === 1) {
                 $value = '***REDACTED***';
                 continue;
             }

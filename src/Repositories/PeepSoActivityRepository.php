@@ -277,7 +277,14 @@ final class PeepSoActivityRepository
         // JOIN params (gm_pm, then vis_in_pm) → WHERE params → LIMIT.
         $allParams = array_merge($joinParams, $params, [$limit]);
 
-        $sql = 'SELECT ' . self::COLUMNS . '
+        // DISTINCT: row-multiplication guard. WP convention is one
+        // postmeta row per (post_id, meta_key), but nothing enforces it —
+        // a duplicate `peepso_group_id` / `_bcc_post_visibility` row
+        // would multiply the joined activity into identical rows,
+        // duplicating feed items within a page and inflating the
+        // over-fetch-by-1 has_more. Dedup cost is negligible (≤ limit+1
+        // rows post-filter).
+        $sql = 'SELECT DISTINCT ' . self::COLUMNS . '
                   FROM ' . self::table() . ' a
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                   ' . $groupJoin . '
