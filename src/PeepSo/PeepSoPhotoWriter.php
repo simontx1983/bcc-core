@@ -237,6 +237,16 @@ final class PeepSoPhotoWriter
                 $authorId,
                 $contentForPeepSo
             );
+        } catch (\Throwable $e) {
+            // add_post threw (not just returned false) — the staged tmp
+            // files would leak because the false-branch cleanup below is
+            // never reached. Clean here, then rethrow; $_POST restore
+            // still runs via finally.
+            @unlink($tmpJpg);
+            if ($isGif) {
+                @unlink(self::replaceExtension($tmpJpg, 'gif'));
+            }
+            throw $e;
         } finally {
             self::restorePostKey('type',      $hadType,   $prevType);
             self::restorePostKey('files',     $hadFiles,  $prevFiles);
