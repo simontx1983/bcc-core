@@ -92,6 +92,56 @@ final class PeepSoMediaCache
     }
 
     /**
+     * Bulk avatar resolution — one wp_cache_get_multiple round trip for
+     * every cached entry, per-user compute only for the misses. With a
+     * persistent object cache (LSMCD/memcached/Redis) this collapses N
+     * network round trips per feed/member page into one; without one,
+     * wp_cache_get_multiple degrades to the same request-local lookups
+     * avatarUrl() would have done. Cold entries still pay PeepSo's
+     * per-user resolution — that cost is inherent to PeepSo's API. No
+     * stampede guard (deliberate): a stale/missing avatar is cosmetic
+     * and each compute is one user's row, unlike get_page_owner.
+     *
+     * @param list<int> $userIds
+     * @return array<int, string> userId => resolved URL ('' = none; render
+     *                            the initials monogram). Invalid ids (<= 0)
+     *                            are omitted.
+     */
+    public static function avatarUrlBulk(array $userIds): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', $userIds),
+            static fn(int $id): bool => $id > 0
+        )));
+        if ($ids === []) {
+            return [];
+        }
+
+        $keys = array_map(
+            static fn(int $id): string => self::AVATAR_PREFIX . $id,
+            $ids
+        );
+        /** @var array<string, mixed> $cached */
+        $cached = wp_cache_get_multiple($keys, self::CACHE_GROUP);
+
+        $out = [];
+        foreach ($ids as $id) {
+            $hit = $cached[self::AVATAR_PREFIX . $id] ?? false;
+            // '' is a valid cached value ("no custom avatar"); only a
+            // non-string (miss) falls through to recompute — same
+            // contract as avatarUrl().
+            if (is_string($hit)) {
+                $out[$id] = $hit;
+                continue;
+            }
+            $url = self::computeAvatar($id);
+            wp_cache_set(self::AVATAR_PREFIX . $id, $url, self::CACHE_GROUP, self::CACHE_TTL);
+            $out[$id] = $url;
+        }
+        return $out;
+    }
+
+    /**
      * Resolved cover-photo URL for $userId, or null when the user has no
      * custom cover (frontend falls back to a default treatment, §1.7).
      */
