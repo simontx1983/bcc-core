@@ -41,6 +41,9 @@ final class Keccak256 {
 
     private static ?\GMP $mask64 = null;
 
+    /** @var array<int, \GMP>|null Powers of two 2^0 … 2^64 — built once, rotl64 hot path. */
+    private static ?array $pow2 = null;
+
     /** 64-bit mask (2^64 - 1) — lazily initialized on first use, cached as non-null. */
     private static function mask64(): \GMP {
         if (self::$mask64 === null) {
@@ -49,11 +52,29 @@ final class Keccak256 {
         return self::$mask64;
     }
 
+    /**
+     * 2^$n for 0 <= $n <= 64, from a lazily built table. rotl64 runs
+     * ~1440 times per hash; recomputing gmp_pow there dominated the cost.
+     * 65 entries because ROT contains 0 (so 64 - 0 = 64 is needed).
+     */
+    private static function pow2(int $n): \GMP {
+        if (self::$pow2 === null) {
+            $table = [];
+            $v = gmp_init(1);
+            for ($i = 0; $i <= 64; $i++) {
+                $table[$i] = $v;
+                $v = gmp_mul($v, 2);
+            }
+            self::$pow2 = $table;
+        }
+        return self::$pow2[$n];
+    }
+
     /** Rotate a 64-bit GMP integer left by $n bits. */
     private static function rotl64(\GMP $x, int $n): \GMP {
         $mask  = self::mask64();
-        $left  = gmp_and(gmp_mul($x, gmp_pow(gmp_init(2), $n)), $mask);
-        $right = gmp_div_q($x, gmp_pow(gmp_init(2), 64 - $n));
+        $left  = gmp_and(gmp_mul($x, self::pow2($n)), $mask);
+        $right = gmp_div_q($x, self::pow2(64 - $n));
         return gmp_and(gmp_or($left, $right), $mask);
     }
 
