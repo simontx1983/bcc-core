@@ -20,6 +20,9 @@ if (!defined('ABSPATH')) {
 
 final class CosmosSignatureVerifier {
 
+    /** secp256k1 group order n (for the low-S malleability check). */
+    private const SECP256K1_N = 'fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141';
+
     /**
      * Verify a Keplr `signArbitrary` (ADR-036) signature.
      *
@@ -61,6 +64,18 @@ final class CosmosSignatureVerifier {
         // 2. Decode the signature (base64 → 64 raw bytes r||s)
         $sigRaw = base64_decode($signature, true);
         if (!is_string($sigRaw) || strlen($sigRaw) !== 64) {
+            return false;
+        }
+
+        // 2b. Low-S malleability check, matching the EVM verifier: for
+        //     every valid (r, s) there is a twin (r, n - s) that verifies
+        //     for the same message, so accepting high-S would let an
+        //     attacker mint a second distinct-on-disk signature and defeat
+        //     any downstream signature-bytes dedup. OpenSSL does NOT
+        //     enforce this. Cosmos SDK/Tendermint require canonical low-S,
+        //     and Keplr emits normalized signatures, so no legitimate
+        //     client is rejected. Degenerate r/s == 0 also rejected.
+        if (!self::isCanonicalLowS($sigRaw)) {
             return false;
         }
 
@@ -229,6 +244,30 @@ final class CosmosSignatureVerifier {
         $seqLen = strlen($rDer) + strlen($sDer);
 
         return "\x30" . chr($seqLen) . $rDer . $sDer;
+    }
+
+    /**
+     * Is this raw 64-byte (r||s) signature canonical: r != 0, s != 0,
+     * and s <= n/2 (low-S)? See the malleability comment in verify().
+     *
+     * @param string $rs 64 raw bytes: 32 bytes r + 32 bytes s
+     */
+    private static function isCanonicalLowS(string $rs): bool {
+        if (strlen($rs) !== 64 || !extension_loaded('gmp')) {
+            // gmp is a hard boot requirement for this plugin; if it is
+            // somehow absent here, fail closed rather than skip the check.
+            return false;
+        }
+
+        $r = gmp_init(bin2hex(substr($rs, 0, 32)), 16);
+        $s = gmp_init(bin2hex(substr($rs, 32, 32)), 16);
+
+        if (gmp_cmp($r, 0) === 0 || gmp_cmp($s, 0) === 0) {
+            return false;
+        }
+
+        $halfN = gmp_div_q(gmp_init(self::SECP256K1_N, 16), 2);
+        return gmp_cmp($s, $halfN) <= 0;
     }
 
     /**
