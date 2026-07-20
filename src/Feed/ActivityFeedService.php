@@ -390,6 +390,10 @@ final class ActivityFeedService
             'number'  => count($authorIds),
         ]);
 
+        // One cache round trip for every author's avatar instead of one
+        // per author (see PeepSoMediaCache::avatarUrlBulk).
+        $avatars = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk($authorIds);
+
         $byId = [];
         foreach ($users as $u) {
             $id            = (int) $u->ID;
@@ -398,7 +402,7 @@ final class ActivityFeedService
                 'id'                    => $id,
                 'handle'                => (string) get_user_meta($id, 'bcc_handle', true) ?: $u->user_login,
                 'display_name'          => $u->display_name ?: $u->user_login,
-                'avatar_url'            => self::resolveAvatarUrl($id),
+                'avatar_url'            => $avatars[$id] ?? '',
                 // Trust-derived fields are placeholders until Phase 2 wires
                 // bcc-trust read services into this hydration step.
                 'card_tier'             => null,
@@ -530,16 +534,6 @@ final class ActivityFeedService
             'is_in_good_standing'   => true,
             'is_followed_by_viewer' => false,
         ];
-    }
-
-    private static function resolveAvatarUrl(int $userId): string
-    {
-        // Cached seam (§11). Plain get_avatar_url() here runs PeepSo's
-        // get_avatar_url filter, which constructs a PeepSoUser and calls
-        // get_avatar('full') per author — a per-user peepso_users SELECT +
-        // usr_avatar_custom write on every feed page. PeepSoMediaCache
-        // returns the identical URL, cached + busted on avatar-meta change.
-        return \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrl($userId);
     }
 
     /**
