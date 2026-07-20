@@ -276,38 +276,78 @@ final class SystemHealthPage
         }
     }
 
+    /**
+     * Project a DegradationMetrics::healthSnapshot() payload into flat
+     * table rows. The snapshot shape is window-major
+     * (`subsystems[<sub>]['current_hour'|'previous_hour'][<event>] => int`,
+     * plus the `any_active` triage bit) — this helper is the ONLY place
+     * the page interprets that contract, and it is pure so the shape
+     * coupling is unit-testable. (An earlier revision of the renderer
+     * read a nonexistent event-major shape, which blanked this panel
+     * during real incidents.)
+     *
+     * @param array<string,mixed> $deg
+     * @return list<array{subsystem: string, event: string, current: int, previous: int}>
+     */
+    public static function degradationRows(array $deg): array
+    {
+        $subsystems = $deg['subsystems'] ?? [];
+        if (!is_array($subsystems)) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($subsystems as $subName => $subData) {
+            if (!is_array($subData)) {
+                continue;
+            }
+            $current  = is_array($subData['current_hour'] ?? null) ? $subData['current_hour'] : [];
+            $previous = is_array($subData['previous_hour'] ?? null) ? $subData['previous_hour'] : [];
+
+            // Union of event names across both windows, current-window
+            // order first so the hot events lead.
+            $events = array_keys($current + $previous);
+            foreach ($events as $eventName) {
+                $rows[] = [
+                    'subsystem' => (string) $subName,
+                    'event'     => (string) $eventName,
+                    'current'   => (int) ($current[$eventName] ?? 0),
+                    'previous'  => (int) ($previous[$eventName] ?? 0),
+                ];
+            }
+        }
+        return $rows;
+    }
+
     /** @param array<string,mixed> $deg */
     private static function renderDegradationMetrics(array $deg): void
     {
         echo '<h3 style="margin-top:16px;">Degradation metrics (current hour + previous hour)</h3>';
 
-        $anyNonzero = (bool) ($deg['any_nonzero'] ?? false);
-        if (!$anyNonzero) {
-            echo '<p style="color:#46b450;">All 18 subsystems quiet across both hourly buckets.</p>';
+        $anyActive = (bool) ($deg['any_active'] ?? false);
+        if (!$anyActive) {
+            echo '<p style="color:#46b450;">All subsystems quiet across both hourly buckets.</p>';
         }
 
-        $subsystems = $deg['subsystems'] ?? [];
-        if (!is_array($subsystems) || $subsystems === []) {
-            echo '<p>(no subsystem data)</p>';
+        $rows = self::degradationRows($deg);
+        if ($rows === []) {
+            // healthSnapshot omits fully-quiet subsystems, so an empty
+            // row set is the normal quiet state, not missing data.
             return;
         }
 
         echo '<table class="widefat striped" style="max-width:900px;">';
         echo '<thead><tr><th>Subsystem</th><th>Event</th><th style="text-align:right;">Current hour</th><th style="text-align:right;">Previous hour</th></tr></thead><tbody>';
 
-        foreach ($subsystems as $subName => $subData) {
-            if (!is_array($subData)) {
-                continue;
-            }
-            $events = $subData['events'] ?? [];
-            if (!is_array($events) || $events === []) {
-                continue;
-            }
+        $bySub = [];
+        foreach ($rows as $row) {
+            $bySub[$row['subsystem']][] = $row;
+        }
+        foreach ($bySub as $subName => $subRows) {
             $isFirst = true;
-            $eventCount = count($events);
-            foreach ($events as $eventName => $counts) {
-                $cur  = is_array($counts) ? (int) ($counts['current']  ?? 0) : 0;
-                $prev = is_array($counts) ? (int) ($counts['previous'] ?? 0) : 0;
+            foreach ($subRows as $row) {
+                $cur  = $row['current'];
+                $prev = $row['previous'];
                 $hot  = ($cur + $prev) > 0;
 
                 $rowStyle = $hot ? 'background:#fcf0f1;' : '';
@@ -316,12 +356,12 @@ final class SystemHealthPage
                 if ($isFirst) {
                     printf(
                         '<td rowspan="%d" style="font-weight:bold;vertical-align:top;">%s</td>',
-                        $eventCount,
-                        esc_html((string) $subName)
+                        count($subRows),
+                        esc_html($subName)
                     );
                     $isFirst = false;
                 }
-                echo '<td><code>' . esc_html((string) $eventName) . '</code></td>';
+                echo '<td><code>' . esc_html($row['event']) . '</code></td>';
                 echo '<td style="text-align:right;' . ($cur > 0 ? 'color:#dc3232;font-weight:bold;' : 'color:#888;') . '">' . esc_html((string) $cur) . '</td>';
                 echo '<td style="text-align:right;' . ($prev > 0 ? 'color:#dba617;font-weight:bold;' : 'color:#888;') . '">' . esc_html((string) $prev) . '</td>';
                 echo '</tr>';
