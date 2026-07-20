@@ -228,10 +228,28 @@ add_action('deleted_user_meta', $bccBustPeepSoMediaCache, 10, 3);
 // no longer have a consumer, so they bloat the table and risk
 // stale-cache collisions if any code path ever reads them again.
 // Gated on a version-scoped option sentinel so the sweep runs at
-// most once per install and is skipped on every subsequent boot.
+// most once per install and is skipped for free out of the autoload
+// blob on every subsequent boot.
 add_action('init', function (): void {
     $sentinel = 'bcc_core_legacy_cleanup_v1';
+
+    // Steady state: the sentinel lives in the autoload blob, which WP
+    // core loads once per request anyway → zero extra queries. (Written
+    // autoload=false originally, which cost one options query on every
+    // request on hosts without a persistent object cache.)
+    $alloptions = function_exists('wp_load_alloptions') ? wp_load_alloptions() : [];
+    if (isset($alloptions[$sentinel])) {
+        return;
+    }
+
     if (get_option($sentinel)) {
+        // Sweep finished before the autoload fix — flip the existing row
+        // into the autoload blob once (WP 6.4+; on older cores we simply
+        // keep the status-quo one-query cost). Every subsequent request
+        // takes the free isset() path above.
+        if (function_exists('wp_set_option_autoload')) {
+            wp_set_option_autoload($sentinel, true);
+        }
         return;
     }
 
@@ -282,11 +300,14 @@ add_action('init', function (): void {
         // Write the sentinel regardless of per-prefix errors — we don't
         // want a single transient DB hiccup to loop this on every init.
         // Errors are logged so operators can re-run manually if needed.
+        // Autoloaded: the sentinel is read on every request, it belongs
+        // in the autoload blob (value is small — three keys, errors
+        // bounded by the prefix list).
         update_option($sentinel, [
             'completed_at'  => gmdate('c'),
             'total_deleted' => $totalDeleted,
             'errors'        => $errors,
-        ], false);
+        ], true);
 
         if (class_exists('\\BCC\\Core\\Log\\Logger')) {
             if (!empty($errors)) {
