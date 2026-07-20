@@ -103,5 +103,59 @@ namespace BCC\Core\Feed\Tests {
             self::assertFalse(self::isVisibleGlobally(0));
             self::assertFalse(self::isVisibleGlobally(-1));
         }
+
+        // ── Batch-prime helpers (feed N+1 fix) ──────────────────────────
+
+        private static function isStatusModule(string $module): bool
+        {
+            $ref = new ReflectionMethod(ActivityFeedService::class, 'isStatusModule');
+            $ref->setAccessible(true);
+            $out = $ref->invoke(null, $module);
+            self::assertIsBool($out);
+            return $out;
+        }
+
+        /**
+         * @param array<int, object> $rows
+         * @return list<int>
+         */
+        private static function collectPrimablePostIds(array $rows): array
+        {
+            $ref = new ReflectionMethod(ActivityFeedService::class, 'collectPrimablePostIds');
+            $ref->setAccessible(true);
+            $out = $ref->invoke(null, $rows);
+            self::assertIsArray($out);
+            return $out;
+        }
+
+        public function testIsStatusModuleTruthTable(): void
+        {
+            // PeepSo native writes '1' — but PeepSoActivity isn't loaded
+            // in this pure-unit bootstrap, so only the string forms hold
+            // here; the class_exists branch is exercised live.
+            self::assertTrue(self::isStatusModule(''));
+            self::assertTrue(self::isStatusModule('status'));
+            self::assertFalse(self::isStatusModule('blog'));
+            self::assertFalse(self::isStatusModule('review'));
+        }
+
+        public function testCollectPrimablePostIdsFiltersAndDedupes(): void
+        {
+            $rows = [
+                (object) ['act_module_id' => 'status', 'act_external_id' => '10'],
+                (object) ['act_module_id' => '',       'act_external_id' => 11],
+                (object) ['act_module_id' => 'blog',   'act_external_id' => '12'],
+                (object) ['act_module_id' => 'review', 'act_external_id' => '13'], // non-post module → excluded
+                (object) ['act_module_id' => 'status', 'act_external_id' => '0'],  // no backing post → excluded
+                (object) ['act_module_id' => 'blog',   'act_external_id' => -4],   // negative → excluded
+                (object) ['act_module_id' => 'status', 'act_external_id' => '10'], // duplicate → deduped
+            ];
+            self::assertSame([10, 11, 12], self::collectPrimablePostIds($rows));
+        }
+
+        public function testCollectPrimablePostIdsEmptyInput(): void
+        {
+            self::assertSame([], self::collectPrimablePostIds([]));
+        }
     }
 }

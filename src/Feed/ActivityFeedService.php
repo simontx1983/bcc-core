@@ -319,8 +319,35 @@ final class ActivityFeedService
             return [];
         }
 
+        // Batch-prime everything the per-row hydration below will read,
+        // so the loop's get_post() / get_user_meta() calls are cache
+        // hits instead of one query per row / per author (the classic
+        // feed N+1).
+        $postIds = self::collectPrimablePostIds($rows);
+        if ($postIds !== []) {
+            // One IN(...) query for all status/blog bodies. No term or
+            // meta caches — resolveBody reads only post fields.
+            _prime_post_caches($postIds, false, false);
+        }
+
         $authorIds = array_values(array_unique(array_map(static fn($r) => (int) $r->act_user_id, $rows)));
-        $authors   = $this->hydrateAuthors($authorIds, $viewerId);
+
+        // User-meta prime covers hydrateAuthors' bcc_handle reads AND the
+        // blog branch's post_author handle read — post objects are already
+        // cached above, so collecting post_author here is free. NB:
+        // get_users(['fields' => [...]]) does NOT prime user meta.
+        $metaUserIds = $authorIds;
+        foreach ($rows as $r) {
+            if ((string) $r->act_module_id === 'blog') {
+                $post = get_post((int) $r->act_external_id);
+                if ($post instanceof \WP_Post && (int) $post->post_author > 0) {
+                    $metaUserIds[] = (int) $post->post_author;
+                }
+            }
+        }
+        update_meta_cache('user', array_values(array_unique($metaUserIds)));
+
+        $authors = $this->hydrateAuthors($authorIds, $viewerId);
 
         $items = [];
         foreach ($rows as $row) {
@@ -403,14 +430,8 @@ final class ActivityFeedService
     {
         $module = (string) $row->act_module_id;
 
-        // Status posts: body lives in wp_posts.post_content. PeepSo
-        // writes act_module_id as the integer 1; legacy/test code may
-        // also use the string 'status'. Accept both.
-        $isStatusModule = $module === ''
-            || $module === 'status'
-            || (class_exists('PeepSoActivity') && (int) $module === \PeepSoActivity::MODULE_ID);
-
-        if ($isStatusModule) {
+        // Status posts: body lives in wp_posts.post_content.
+        if (self::isStatusModule($module)) {
             $postId = (int) $row->act_external_id;
             $text   = '';
             if ($postId > 0) {
@@ -456,6 +477,43 @@ final class ActivityFeedService
         }
 
         return [];
+    }
+
+    /**
+     * Is this act_module_id a status post (body in wp_posts.post_content)?
+     *
+     * PeepSo writes act_module_id as the integer 1; legacy/test code may
+     * also use the string 'status'. Accept both. Shared by resolveBody()
+     * and collectPrimablePostIds() so the two cannot drift.
+     */
+    private static function isStatusModule(string $module): bool
+    {
+        return $module === ''
+            || $module === 'status'
+            || (class_exists('PeepSoActivity') && (int) $module === \PeepSoActivity::MODULE_ID);
+    }
+
+    /**
+     * Post ids whose wp_posts rows resolveBody() will read (status + blog
+     * modules) — primed in one batch so the per-row get_post() calls in
+     * the hydrate loop are cache hits. Pure transform, no DB access.
+     *
+     * @param array<int, object> $rows
+     * @return list<int>
+     */
+    private static function collectPrimablePostIds(array $rows): array
+    {
+        $ids = [];
+        foreach ($rows as $r) {
+            $module = (string) $r->act_module_id;
+            if (self::isStatusModule($module) || $module === 'blog') {
+                $pid = (int) $r->act_external_id;
+                if ($pid > 0) {
+                    $ids[] = $pid;
+                }
+            }
+        }
+        return array_values(array_unique($ids));
     }
 
     /** @return array<string, mixed> */
