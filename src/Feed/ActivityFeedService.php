@@ -498,7 +498,7 @@ final class ActivityFeedService
      * modules) — primed in one batch so the per-row get_post() calls in
      * the hydrate loop are cache hits. Pure transform, no DB access.
      *
-     * @param array<int, object> $rows
+     * @param list<ActivityRow> $rows
      * @return list<int>
      */
     private static function collectPrimablePostIds(array $rows): array
