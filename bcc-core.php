@@ -465,6 +465,13 @@ add_filter('bcc_system_health', function (array $health): array {
         ],
         // bcc-search subsystems
         'search_lkg'           => ['served', 'unavailable_503'],
+        // search_ft_index — an FT-eligible query (≥3 chars) hit the
+        // title-prefix LIKE fallback because the FULLTEXT index is not
+        // installed. Content/category-name matching is silently absent
+        // for these queries; sustained activation means the hourly
+        // self-heal cron isn't landing the index — rebuild it from
+        // BCC System → Developer → Search Index.
+        'search_ft_index'      => ['title_only_fallback'],
         // bcc-trust subsystems
         'read_model_fallback'  => ['legacy_aggregation'],
         // contribution_recovery — the daily "Trust Recovery Through
