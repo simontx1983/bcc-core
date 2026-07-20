@@ -31,6 +31,19 @@ if (!class_exists('PeepSoSharePhotos')) {
     }
 }
 
+// Referenced from src/PeepSo/PeepSoReactionWriter.php.
+if (!class_exists('PeepSoReactionsModel')) {
+    class PeepSoReactionsModel
+    {
+        /** @var mixed Populated by init() from the activity row; null when missing. */
+        public $act_external_id;
+        /** @param int|null $act_id */
+        public function init($act_id = null): void {}
+        public function user_reaction_set(int $react_id): void {}
+        public function user_reaction_reset(bool $is_delete = true): void {}
+    }
+}
+
 // Referenced from src/PeepSo/PeepSoMediaCache.php (avatar/cover resolution).
 if (!class_exists('PeepSoUser')) {
     class PeepSoUser

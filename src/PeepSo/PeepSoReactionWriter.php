@@ -25,6 +25,7 @@
  * Returns false on:
  *   - PeepSoReactionsModel class missing (PeepSo deactivated)
  *   - invalid IDs (zero or negative)
+ *   - activity row missing / already deleted
  *
  * @package BCC\Core\PeepSo
  * @since V1 (2026-04, §D5 reactions)
@@ -62,6 +63,18 @@ final class PeepSoReactionWriter
         // current user. user_reaction_set internally calls
         // user_reaction_reset first, so swap is one call.
         $model->init($actId);
+        // init() populates act_external_id from the peepso_activities row
+        // it just loaded; a missing/deleted activity leaves it null
+        // (PeepSo's get_activity() returns NULL — its own TODO admits
+        // callers must check). Bail BEFORE user_reaction_set — calling it
+        // on an uninitialized model would INSERT an orphan
+        // peepso_reactions row keyed at a nonexistent act_id. NB: PeepSo
+        // gives no per-write status (user_reaction_set returns TRUE
+        // unconditionally), so a raw INSERT failure remains unobservable
+        // here by design — accepted; it surfaces in $wpdb->last_error.
+        if ((int) $model->act_external_id <= 0) {
+            return false;
+        }
         $model->user_reaction_set($reactionTypeId);
 
         return true;
@@ -87,6 +100,11 @@ final class PeepSoReactionWriter
 
         $model = new \PeepSoReactionsModel();
         $model->init($actId);
+        // Same missing-activity gate as setReaction — reset on an
+        // uninitialized model does null-property reads inside PeepSo.
+        if ((int) $model->act_external_id <= 0) {
+            return false;
+        }
         $model->user_reaction_reset();
 
         return true;

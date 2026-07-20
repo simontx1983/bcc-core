@@ -92,7 +92,7 @@ final class WalletIdentityService
         }
 
         // Expired (belt-and-suspenders — transient TTL should handle this).
-        if (time() > ($challenge['expires_at'] ?? 0)) {
+        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
             return null;
         }
 

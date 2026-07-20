@@ -19,6 +19,15 @@ if (!defined('ABSPATH')) {
 final class SolanaSignatureVerifier {
 
     /**
+     * Base58 length ceilings: 64 raw bytes encode to at most
+     * ceil(64 · log 256 / log 58) = 88 chars; 32 bytes to at most 44.
+     * Anything longer cannot decode to a valid signature/key, so it is
+     * rejected before the O(n²) per-char GMP decode loop ever runs.
+     */
+    private const MAX_SIG_B58_LEN  = 88;
+    private const MAX_ADDR_B58_LEN = 44;
+
+    /**
      * Verify a Solana wallet signature.
      *
      * Phantom's signMessage() signs the raw UTF-8 bytes of the message
@@ -34,6 +43,18 @@ final class SolanaSignatureVerifier {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[bcc-core] SolanaVerifier: sodium extension required', []);
             }
+            return false;
+        }
+
+        // Cheap pre-decode bounds — both inputs are user-supplied. No
+        // separate charset pass is needed: with input capped at ≤88 chars
+        // the per-char strpos rejection inside base58Decode() IS the
+        // charset check, at bounded cost.
+        $sigLen = strlen($signature);
+        $adrLen = strlen($address);
+        if ($sigLen === 0 || $sigLen > self::MAX_SIG_B58_LEN
+            || $adrLen === 0 || $adrLen > self::MAX_ADDR_B58_LEN
+        ) {
             return false;
         }
 
