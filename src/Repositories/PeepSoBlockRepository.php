@@ -43,15 +43,18 @@ final class PeepSoBlockRepository
         global $wpdb;
         $table = self::table();
 
-        $count = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table}
+        // Existence probe, not COUNT(*): COUNT scans every matching row
+        // (its LIMIT binds to the one aggregate row), SELECT 1 stops at
+        // the first hit.
+        $found = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$table}
               WHERE blk_user_id = %d
                 AND blk_blocked_id = %d
               LIMIT 1",
             $blockerId,
             $blockedId
         ));
-        return $count > 0;
+        return $found !== null;
     }
 
     /**
@@ -66,15 +69,16 @@ final class PeepSoBlockRepository
         global $wpdb;
         $table = self::table();
 
-        $count = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table}
+        // Existence probe — see isBlocking().
+        $found = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$table}
               WHERE (blk_user_id = %d AND blk_blocked_id = %d)
                  OR (blk_user_id = %d AND blk_blocked_id = %d)
               LIMIT 1",
             $userA, $userB,
             $userB, $userA
         ));
-        return $count > 0;
+        return $found !== null;
     }
 
     /**
