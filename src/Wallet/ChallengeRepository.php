@@ -166,25 +166,23 @@ final class ChallengeRepository
         // and MariaDB 10.x and lists every InnoDB transaction the engine
         // is currently tracking, keyed by the OS-level connection id from
         // CONNECTION_ID(). A row exists iff this session has an open
-        // explicit (or DML-implicit-non-autocommit) transaction. A non-null
-        // CONNECTION_ID() guarantees the lookup is meaningful; if CONNECTION_ID()
-        // returns null (driver in a degraded state), we fall back to
-        // proceeding without the protection — failing closed here would
-        // recreate the same 100% outage we're fixing, and the caller
-        // contract (consume() runs at the top of the wallet-login REST
-        // handler, no outer transaction by design) makes the protection
-        // belt-and-braces rather than load-bearing.
-        $threadId = $wpdb->get_var('SELECT CONNECTION_ID()');
-        $inTransaction = false;
-        if ($threadId !== null) {
-            $found = $wpdb->get_var($wpdb->prepare(
-                'SELECT 1 FROM information_schema.INNODB_TRX
-                  WHERE trx_mysql_thread_id = %d
-                  LIMIT 1',
-                (int) $threadId
-            ));
-            $inTransaction = $found !== null;
-        }
+        // explicit (or DML-implicit-non-autocommit) transaction. The
+        // CONNECTION_ID() null-fallback (driver in a degraded state →
+        // proceed without the protection) is implicit here: SQL equality
+        // against NULL is never true, so a degraded driver yields zero
+        // rows and we proceed, exactly as the old two-query probe did —
+        // failing closed would recreate the 100% outage we fixed, and the
+        // caller contract (consume() runs at the top of the wallet-login
+        // REST handler, no outer transaction by design) makes the
+        // protection belt-and-braces rather than load-bearing. One
+        // round-trip instead of two on the hot wallet-login path; no
+        // prepare() — the query contains zero user input.
+        $found = $wpdb->get_var(
+            'SELECT 1 FROM information_schema.INNODB_TRX
+              WHERE trx_mysql_thread_id = CONNECTION_ID()
+              LIMIT 1'
+        );
+        $inTransaction = $found !== null;
 
         // Enforce contract: consume() must not run inside a caller's
         // transaction. If the caller's outer transaction later rolls back,
@@ -225,9 +223,14 @@ final class ChallengeRepository
             /** @var array<string, mixed>|false $challenge */
             $challenge = maybe_unserialize($serialized);
 
-            if (!is_array($challenge)) {
-                // Corrupted challenge — delete it to prevent replay, then
-                // commit so the DELETE persists.
+            // Corrupted OR expired — either way the row must not be
+            // consumable: delete it to prevent replay, then commit so the
+            // DELETE persists. Expiry mirrors peek(); the service layer
+            // re-checks it too — this is defense-in-depth so a direct
+            // repository caller can never consume a stale nonce.
+            if (!is_array($challenge)
+                || time() > (int) ($challenge['expires_at'] ?? 0)
+            ) {
                 $wpdb->query($wpdb->prepare(
                     "DELETE FROM {$wpdb->options} WHERE option_name IN (%s, %s)",
                     $optionName,
