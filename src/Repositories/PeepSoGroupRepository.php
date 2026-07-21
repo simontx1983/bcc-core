@@ -804,10 +804,12 @@ final class PeepSoGroupRepository
     public static function bustNonOpenGroupIdsCache(): void
     {
         // wp_cache_incr returns false when the key is uninitialized;
-        // initialize-then-incr avoids the no-op on cold caches. Same
-        // shape as HiddenActivityRepository::bustCache and the rest of
-        // the §5 generation-counter callsites in this codebase.
-        if (!is_int(wp_cache_get(self::NONOPEN_CACHE_KEY_GEN, self::NONOPEN_CACHE_GROUP))) {
+        // initialize-then-incr avoids the no-op on cold caches.
+        // Missing-key check is `=== false` (NOT is_int): persistent
+        // backends return ints as numeric strings cross-process, and a
+        // strict is_int check re-initialized the counter to 0 on every
+        // bust — erasing all prior increments instead of adding one.
+        if (wp_cache_get(self::NONOPEN_CACHE_KEY_GEN, self::NONOPEN_CACHE_GROUP) === false) {
             wp_cache_set(self::NONOPEN_CACHE_KEY_GEN, 0, self::NONOPEN_CACHE_GROUP);
         }
         wp_cache_incr(self::NONOPEN_CACHE_KEY_GEN, 1, self::NONOPEN_CACHE_GROUP);
@@ -816,7 +818,14 @@ final class PeepSoGroupRepository
     private static function nonOpenCacheKey(int $limit): string
     {
         $gen = wp_cache_get(self::NONOPEN_CACHE_KEY_GEN, self::NONOPEN_CACHE_GROUP);
-        if (!is_int($gen)) {
+        if (is_numeric($gen)) {
+            // Tolerant read (NOT is_int): persistent backends return
+            // ints as numeric strings cross-process; a strict is_int
+            // reset the generation to 0 on every read and neutralized
+            // bustNonOpenGroupIdsCache(). See
+            // HiddenActivityRepository::getGeneration (bcc-trust).
+            $gen = (int) $gen;
+        } else {
             $gen = 0;
             wp_cache_set(self::NONOPEN_CACHE_KEY_GEN, $gen, self::NONOPEN_CACHE_GROUP);
         }
