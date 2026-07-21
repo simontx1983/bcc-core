@@ -657,7 +657,14 @@ add_filter('bcc_system_health', function (array $health): array {
         // Distinct from the admin-panel `bcc_helius_signature_seen_total`
         // wp_options counter that drives the Helius admin tile —
         // /system/health is the canonical operator surface.
-        'helius_dedup'         => ['replay_skipped'],
+        //   - ingest_failed_unmarked: a delivery's batch ingest threw, and
+        //     its just-marked signatures were successfully unmarked so
+        //     Helius's redelivery can re-process (recovered — no loss).
+        //   - unmark_failed: the same ingest failure but the unmark was
+        //     incomplete/errored — the batch is lost and its signatures
+        //     stay marked, so the resend is refused. Manual replay needed;
+        //     this is the one that warrants an operator page.
+        'helius_dedup'         => ['replay_skipped', 'ingest_failed_unmarked', 'unmark_failed'],
         // polkadot_verify — sr25519/ed25519/ecdsa signature verification
         // is delegated to the bcc-frontend Next.js app (PHP has no native
         // schnorrkel). Activations here mean the internal verify route
