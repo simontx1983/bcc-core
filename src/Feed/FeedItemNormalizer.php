@@ -84,12 +84,16 @@ final class FeedItemNormalizer
      *   4    = PeepSoSharePhotos  (photo)              — added in v1.5
      *
      * Currently-unmapped PeepSo modules — known integers we deliberately
-     * do NOT translate yet:
-     *   6    = PeepSoMessages     — DMs; should never reach the feed
+     * do NOT translate, and which {@see publicFeedModuleIds()} therefore
+     * EXCLUDES from every public feed and permalink path (fail-closed):
+     *   6    = PeepSoMessages     — private DMs; MUST never reach the feed
+     *   8    = group-join stream  — "X joined the group" system notice
      *   9    = PeepSoPages        — page-wall posts; defer to V2 page surface
      *   30   = PeepSoPolls        — V2 candidate, real new post_kind
      *   111  = PeepSoPostBackgrounds — decorative variant of status
      *   6661 = BLOGPOSTS_MODULE_ID — peepso-blog post type, separate flow
+     * Exclusion is enforced at the candidate query, not just here — the
+     * `?? 'status'` fallback below is a render-safety net, NOT a gate.
      */
     public const MODULE_TO_KIND = [
         // Native PeepSo modules — integer keys (cast to string by the lookup).
@@ -126,6 +130,42 @@ final class FeedItemNormalizer
         'nft'        => 'nft_drop',
         'blog'       => 'blog_excerpt',
     ];
+
+    /**
+     * Numeric `act_module_id` values permitted to become PUBLIC feed
+     * items. The single canonical allowlist enforced by BOTH the global
+     * feed candidate query ({@see \BCC\Core\Repositories\PeepSoActivityRepository::getActivities()})
+     * and the single-item permalink visibility gate
+     * ({@see \BCC\Core\Feed\ActivityFeedService::getActivityById()}).
+     *
+     * Derived from MODULE_TO_KIND's integer-keyed entries so the query
+     * gate and the normalizer cannot drift: adding a new numeric module
+     * to the map above automatically admits it here (and vice versa —
+     * an admitted module always has a post_kind). PHP normalizes
+     * integer-like array keys to `int`, so `is_int()` cleanly separates
+     * the real SMALLINT module ids ({@see PeepSoActivityWriter} writes
+     * these) from the legacy string keys ('status', 'review', 'signal',
+     * …) — the latter are a read-side compatibility shim for callers that
+     * pass module *names* and never appear as real `act_module_id` values.
+     *
+     * Fail-closed contract: any module NOT in this list — PeepSo's own
+     * non-post modules (6 DMs, 8 group-join stream, 9 page-wall, 30 polls,
+     * 111 post-backgrounds, 6661 peepso-blog), the legacy string-coerced
+     * `0`, and every unknown/future module — is denied public feed and
+     * permalink exposure regardless of post_status or non-group status.
+     *
+     * @return list<int>
+     */
+    public static function publicFeedModuleIds(): array
+    {
+        $ids = [];
+        foreach (self::MODULE_TO_KIND as $moduleId => $_kind) {
+            if (is_int($moduleId)) {
+                $ids[] = $moduleId;
+            }
+        }
+        return $ids;
+    }
 
     /**
      * @param ActivityRow $row     A row from PeepSoActivityRepository::getActivities().

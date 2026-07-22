@@ -2,6 +2,8 @@
 
 namespace BCC\Core\Repositories;
 
+use BCC\Core\Feed\FeedItemNormalizer;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -159,7 +161,26 @@ final class PeepSoActivityRepository
             }
         }
 
-        if ($moduleIds !== null) {
+        // Module allowlist gate (fail-closed). A null $moduleIds
+        // historically meant "no module filter", which let PeepSo-native
+        // non-post modules (6 DMs, 8 group-join stream, 9 page-wall,
+        // 30 polls, 111 backgrounds, 6661 peepso-blog) and any unknown
+        // module leak into the public feed. The default now narrows to the
+        // canonical public-feed allowlist ({@see FeedItemNormalizer::publicFeedModuleIds()}
+        // — status/photo + BCC 200-range). An explicit $moduleIds list
+        // (e.g. the signals scope, or the blog tab's ['blog']) is honored
+        // verbatim, as-is, with the historical string binding.
+        if ($moduleIds === null) {
+            $allowedModuleIds = FeedItemNormalizer::publicFeedModuleIds();
+            if ($allowedModuleIds === []) {
+                return [];
+            }
+            $placeholders = implode(',', array_fill(0, count($allowedModuleIds), '%d'));
+            $where[]      = "a.act_module_id IN ({$placeholders})";
+            foreach ($allowedModuleIds as $m) {
+                $params[] = $m;
+            }
+        } else {
             $placeholders = implode(',', array_fill(0, count($moduleIds), '%s'));
             $where[]      = "a.act_module_id IN ({$placeholders})";
             foreach ($moduleIds as $m) {
@@ -300,19 +321,46 @@ final class PeepSoActivityRepository
     }
 
     /**
+     * Fetch a single activity row by act_id.
+     *
+     * @param list<int>|null $allowedModuleIds When non-null, the row is
+     *   returned only if its `act_module_id` is in the allowlist — the
+     *   PUBLIC permalink path ({@see \BCC\Core\Feed\ActivityFeedService::getActivityById()})
+     *   passes {@see FeedItemNormalizer::publicFeedModuleIds()} so a
+     *   DM / poll / group-notice / unknown-module activity can never be
+     *   resolved by id and leaked through `/feed/{id}`. Enforced at the
+     *   candidate query (SQL WHERE), not after retrieval. An empty list
+     *   returns null. null (default) = no module filter — for internal
+     *   callers (author resolution, comment-parent lookup, moderation,
+     *   interaction gating) that must resolve any activity regardless of
+     *   kind.
      * @phpstan-return ActivityRow|null
      */
-    public static function getById(int $actId): ?object
+    public static function getById(int $actId, ?array $allowedModuleIds = null): ?object
     {
         global $wpdb;
+
+        $where  = ['a.act_id = %d'];
+        $params = [$actId];
+        if ($allowedModuleIds !== null) {
+            if ($allowedModuleIds === []) {
+                return null;
+            }
+            $placeholders = implode(',', array_fill(0, count($allowedModuleIds), '%d'));
+            $where[]      = "a.act_module_id IN ({$placeholders})";
+            foreach ($allowedModuleIds as $m) {
+                $params[] = (int) $m;
+            }
+        }
+
         /** @phpstan-var ActivityRow|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
             'SELECT ' . self::COLUMNS . '
                FROM ' . self::table() . ' a
                INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
-              WHERE a.act_id = %d
+              WHERE ' . implode(' AND ', $where) . '
               LIMIT 1',
-            $actId
+            ...$params
         ));
         return $row ?: null;
     }
