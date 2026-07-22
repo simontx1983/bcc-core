@@ -237,8 +237,18 @@ final class ActivityFeedService
             return null;
         }
 
-        $row = PeepSoActivityRepository::getById($actId);
+        // Candidate-query module gate: a DM / poll / group-notice /
+        // unknown-module activity is filtered out in SQL so it can never
+        // be resolved by id (same allowlist the global feed query uses).
+        $allowedModuleIds = FeedItemNormalizer::publicFeedModuleIds();
+        $row = PeepSoActivityRepository::getById($actId, $allowedModuleIds);
         if ($row === null || (string) $row->act_status !== 'publish') {
+            return null;
+        }
+
+        // Defense in depth: re-assert the module allowlist at the service
+        // seam so the permalink fails closed independently of the query.
+        if (!self::isPublicFeedModule((string) $row->act_module_id)) {
             return null;
         }
 
@@ -273,6 +283,22 @@ final class ActivityFeedService
             return true;
         }
         return get_post_meta($postId, '_bcc_post_visibility', true) === 'public_all';
+    }
+
+    /**
+     * Is this raw `act_module_id` one the public feed / permalink may
+     * expose? The canonical allowlist lives in
+     * {@see FeedItemNormalizer::publicFeedModuleIds()}; this thin wrapper
+     * adapts the string-typed row value for the getActivityById()
+     * permalink gate (and keeps the check unit-testable in isolation).
+     * Non-numeric or absent module ids fail closed.
+     */
+    private static function isPublicFeedModule(string $module): bool
+    {
+        if ($module === '' || !ctype_digit($module)) {
+            return false;
+        }
+        return in_array((int) $module, FeedItemNormalizer::publicFeedModuleIds(), true);
     }
 
     /**
