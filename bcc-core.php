@@ -710,6 +710,36 @@ add_filter('bcc_system_health', function (array $health): array {
         //     scoped reads or address-activity webhooks — see the worker's
         //     Step 5.5/8 docblocks).
         'nft_indexer'          => ['dense_block_stall'],
+        // validator_messaging — the validator-messaging surface in
+        // bcc-trust (deterministic operator resolution + pre-claim
+        // message queue + first-activation backlog delivery worker).
+        //   - ambiguous_operator: the claim resolver found MORE THAN
+        //     ONE verified operator claim on a single validator page.
+        //     The surface fails closed (no routing, no queue accept,
+        //     generic "unavailable" to clients) — this counter is how
+        //     operators find out. Any occurrence is an incident: DB
+        //     state the app-level claim exclusivity should make
+        //     impossible (no DB unique enforces it — see the claims
+        //     generated-column migration).
+        //   - schedule_failed: AsyncDispatcher enqueue of the backlog
+        //     delivery job soft-failed at first activation. The
+        //     recurring vmq sweep re-enqueues, so loss is recoverable;
+        //     sustained activation = wp_options / Action Scheduler
+        //     unhealthy on the claim path.
+        //   - delivery_failed_terminal: a queued message exhausted
+        //     MAX_ATTEMPTS and parked as failed_terminal. Needs manual
+        //     `wp bcc-trust vmq` recovery; any occurrence warrants
+        //     investigation (the message is durably held, not lost).
+        //   - lease_reaped: the sweep returned an expired processing
+        //     lease to retryable (a delivery worker died mid-row). The
+        //     row self-recovers; sustained activation = delivery
+        //     workers are being killed (timeout / OOM) mid-batch.
+        'validator_messaging'  => [
+            'ambiguous_operator',
+            'schedule_failed',
+            'delivery_failed_terminal',
+            'lease_reaped',
+        ],
     ]);
 
     return $health;

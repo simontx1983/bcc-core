@@ -82,6 +82,66 @@ final class PeepSoBlockRepository
     }
 
     /**
+     * Batch sibling of `isMutuallyBlocked` — for one viewer against a
+     * candidate set, which candidates are blocked in EITHER direction?
+     *
+     * One bounded pass instead of N existence probes; used by the
+     * messaging eligibility batch (card lists resolve ≤ 50 page
+     * operators per request). Exact same semantics as calling
+     * `isMutuallyBlocked($userId, $otherId)` per candidate — no
+     * truncation of the result relative to the input set.
+     *
+     * @param list<int> $otherIds candidate user ids (caller-bounded;
+     *                            defensively capped at 500 like the
+     *                            list reads below)
+     * @return array<int, true> keyed by the OTHER user's id; a key is
+     *                          present iff that pair is blocked in at
+     *                          least one direction
+     */
+    public static function getMutuallyBlockedSet(int $userId, array $otherIds): array
+    {
+        if ($userId <= 0 || $otherIds === []) {
+            return [];
+        }
+        $unique = [];
+        foreach ($otherIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0 && $id !== $userId) {
+                $unique[$id] = true;
+            }
+        }
+        if ($unique === []) {
+            return [];
+        }
+        $ids = array_slice(array_keys($unique), 0, 500);
+
+        global $wpdb;
+        $table = self::table();
+        $ph    = implode(',', array_fill(0, count($ids), '%d'));
+
+        // Both directions in one query: rows where the viewer blocks a
+        // candidate OR a candidate blocks the viewer. Explicit columns
+        // so the direction can be folded back to "the other user".
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT blk_user_id, blk_blocked_id FROM {$table}
+              WHERE (blk_user_id = %d AND blk_blocked_id IN ({$ph}))
+                 OR (blk_blocked_id = %d AND blk_user_id IN ({$ph}))",
+            ...array_merge([$userId], $ids, [$userId], $ids)
+        ));
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $blocker = (int) $row->blk_user_id;
+            $blocked = (int) $row->blk_blocked_id;
+            $other   = $blocker === $userId ? $blocked : $blocker;
+            if ($other > 0) {
+                $out[$other] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * IDs of users $blockerId is blocking. Bounded by LIMIT to keep
      * the feed-exclusion merge predictable; users with > 500 blocks
      * are pathological and almost certainly an abuse signal.
