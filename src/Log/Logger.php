@@ -262,13 +262,83 @@ final class Logger
                 continue;
             }
 
-            // Partial redaction for wallet addresses — keep first 6 + last 4.
-            if (in_array($lowerKey, ['address', 'wallet_address', 'walletaddress'], true) && strlen($value) > 12) {
-                $value = substr($value, 0, 6) . '...' . substr($value, -4);
+            // Wallet identifiers — FULL redaction, replaced by a keyed
+            // fingerprint. See fingerprintAddress() for why this is not
+            // the old first-6 + last-4 truncation.
+            if (self::isWalletAddressKey($lowerKey)) {
+                $value = self::fingerprintAddress($value);
             }
         }
         unset($value);
 
         return $context;
+    }
+
+    /**
+     * Does this context key carry a member wallet address?
+     *
+     * Substring-matched on `wallet` / `address` so prefixed and suffixed
+     * variants are covered by default — the previous exact-match list
+     * (`address`, `wallet_address`, `walletaddress`) missed the key
+     * `wallet`, which five call sites used, writing full addresses to
+     * disk unredacted for the life of the logger.
+     *
+     * The exclusions are keys that contain "address" but are not member
+     * wallets: `ip_address` (needed intact for abuse investigation) and
+     * contract / collection / mint addresses (public on-chain
+     * identifiers, and fingerprinting them would gut indexer debugging).
+     */
+    private static function isWalletAddressKey(string $lowerKey): bool
+    {
+        if (in_array($lowerKey, [
+            'ip_address',
+            'ip',
+            'contract',
+            'contract_address',
+            'collection_address',
+            'mint',
+            'mint_address',
+        ], true)) {
+            return false;
+        }
+
+        if (str_contains($lowerKey, 'wallet') || str_contains($lowerKey, 'address')) {
+            return true;
+        }
+
+        return in_array($lowerKey, ['addr', 'valoper', 'operator'], true);
+    }
+
+    /**
+     * Replace a wallet address with a non-reversible, keyed fingerprint.
+     *
+     * The previous behaviour kept the first 6 and last 4 characters —
+     * which IS the `address_short` form the privacy policy forbids, and
+     * it was written next to `user_id` on audit lines, making the log a
+     * ready-made member↔wallet table. For EVM, 10 retained hex chars is
+     * ~40 bits: more than enough to confirm a candidate address.
+     *
+     * An HMAC keyed on the site salt keeps what logs actually need —
+     * "these two lines refer to the same wallet" — while disclosing
+     * nothing about which wallet it is. Reporting a privacy violation
+     * must never itself commit one.
+     *
+     * Fails closed: with no salt available we emit a constant, not the
+     * address.
+     *
+     * See docs/wallet-privacy-policy.md.
+     */
+    private static function fingerprintAddress(string $value): string
+    {
+        if ($value === '') {
+            return '';
+        }
+
+        $salt = function_exists('wp_salt') ? (string) wp_salt('auth') : '';
+        if ($salt === '') {
+            return '***WALLET_REDACTED***';
+        }
+
+        return 'wallet_fp:' . substr(hash_hmac('sha256', strtolower($value), $salt), 0, 12);
     }
 }
