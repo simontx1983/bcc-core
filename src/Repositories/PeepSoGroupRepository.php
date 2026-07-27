@@ -7,8 +7,8 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Read-only access to PeepSo Groups (the data layer behind BCC Locals
- * per §E3 of the V1 plan).
+ * Read-only access to PeepSo Groups (the data layer behind BCC Halls —
+ * the auto-provisioned, one-per-chain union halls).
  *
  * Schema reference (verify on PeepSo schema bumps):
  *   - PeepSo Groups are a CPT: wp_posts WHERE post_type = 'peepso-group'
@@ -18,11 +18,12 @@ if (!defined('ABSPATH')) {
  *   - Active members are gm_user_status LIKE 'member%' (excludes
  *     pending_*, banned, block_invites — see install/activate.php)
  *
- * BCC Locals filter (V1 stub): post_title LIKE 'Local %'. The §E3
- * convention is "Local NNN <chain> Base Fan" — name pattern is the
- * canonical filter for V1. A dedicated group-meta marker (e.g.
- * `bcc_is_local`) is deferred to post-V1; switching the filter is a
- * one-line change in the WHERE clause here.
+ * BCC Halls discriminator: the `_bcc_group_kind = 'hall'` post-meta
+ * marker, written by HallProvisioningService (bcc-trust) at create
+ * time. Chain association is the `_bcc_chain_tag` post-meta (numeric
+ * chain id). Neither is parsed from the group title — the title is a
+ * display string only ("{Chain} Hall"). This replaced the retired
+ * "Local NNN <chain>" title-pattern discriminator.
  *
  * No SELECT *. All queries bounded by LIMIT or aggregate. No writes —
  * PeepSo owns the write path.
@@ -32,8 +33,19 @@ final class PeepSoGroupRepository
     private const TABLE_MEMBERS_SUFFIX = 'peepso_group_members';
     private const POST_TYPE            = 'peepso-group';
     private const POST_STATUS          = 'publish';
-    private const LOCAL_TITLE_PATTERN  = 'Local %'; // §E3 naming convention
+    private const META_KIND            = '_bcc_group_kind';
+    private const KIND_HALL            = 'hall'; // Hall discriminator (paired with HallRepository::KIND_HALL)
+    private const META_CHAIN_TAG       = '_bcc_chain_tag'; // numeric chain id, resolver-aware (see ChainRepository::resolveSlugsForGroups)
     private const ACTIVE_MEMBER_STATUS = 'member%'; // matches member, member_moderator, member_manager, member_owner, member_readonly
+
+    /**
+     * wp_usermeta key for a user's primary-Hall pointer. Hardcoded here
+     * rather than imported from bcc-trust's HallsService::META_PRIMARY_GROUP
+     * because bcc-core cannot depend on bcc-trust. The two declarations are
+     * intentionally paired: changing one without the other is a §VIII
+     * pattern violation.
+     */
+    private const PRIMARY_HALL_META_KEY = 'bcc_primary_hall_group_id';
 
     // Non-open privacy values per PeepSo's `peepso_group_privacy` post-meta:
     //   0 = public (open), 1 = closed, 2 = secret. NFT-gated groups carry
@@ -58,7 +70,10 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * Locals matching the §E3 naming pattern, with member counts.
+     * Halls (`_bcc_group_kind = 'hall'`), with member counts. Optionally
+     * filtered to a single chain via the `_bcc_chain_tag` numeric-chain-id
+     * post-meta. Callers resolve a chain slug to its id (ChainRepository)
+     * before passing it — bcc-core does not depend on the chain registry.
      *
      * @return list<object{
      *   id: numeric-string,
@@ -67,66 +82,63 @@ final class PeepSoGroupRepository
      *   member_count: numeric-string
      * }>
      */
-    public static function listLocals(?string $chain, int $offset, int $limit): array
+    public static function listHalls(?int $chainId, int $offset, int $limit): array
     {
         global $wpdb;
         $members = self::membersTable();
 
-        $select = "SELECT p.ID AS id, p.post_name, p.post_title,
-                          COALESCE(COUNT(gm.gm_id), 0) AS member_count
-                     FROM {$wpdb->posts} p
-                     LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
-                                            AND gm.gm_user_status LIKE %s
-                    WHERE p.post_type = %s
-                      AND p.post_status = %s
-                      AND p.post_title LIKE %s";
+        // INNER JOIN on the hall-kind meta is the discriminator; a single
+        // meta row per post keeps COUNT(gm.gm_id) accurate under GROUP BY.
+        $chainJoin = $chainId !== null
+            ? " INNER JOIN {$wpdb->postmeta} pm_chain ON pm_chain.post_id = p.ID
+                                                     AND pm_chain.meta_key = %s
+                                                     AND pm_chain.meta_value = %d"
+            : '';
 
-        $orderLimit = " GROUP BY p.ID
-                        ORDER BY p.post_title ASC
-                        LIMIT %d OFFSET %d";
+        $sql = "SELECT p.ID AS id, p.post_name, p.post_title,
+                       COALESCE(COUNT(gm.gm_id), 0) AS member_count
+                  FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = p.ID
+                                                AND pm_kind.meta_key = %s
+                                                AND pm_kind.meta_value = %s"
+             . $chainJoin
+             . " LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
+                                        AND gm.gm_user_status LIKE %s
+                 WHERE p.post_type = %s
+                   AND p.post_status = %s
+                 GROUP BY p.ID
+                 ORDER BY p.post_title ASC
+                 LIMIT %d OFFSET %d";
 
-        if ($chain === null) {
-            $sql = $wpdb->prepare(
-                $select . $orderLimit,
-                self::ACTIVE_MEMBER_STATUS,
-                self::POST_TYPE,
-                self::POST_STATUS,
-                self::LOCAL_TITLE_PATTERN,
-                $limit,
-                $offset
-            );
-        } else {
-            $titleHasChain = '%' . $wpdb->esc_like($chain) . '%';
-            $sql = $wpdb->prepare(
-                $select . " AND p.post_title LIKE %s" . $orderLimit,
-                self::ACTIVE_MEMBER_STATUS,
-                self::POST_TYPE,
-                self::POST_STATUS,
-                self::LOCAL_TITLE_PATTERN,
-                $titleHasChain,
-                $limit,
-                $offset
-            );
+        $params = [self::META_KIND, self::KIND_HALL];
+        if ($chainId !== null) {
+            $params[] = self::META_CHAIN_TAG;
+            $params[] = $chainId;
         }
+        $params[] = self::ACTIVE_MEMBER_STATUS;
+        $params[] = self::POST_TYPE;
+        $params[] = self::POST_STATUS;
+        $params[] = $limit;
+        $params[] = $offset;
 
         /** @var list<object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($sql);
+        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$params));
         return $rows ?: [];
     }
 
     /**
-     * Find a single Local by its post_name (slug). Same row shape as
-     * `listLocals` — id + slug + title + member_count — so the service
+     * Find a single Hall by its post_name (slug). Same row shape as
+     * `listHalls` — id + slug + title + member_count — so the service
      * layer can reuse the same render path for the detail page that it
      * uses for the directory.
      *
-     * Returns null when no row matches the slug + Local naming filter.
+     * Returns null when no row matches the slug + hall-kind filter.
      * The slug uniqueness is implicit (post_name is per-type-unique
      * in WP) but we still LIMIT 1 defensively.
      *
      * @return object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null
      */
-    public static function findOneBySlug(string $slug): ?object
+    public static function findHallBySlug(string $slug): ?object
     {
         if ($slug === '') {
             return null;
@@ -139,19 +151,22 @@ final class PeepSoGroupRepository
             "SELECT p.ID AS id, p.post_name, p.post_title,
                     COALESCE(COUNT(gm.gm_id), 0) AS member_count
                FROM {$wpdb->posts} p
-               LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
-                                      AND gm.gm_user_status LIKE %s
+         INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = p.ID
+                                             AND pm_kind.meta_key = %s
+                                             AND pm_kind.meta_value = %s
+          LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
+                                 AND gm.gm_user_status LIKE %s
               WHERE p.post_type = %s
                 AND p.post_status = %s
                 AND p.post_name = %s
-                AND p.post_title LIKE %s
               GROUP BY p.ID
               LIMIT 1",
+            self::META_KIND,
+            self::KIND_HALL,
             self::ACTIVE_MEMBER_STATUS,
             self::POST_TYPE,
             self::POST_STATUS,
-            $slug,
-            self::LOCAL_TITLE_PATTERN
+            $slug
         );
 
         /** @var object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null $row */
@@ -160,15 +175,15 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * Find a single Local by its group id. Same row shape + Local-pattern
-     * filter as `findOneBySlug` — used by the join/leave/set-primary write
-     * paths to verify the target group is actually a BCC Local before
+     * Find a single Hall by its group id. Same row shape + hall-kind
+     * filter as `findHallBySlug` — used by the join/leave/set-primary write
+     * paths to verify the target group is actually a BCC Hall before
      * mutating membership (rather than e.g. a PeepSo support group that
      * happens to share the id space).
      *
      * @return object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null
      */
-    public static function findOneById(int $groupId): ?object
+    public static function findHallById(int $groupId): ?object
     {
         if ($groupId <= 0) {
             return null;
@@ -181,19 +196,22 @@ final class PeepSoGroupRepository
             "SELECT p.ID AS id, p.post_name, p.post_title,
                     COALESCE(COUNT(gm.gm_id), 0) AS member_count
                FROM {$wpdb->posts} p
-               LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
-                                      AND gm.gm_user_status LIKE %s
+         INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = p.ID
+                                             AND pm_kind.meta_key = %s
+                                             AND pm_kind.meta_value = %s
+          LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
+                                 AND gm.gm_user_status LIKE %s
               WHERE p.post_type = %s
                 AND p.post_status = %s
                 AND p.ID = %d
-                AND p.post_title LIKE %s
               GROUP BY p.ID
               LIMIT 1",
+            self::META_KIND,
+            self::KIND_HALL,
             self::ACTIVE_MEMBER_STATUS,
             self::POST_TYPE,
             self::POST_STATUS,
-            $groupId,
-            self::LOCAL_TITLE_PATTERN
+            $groupId
         );
 
         /** @var object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null $row */
@@ -203,7 +221,7 @@ final class PeepSoGroupRepository
 
     /**
      * Bulk-fetch group post info (id, slug, title, content, member_count)
-     * for a set of group_ids. Used by the User view-model's `locals`
+     * for a set of group_ids. Used by the User view-model's `halls`
      * field and by the cross-kind discovery endpoint to enrich each
      * group with display info — single query, no N+1.
      *
@@ -252,10 +270,10 @@ final class PeepSoGroupRepository
      * Cross-kind single-group lookup by slug (post_name). Same row shape
      * as `findManyByIds` (id + slug + title + post_content + member_count).
      *
-     * Unlike `findOneBySlug` (Locals-only — title-pattern filter applied),
+     * Unlike `findHallBySlug` (Halls-only — hall-kind filter applied),
      * this method returns ANY published peepso-group regardless of kind
      * — used by the cross-kind /bcc/v1/groups/{slug} detail endpoint to
-     * resolve nft / local / system / user groups uniformly.
+     * resolve nft / hall / system / user groups uniformly.
      *
      * Privacy is NOT filtered here — secret groups DO match. Defense-in-
      * depth visibility (404 secret-from-non-members) lives in the
@@ -299,19 +317,19 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * Batched primary-Local lookup. For a set of user_ids, returns the
+     * Batched primary-Hall lookup. For a set of user_ids, returns the
      * group post info (same shape as `findManyByIds`) of each user's
-     * primary Local — the group pointed to by their
-     * `bcc_primary_local_group_id` user_meta. Users without a primary
-     * (or whose pointer no longer resolves to an active Local) are
+     * primary Hall — the group pointed to by their
+     * `bcc_primary_hall_group_id` user_meta. Users without a primary
+     * (or whose pointer no longer resolves to an active Hall) are
      * absent from the map.
      *
      * Used by list-shape consumers (e.g. /members directory) where
-     * 24 rows × `get_user_meta` + 24 × `findOneById` would N+1.
+     * 24 rows × `get_user_meta` + 24 × `findHallById` would N+1.
      * Replaces ~48 sequential calls with two SQLs.
      *
-     * Note on scope: this returns only the *primary* Local — the row
-     * the user has elected as their main Local. Callers that need the
+     * Note on scope: this returns only the *primary* Hall — the row
+     * the user has elected as their home Hall. Callers that need the
      * full membership list should use `findUserMemberships` per-user
      * (or build a batched sibling if a list surface needs it). The
      * /members card only shows the primary, so that's all we batch.
@@ -322,9 +340,9 @@ final class PeepSoGroupRepository
      *                       cap, e.g. 50). The user_meta + posts IN
      *                       clauses scale linearly.
      * @return array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>
-     *         user_id → primary-Local group post info
+     *         user_id → primary-Hall group post info
      */
-    public static function getPrimaryLocalForUsers(array $userIds): array
+    public static function getPrimaryHallForUsers(array $userIds): array
     {
         if ($userIds === []) {
             return [];
@@ -346,7 +364,7 @@ final class PeepSoGroupRepository
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($idList), '%d'));
 
-        // Step 1: pull the bcc_primary_local_group_id meta for every
+        // Step 1: pull the bcc_primary_hall_group_id meta for every
         // user in one SQL. Skips users with no row (they don't have a
         // primary set).
         /** @var list<array{user_id: string, meta_value: string}> $metaRows */
@@ -354,8 +372,9 @@ final class PeepSoGroupRepository
             $wpdb->prepare(
                 "SELECT user_id, meta_value
                    FROM {$wpdb->usermeta}
-                  WHERE meta_key = 'bcc_primary_local_group_id'
+                  WHERE meta_key = %s
                     AND user_id IN ({$placeholders})",
+                self::PRIMARY_HALL_META_KEY,
                 ...$idList
             ),
             ARRAY_A
@@ -376,7 +395,7 @@ final class PeepSoGroupRepository
         }
 
         // Step 2: bulk-resolve the group post info via the existing
-        // helper. Groups that no longer exist (deleted Locals) drop
+        // helper. Groups that no longer exist (deleted Halls) drop
         // out — `findManyByIds` filters by post_type + ID match.
         $groupInfo = self::findManyByIds(array_keys($groupIds));
 
@@ -390,31 +409,31 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * Inverse of getPrimaryLocalForUsers. Given a Local group_id, return
+     * Inverse of getPrimaryHallForUsers. Given a Hall group_id, return
      * every user who's designated it as primary. Used by the
-     * "post in your primary Local" notification dispatcher (bcc-trust)
+     * "post in your primary Hall" notification dispatcher (bcc-trust)
      * to fan out to the recipient set.
      *
      * The meta key string is hardcoded here rather than imported from
-     * bcc-trust's LocalsService::META_PRIMARY_GROUP because bcc-core
+     * bcc-trust's HallsService::META_PRIMARY_GROUP because bcc-core
      * cannot depend on bcc-trust. The two declarations are intentionally
      * paired: changing one without the other is a §VIII pattern
-     * violation — see getPrimaryLocalForUsers above for the same
+     * violation — see getPrimaryHallForUsers above for the same
      * coupling note.
      *
      * Bounded by $limit per §5 (no unbounded SELECT). The default 1000
-     * is well above today's typical primary-Local membership; revisit
-     * with cursor pagination when a real Local crosses ~500 primary
+     * is well above today's typical primary-Hall membership; revisit
+     * with cursor pagination when a real Hall crosses ~500 primary
      * members.
      *
      * Order: server-defined (by user_id ascending). Deduped via the
-     * meta-key uniqueness contract — `bcc_primary_local_group_id` is
+     * meta-key uniqueness contract — `bcc_primary_hall_group_id` is
      * a singleton per user (one row max, written via update_user_meta
-     * in LocalsService::setPrimaryLocal).
+     * in HallsService::setPrimaryHall).
      *
      * @return list<int> user IDs (positive integers), bounded by $limit
      */
-    public static function findUsersByPrimaryLocal(int $groupId, int $limit = 1000): array
+    public static function findUsersByPrimaryHall(int $groupId, int $limit = 1000): array
     {
         if ($groupId <= 0 || $limit <= 0) {
             return [];
@@ -431,7 +450,7 @@ final class PeepSoGroupRepository
                     AND meta_value = %s
                   ORDER BY user_id ASC
                   LIMIT %d",
-                'bcc_primary_local_group_id',
+                self::PRIMARY_HALL_META_KEY,
                 (string) $groupId,
                 $limit
             )
@@ -453,7 +472,7 @@ final class PeepSoGroupRepository
 
     /**
      * Bulk-fetch the viewer's active memberships across a set of
-     * group_ids. Used by LocalsService to enrich the catalog with
+     * group_ids. Used by HallsService to enrich the catalog with
      * per-row viewer_membership without an N+1.
      *
      * Inactive PeepSo statuses (pending_*, banned, block_invites) are
@@ -616,7 +635,7 @@ final class PeepSoGroupRepository
      * Co-members of a set of groups: for every active member of any
      * group in `$groupIds`, return how many of those groups they share
      * and one representative shared group_id. Drives the who-to-follow
-     * recommender's "in a Local / holder community with you" affinity
+     * recommender's "in a Hall / holder community with you" affinity
      * signal — the caller passes the VIEWER's own group_ids and gets
      * back the people who overlap, with the overlap count as the
      * signal strength.
@@ -628,7 +647,7 @@ final class PeepSoGroupRepository
      *
      * `shared_group_id` is the group with the lowest id among the shared
      * set (deterministic, MIN()) — the caller resolves it to a display
-     * name and classifies it (Local vs holder community) via the group
+     * name and classifies it (Hall vs holder community) via the group
      * title/marker. We return ONE representative rather than the full
      * list because the recommender's reason line names a single group;
      * the `shared_count` carries the strength.
@@ -1044,32 +1063,36 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * Total count for the same filter set as listLocals(). Drives the
-     * pagination.total / pagination.total_pages fields.
+     * Total count for the same filter set as listHalls(). Drives the
+     * pagination.total / pagination.total_pages fields. Optional chain
+     * filter via the `_bcc_chain_tag` numeric-chain-id post-meta.
      */
-    public static function countLocals(?string $chain): int
+    public static function countHalls(?int $chainId): int
     {
         global $wpdb;
 
-        if ($chain === null) {
-            return (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM {$wpdb->posts}
-                 WHERE post_type = %s AND post_status = %s AND post_title LIKE %s",
-                self::POST_TYPE,
-                self::POST_STATUS,
-                self::LOCAL_TITLE_PATTERN
-            ));
-        }
+        $chainJoin = $chainId !== null
+            ? " INNER JOIN {$wpdb->postmeta} pm_chain ON pm_chain.post_id = p.ID
+                                                     AND pm_chain.meta_key = %s
+                                                     AND pm_chain.meta_value = %d"
+            : '';
 
-        $titleHasChain = '%' . $wpdb->esc_like($chain) . '%';
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->posts}
-             WHERE post_type = %s AND post_status = %s
-               AND post_title LIKE %s AND post_title LIKE %s",
-            self::POST_TYPE,
-            self::POST_STATUS,
-            self::LOCAL_TITLE_PATTERN,
-            $titleHasChain
-        ));
+        $sql = "SELECT COUNT(*)
+                  FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = p.ID
+                                                AND pm_kind.meta_key = %s
+                                                AND pm_kind.meta_value = %s"
+             . $chainJoin
+             . " WHERE p.post_type = %s AND p.post_status = %s";
+
+        $params = [self::META_KIND, self::KIND_HALL];
+        if ($chainId !== null) {
+            $params[] = self::META_CHAIN_TAG;
+            $params[] = $chainId;
+        }
+        $params[] = self::POST_TYPE;
+        $params[] = self::POST_STATUS;
+
+        return (int) $wpdb->get_var($wpdb->prepare($sql, ...$params));
     }
 }
