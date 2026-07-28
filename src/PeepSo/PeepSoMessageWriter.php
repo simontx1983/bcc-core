@@ -61,6 +61,44 @@ if (!defined('ABSPATH')) {
 final class PeepSoMessageWriter
 {
     /**
+     * True only in an execution context that can actually create PeepSo
+     * conversations — i.e. one where PeepSo has booted and its Chat
+     * module + user classes are loaded.
+     *
+     * This is the integration boundary's own readiness/capability check,
+     * owned here so background jobs (the validator-message delivery
+     * worker) and CLI commands don't accumulate PeepSo class knowledge.
+     * It exists to DISTINGUISH two very different situations that both
+     * otherwise surface as `sendNewMessage() === null`:
+     *
+     *   1. "unsupported context" — PeepSo is not initialised at all, so
+     *      the writer CANNOT run here. This is deterministic for the
+     *      context, not a per-message fault. The canonical case is
+     *      **WP-CLI**: PeepSo deliberately bails when
+     *      `php_sapi_name() === 'cli' && defined('WP_CLI') && WP_CLI`
+     *      (PeepSo::ready() returns null), so its Chat module never
+     *      registers `PeepSoMessagesModel`'s autoload directory and the
+     *      class never resolves. `wp cron event run` / `wp
+     *      action-scheduler run` / `wp bcc-trust vmq drain` all hit this.
+     *   2. "writer available but the send failed" — PeepSo IS booted and
+     *      the model exists, but create_new_conversation returned false
+     *      (a genuine, retryable delivery failure).
+     *
+     * Callers use this to fail LOUD and recover-safe in case (1) instead
+     * of silently consuming retry attempts. Both `PeepSoMessagesModel`
+     * (the writer) and `PeepSoUser` (needed by senders' ban re-check)
+     * come from the same PeepSo init, so both are asserted: readiness
+     * means the full delivery + gate path can run, not just the insert.
+     * class_exists() autoload is safe — a missing autoload directory
+     * (the CLI case) simply returns false with no side effect, and in a
+     * booted context it only defines a plain model/user class.
+     */
+    public static function isReady(): bool
+    {
+        return class_exists('PeepSoMessagesModel') && class_exists('PeepSoUser');
+    }
+
+    /**
      * Start a new 1-on-1 conversation OR append to an existing one
      * between `$authorId` and `$recipientId`. PeepSoMessagesModel's
      * `create_new_conversation` handles the find-or-create inline:
