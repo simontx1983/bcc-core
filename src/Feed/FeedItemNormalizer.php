@@ -169,7 +169,7 @@ final class FeedItemNormalizer
 
     /**
      * @param ActivityRow $row     A row from PeepSoActivityRepository::getActivities().
-     * @param array<string, mixed> $author Pre-hydrated author block (kind/id/handle/display_name/avatar_url/card_tier/rank_label/is_in_good_standing/is_followed_by_viewer).
+     * @param array<string, mixed> $author Pre-hydrated author block (kind/id/handle/display_name/avatar_url/reputation_tier/rank_label/is_in_good_standing/is_followed_by_viewer).
      * @param array<string, mixed> $body   Pre-hydrated kind-specific body (per §3.3.1–3.3.8). Empty = use defaults.
      * @param array{kind_grammar: string, counts: array<string, int>, viewer_reaction: ?string}|null $reactions
      * @param array<string, mixed>|null $socialProof  Pre-composed §2.2 SocialProof or null.
