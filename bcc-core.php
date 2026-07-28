@@ -734,11 +734,22 @@ add_filter('bcc_system_health', function (array $health): array {
         //     lease to retryable (a delivery worker died mid-row). The
         //     row self-recovers; sustained activation = delivery
         //     workers are being killed (timeout / OOM) mid-batch.
+        //   - delivery_context_unsupported: the delivery worker ran in an
+        //     execution context where PeepSo's Chat writer is not booted
+        //     (PeepSoMessageWriter::isReady() is false) — canonically
+        //     WP-CLI, where PeepSo disables itself. The worker delivered
+        //     nothing and touched no rows (no lease, no attempt consumed),
+        //     so the queue stays recoverable by the HTTP Action Scheduler
+        //     runner. SUSTAINED activation = something is running delivery
+        //     via WP-CLI cron; queue delivery MUST run through the HTTP
+        //     WP-Cron / Action Scheduler context. Cooldown-throttled so a
+        //     misconfigured frequent CLI cron cannot flood.
         'validator_messaging'  => [
             'ambiguous_operator',
             'schedule_failed',
             'delivery_failed_terminal',
             'lease_reaped',
+            'delivery_context_unsupported',
         ],
     ]);
 
