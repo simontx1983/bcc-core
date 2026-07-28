@@ -514,6 +514,19 @@ add_filter('bcc_system_health', function (array $health): array {
         // isolated (the event/sweep continues). Sustained activation means
         // attestation_bonus is going stale — backing stops moving the score.
         'attestation_synthesis' => ['event_recompute_failed', 'decay_recompute_failed'],
+        // elite_eligibility — the §J.12 cross-table gate on the top tier
+        // (distinct backers / tenure / clean dispute record).
+        // `event_recompute_failed` = the priority-20 attestation subscriber
+        // threw; `dispute_recompute_failed` = the dispute-resolved subscriber
+        // threw; `tier_celebration_failed` = the promotion notification after
+        // a 0→1 flip threw. All three are isolated. Sustained activation is
+        // FAIL-OPEN: a page that never gets evaluated stays grandfathered,
+        // which means ungated elites — treat it as a trust-integrity alarm,
+        // not a cosmetic one.
+        // `schema_unavailable` = plugin code ran ahead of its schema (the
+        // dbDelta race); the verdict was NOT persisted and the caller must
+        // retry. Expected transiently during a deploy, never sustained.
+        'elite_eligibility' => ['event_recompute_failed', 'dispute_recompute_failed', 'tier_celebration_failed', 'schema_unavailable'],
         // audit_log_swallow — silent-catch read paths that are supposed
         // to be reliable, plus the WRITE path inside AuditLogger::log()
         // itself (the only swallow that §VIII.30 deliberately requires:

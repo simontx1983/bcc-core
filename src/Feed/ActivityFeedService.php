@@ -394,7 +394,7 @@ final class ActivityFeedService
     }
 
     /**
-     * Batch author hydration. Pulled out so Phase 2 (trust score + card_tier
+     * Batch author hydration. Pulled out so Phase 2 (trust score + reputation_tier
      * + rank_label) can extend without touching the loop.
      *
      * @param list<int> $authorIds
@@ -431,7 +431,7 @@ final class ActivityFeedService
                 'avatar_url'            => $avatars[$id] ?? '',
                 // Trust-derived fields are placeholders until Phase 2 wires
                 // bcc-trust read services into this hydration step.
-                'card_tier'             => null,
+                'reputation_tier'       => null,
                 'rank_label'            => null,
                 'is_in_good_standing'   => true,
                 'is_followed_by_viewer' => $followedSet[$id] ?? false,
@@ -555,7 +555,7 @@ final class ActivityFeedService
             'handle'                => '',
             'display_name'          => '',
             'avatar_url'            => '',
-            'card_tier'             => null,
+            'reputation_tier'       => null,
             'rank_label'            => null,
             'is_in_good_standing'   => true,
             'is_followed_by_viewer' => false,
