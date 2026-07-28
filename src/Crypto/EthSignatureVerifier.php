@@ -140,8 +140,15 @@ final class EthSignatureVerifier {
         $sGmp = gmp_init($s, 16);
         $zGmp = gmp_init($msgHash, 16);
 
-        // x = r + v*n  (for most signatures v*n < p so x == r)
-        $x = gmp_add($rGmp, gmp_mul(gmp_init($v), $n));
+        // The X-coordinate of the ephemeral point R is r. The recovery id
+        // ($v, normalized to 0/1 above) is used ONLY to select R's Y parity,
+        // below in recoverY(). It is NOT an X candidate: the additional
+        // "x = r + n" case belongs to a two-bit recovery id, which Ethereum
+        // personal_sign (v = 27/28 → 0/1) never encodes — it carries parity
+        // only. So x is always r here. (The previous code added $v*$n to r,
+        // which for v = 1 made x = r + n; since n ≈ p that almost always
+        // exceeded p and nulled the recovery, rejecting every v=28 signature.)
+        $x = $rGmp;
         if (gmp_cmp($x, $p) >= 0) {
             return null;
         }
