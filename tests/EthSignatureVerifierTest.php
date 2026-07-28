@@ -39,6 +39,22 @@ final class EthSignatureVerifierTest extends TestCase
 
     private const SIG = '0x' . self::R . self::S . self::V;
 
+    // ── v = 28 (recovery id 1) vector ───────────────────────────────────
+    //
+    // Same well-known key (d = 1 → address above), a message whose EIP-191
+    // signature naturally lands on recovery id 1 (v = 0x1c). Generated with
+    // @noble/curves (independent JS secp256k1), NOT this PHP verifier, so it
+    // is a true cross-implementation anchor; low-S, self-recovers to ADDRESS.
+    // This is the regression guard: pre-fix, ecrecover computed x = r + 1·n
+    // (≈ r + p > p) and returned null, so this asserted-true case FAILED. It
+    // passes only with the x = r correction. ~half of real wallet signatures
+    // carry v = 28, so this path is not an edge case.
+    private const V28_MESSAGE = 'BCC EVM signature test vector v28 #3';
+    private const V28_R = 'c3241103ea80ed429b67e30eb554d32b62cea90c5bf2160f1ab56e41403b34c5';
+    private const V28_S = '3dde4e02080784be640b7d6e3f07789511690e1e9498cf254edb43522ad7d15e';
+    private const V28_V = '1c';
+    private const V28_SIG = '0x' . self::V28_R . self::V28_S . self::V28_V;
+
     protected function setUp(): void
     {
         if (!extension_loaded('gmp')) {
@@ -56,6 +72,33 @@ final class EthSignatureVerifierTest extends TestCase
     public function testAddressMatchIsCaseInsensitive(): void
     {
         self::assertTrue(EthSignatureVerifier::verify(self::MESSAGE, self::SIG, strtoupper(self::ADDRESS)));
+    }
+
+    // ── v = 28 recovery (regression for the x = r + v·n defect) ─────────
+
+    public function testValidV28SignatureRecoversAddress(): void
+    {
+        // Fails pre-fix (x = r + n > p → null), passes with x = r.
+        self::assertTrue(EthSignatureVerifier::verify(self::V28_MESSAGE, self::V28_SIG, self::ADDRESS));
+    }
+
+    public function testV28AddressMatchIsCaseInsensitive(): void
+    {
+        self::assertTrue(EthSignatureVerifier::verify(self::V28_MESSAGE, self::V28_SIG, strtoupper(self::ADDRESS)));
+    }
+
+    public function testV28TamperedMessageRejected(): void
+    {
+        // The v = 28 path must still reject a valid signature over a different message.
+        self::assertFalse(EthSignatureVerifier::verify(self::V28_MESSAGE . ' tampered', self::V28_SIG, self::ADDRESS));
+    }
+
+    public function testV28ModifiedRRejected(): void
+    {
+        // Flip the first nibble of r → different (or invalid) recovered key.
+        $badR = (self::V28_R[0] === '0' ? '1' : '0') . substr(self::V28_R, 1);
+        $sig  = '0x' . $badR . self::V28_S . self::V28_V;
+        self::assertFalse(EthSignatureVerifier::verify(self::V28_MESSAGE, $sig, self::ADDRESS));
     }
 
     // ── EIP-2 low-S malleability (the headline) ─────────────────────────
