@@ -1095,4 +1095,153 @@ final class PeepSoGroupRepository
 
         return (int) $wpdb->get_var($wpdb->prepare($sql, ...$params));
     }
+
+    // -----------------------------------------------------------------
+    // TRANSITIONAL Local→Hall compat wrappers (expand-and-contract).
+    //
+    // These six deprecated methods exist SOLELY to make the production
+    // Local→Hall cutover deploy-order-independent. bcc-core and bcc-trust
+    // deploy independently; the Hall rename removed the old Local method
+    // names from this repository in lockstep with bcc-trust switching to
+    // the new Hall names. Deploying new-core against still-running
+    // old-trust would therefore fatal on old-trust's 11 call sites.
+    //
+    // Re-adding these names as deprecated delegates to the Hall methods
+    // lets a single compat-core satisfy BOTH old-trust (calls Local names)
+    // and new-trust (calls Hall names) simultaneously — eliminating the
+    // window instead of merely shrinking it.
+    //
+    // They register NOTHING: no REST route, no hook, no meta key. Core
+    // has never had a /locals route (that was always trust-side). These
+    // are pure internal repository reads and cannot resurrect it.
+    //
+    // Purely additive. Delete this entire block in the follow-up CONTRACT
+    // release once every plugin is confirmed on the Hall method names
+    // (`git grep` of the old names across all plugins = clean).
+    // -----------------------------------------------------------------
+
+    /**
+     * @deprecated Transitional shim for the Local→Hall cutover
+     *             (expand-and-contract). Delegates to
+     *             {@see PeepSoGroupRepository::findHallBySlug}. Remove
+     *             once all callers are on Hall methods. Do NOT reintroduce
+     *             Local wording or emit new bcc_local_post.
+     *
+     * Identical signature + return shape to the Hall method — a pure
+     * pass-through.
+     *
+     * @return object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null
+     */
+    public static function findOneBySlug(string $slug): ?object
+    {
+        return self::findHallBySlug($slug);
+    }
+
+    /**
+     * @deprecated Transitional shim for the Local→Hall cutover
+     *             (expand-and-contract). Delegates to
+     *             {@see PeepSoGroupRepository::findHallById}. Remove once
+     *             all callers are on Hall methods. Do NOT reintroduce Local
+     *             wording or emit new bcc_local_post.
+     *
+     * Identical signature + return shape to the Hall method — a pure
+     * pass-through.
+     *
+     * @return object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}|null
+     */
+    public static function findOneById(int $groupId): ?object
+    {
+        return self::findHallById($groupId);
+    }
+
+    /**
+     * @deprecated Transitional shim for the Local→Hall cutover
+     *             (expand-and-contract). Delegates to
+     *             {@see PeepSoGroupRepository::getPrimaryHallForUsers}.
+     *             Remove once all callers are on Hall methods. Do NOT
+     *             reintroduce Local wording or emit new bcc_local_post.
+     *
+     * Identical signature + return shape to the Hall method — a pure
+     * pass-through. The Hall reader keys on the `bcc_primary_hall_group_id`
+     * usermeta; this shim does NOT read or write the retired
+     * `bcc_primary_local_group_id` literal anywhere.
+     *
+     * @param int[] $userIds
+     * @return array<int, object{id: numeric-string, post_name: string, post_title: string, post_content: string, member_count: numeric-string}>
+     */
+    public static function getPrimaryLocalForUsers(array $userIds): array
+    {
+        return self::getPrimaryHallForUsers($userIds);
+    }
+
+    /**
+     * @deprecated Transitional shim for the Local→Hall cutover
+     *             (expand-and-contract). Delegates to
+     *             {@see PeepSoGroupRepository::findUsersByPrimaryHall}.
+     *             Remove once all callers are on Hall methods. Do NOT
+     *             reintroduce Local wording or emit new bcc_local_post.
+     *
+     * Identical signature + return shape to the Hall method — a pure
+     * pass-through.
+     *
+     * @return list<int>
+     */
+    public static function findUsersByPrimaryLocal(int $groupId, int $limit = 1000): array
+    {
+        return self::findUsersByPrimaryHall($groupId, $limit);
+    }
+
+    /**
+     * @deprecated Transitional shim for the Local→Hall cutover
+     *             (expand-and-contract). Delegates to
+     *             {@see PeepSoGroupRepository::listHalls}. Remove once all
+     *             callers are on Hall methods. Do NOT reintroduce Local
+     *             wording or emit new bcc_local_post.
+     *
+     * Keeps the OLD `?string $chain` signature so still-running old-trust
+     * binds against it, and delegates with a null chain filter.
+     *
+     * Why `$chain` is discarded, not passed through: the old `$chain` was a
+     * string slug matched against the post title; `listHalls` takes an INT
+     * chain id (`_bcc_chain_tag` meta). Resolving slug→id needs bcc-trust's
+     * ChainRepository, and bcc-core cannot depend on bcc-trust (the
+     * dependency runs trust→core, not the reverse), so a core-side wrapper
+     * physically cannot bridge the filter to `listHalls`.
+     *
+     * Why discarding it is nonetheless safe for the only window this shim is
+     * live in — new-Core running against old-Trust: the Hall provisioner
+     * (`bcc_hall_provision` cron/admin) is new-Trust-only code, so it cannot
+     * have run yet ⇒ ZERO Halls exist during the entire window, and there
+     * have never been any `Local %`-titled groups. `listHalls(null)` and
+     * `listHalls(anyChainId)` therefore both return the empty list — the
+     * chain filter is inert on an empty set — matching what the retired
+     * `listLocals($chain)` returned. Every old caller already null-guards.
+     *
+     * @return list<object{id: numeric-string, post_name: string, post_title: string, member_count: numeric-string}>
+     */
+    public static function listLocals(?string $chain, int $offset, int $limit): array
+    {
+        return self::listHalls(null, $offset, $limit);
+    }
+
+    /**
+     * @deprecated Transitional shim for the Local→Hall cutover
+     *             (expand-and-contract). Delegates to
+     *             {@see PeepSoGroupRepository::countHalls}. Remove once all
+     *             callers are on Hall methods. Do NOT reintroduce Local
+     *             wording or emit new bcc_local_post.
+     *
+     * Keeps the OLD `?string $chain` signature so still-running old-trust
+     * binds against it, and delegates with a null chain filter — same
+     * reasoning as {@see PeepSoGroupRepository::listLocals}: core cannot
+     * resolve the slug→id filter (ChainRepository is trust-side), and the
+     * new-Trust-only Hall provisioner cannot have run during a new-Core +
+     * old-Trust window ⇒ ZERO Halls (and never any `Local %`-titled groups),
+     * so both count paths return 0 regardless of `$chain`. The slug is
+     * intentionally ignored.
+     */
+    public static function countLocals(?string $chain): int
+    {
+        return self::countHalls(null);
+    }
 }
