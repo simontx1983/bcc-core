@@ -527,6 +527,15 @@ add_filter('bcc_system_health', function (array $health): array {
         // dbDelta race); the verdict was NOT persisted and the caller must
         // retry. Expected transiently during a deploy, never sustained.
         'elite_eligibility' => ['event_recompute_failed', 'dispute_recompute_failed', 'tier_celebration_failed', 'schema_unavailable'],
+        // rank_scoring — the Rank-redesign data planes (Phase 1).
+        // `tier_snapshot_failed` = the daily per-user tier-day snapshot
+        // sweep threw; sustained activation means the §13.1 trust-window
+        // history is developing gaps — fail-safe strict (a gap can only
+        // delay a promotion, never grant one), but promotions will start
+        // resolving conservatively. `login_write_failed` = a
+        // RankLoginListener day-row write threw; that member's login day
+        // may be missing from the time-credit / inactivity clocks.
+        'rank_scoring' => ['tier_snapshot_failed', 'login_write_failed'],
         // audit_log_swallow — silent-catch read paths that are supposed
         // to be reliable, plus the WRITE path inside AuditLogger::log()
         // itself (the only swallow that §VIII.30 deliberately requires:
