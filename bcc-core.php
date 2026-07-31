@@ -535,7 +535,12 @@ add_filter('bcc_system_health', function (array $health): array {
         // resolving conservatively. `login_write_failed` = a
         // RankLoginListener day-row write threw; that member's login day
         // may be missing from the time-credit / inactivity clocks.
-        'rank_scoring' => ['tier_snapshot_failed', 'login_write_failed'],
+        // `evidence_ingest_failed` (Phase 4) = a rank_events ledger
+        // subscriber threw; that evidence event is missing from the
+        // member's ledger until re-fired or repaired. Fail-safe strict
+        // (missing evidence can only delay a promotion), but sustained
+        // activation means the ledger is silently under-recording.
+        'rank_scoring' => ['tier_snapshot_failed', 'login_write_failed', 'evidence_ingest_failed'],
         // audit_log_swallow — silent-catch read paths that are supposed
         // to be reliable, plus the WRITE path inside AuditLogger::log()
         // itself (the only swallow that §VIII.30 deliberately requires:
