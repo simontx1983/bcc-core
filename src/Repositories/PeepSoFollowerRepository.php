@@ -263,6 +263,93 @@ final class PeepSoFollowerRepository
         return $out;
     }
 
+    /** Sample mutual-connection user ids capped per candidate — enough for a small avatar stack, not a full list. */
+    private const SECOND_DEGREE_SAMPLE_CAP = 3;
+
+    /**
+     * Same candidate set as {@see getSecondDegreeCandidates}, but each
+     * candidate also carries a small sample of WHICH mutual connections
+     * contributed — e.g. for a "Watched by [avatar][avatar] +2 you
+     * watch" UI, which a bare count can't drive. Kept as a separate
+     * method rather than widening the existing one's return shape,
+     * since {@see getSecondDegreeCandidates}'s `array<int,int>` contract
+     * may have callers beyond this codebase's current grep.
+     *
+     * @return array<int, array{count: int, sample_ids: list<int>}>
+     */
+    public static function getSecondDegreeCandidatesWithSamples(
+        int $viewerId,
+        int $limit = 200,
+        int $followCap = 200
+    ): array {
+        if ($viewerId <= 0 || $limit <= 0) {
+            return [];
+        }
+        if ($limit > 500) {
+            $limit = 500;
+        }
+        if ($followCap <= 0 || $followCap > 500) {
+            $followCap = 200;
+        }
+
+        global $wpdb;
+        $table = self::table();
+
+        // Same shape as getSecondDegreeCandidates, plus a GROUP_CONCAT of
+        // the contributing active-side user ids (freshest edges first,
+        // matching the count query's own ORDER BY) so the caller can take
+        // a small prefix as the "sample" without a second round-trip.
+        $sql = $wpdb->prepare(
+            "SELECT a2.uf_passive_user_id AS candidate_id,
+                    COUNT(DISTINCT a2.uf_active_user_id) AS mutual_count,
+                    GROUP_CONCAT(DISTINCT a2.uf_active_user_id ORDER BY a2.uf_id DESC SEPARATOR ',') AS sample_ids
+               FROM (
+                       SELECT uf_passive_user_id
+                         FROM {$table}
+                        WHERE uf_active_user_id = %d
+                          AND uf_follow = 1
+                        ORDER BY uf_id DESC
+                        LIMIT %d
+                    ) AS a1
+               INNER JOIN {$table} AS a2
+                       ON a2.uf_active_user_id = a1.uf_passive_user_id
+                      AND a2.uf_follow = 1
+                      AND a2.uf_passive_user_id <> %d
+              GROUP BY a2.uf_passive_user_id
+              ORDER BY MAX(a2.uf_id) DESC
+              LIMIT %d",
+            $viewerId,
+            $followCap,
+            $viewerId,
+            $limit
+        );
+
+        /** @var list<array{candidate_id: string, mutual_count: string, sample_ids: string|null}>|null $rows */
+        $rows = $wpdb->get_results($sql, ARRAY_A);
+
+        $out = [];
+        foreach (($rows ?: []) as $row) {
+            $candidateId = (int) $row['candidate_id'];
+            if ($candidateId <= 0) {
+                continue;
+            }
+            $sampleIds = [];
+            if ($row['sample_ids'] !== null && $row['sample_ids'] !== '') {
+                foreach (explode(',', $row['sample_ids']) as $rawId) {
+                    $sampleIds[] = (int) $rawId;
+                    if (count($sampleIds) >= self::SECOND_DEGREE_SAMPLE_CAP) {
+                        break;
+                    }
+                }
+            }
+            $out[$candidateId] = [
+                'count'      => (int) $row['mutual_count'],
+                'sample_ids' => $sampleIds,
+            ];
+        }
+        return $out;
+    }
+
     /**
      * Counts only — used for view-model headlines and badges.
      *
