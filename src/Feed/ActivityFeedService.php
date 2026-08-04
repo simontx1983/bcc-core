@@ -69,9 +69,10 @@ final class ActivityFeedService
      * @param list<int>|null $excludedGroupIds Optional group-exclusion list — drop activities whose backing wp_post lives inside one of these PeepSo groups. Used by /bcc/v1/feed and /bcc/v1/feed/hot to suppress closed/secret/NFT-gated group posts from non-members. Same coupling-avoidance pattern as the other exclusion params: bcc-trust computes the list (non-open groups minus viewer memberships) and passes it through; bcc-core stays unaware of the privacy semantics. Ignored when `$onlyForGroupId` is set.
      * @param list<string>|null $groupVisibilityIn Optional per-post visibility allow-list for the GROUP-SCOPED path (`$onlyForGroupId` set). null = no visibility filter (member read → every post incl members_only). Non-null = restrict to posts whose `_bcc_post_visibility` post-meta is one of these values (bcc-trust passes ['public_group','public_all'] for a non-member teaser). Enforced as an INNER JOIN downstream so posts with absent visibility meta are EXCLUDED for non-members — the security invariant. Only applies on the `$onlyForGroupId` path; ignored for the global feed (which has its own per-post visibility gate keyed on 'public_all').
      * @param ?string $hashtag Optional hashtag filter (tag text WITHOUT the leading '#'). When a non-empty string, narrows the candidate set to posts whose body carries the '#tag' token (forwarded verbatim to PeepSoActivityRepository::getActivities, which applies the LIKE predicate). Pure narrowing — composes with every exclusion / visibility gate above; it can never surface a post those gates would otherwise drop. Used by the §F3 tag feed (`GET /bcc/v1/feed/tag`).
+     * @param ?string $hallFeed Ranked-Hall channel selector (Rank Phase 7, §21.3) — forwarded verbatim to PeepSoActivityRepository::getActivities and only meaningful on the group-scoped path (`$onlyForGroupId` set). 'ranked' = ranked-channel posts only; 'main' = exclude ranked-channel posts; null = no channel filter (legacy callers). Posting into the ranked channel is gated in bcc-trust; reading it is open to everyone.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null, ?array $groupVisibilityIn = null, ?string $hashtag = null): array
+    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null, ?array $groupVisibilityIn = null, ?string $hashtag = null, ?string $hallFeed = null): array
     {
         if (!in_array($scope, self::VALID_SCOPES, true)) {
             $scope = self::SCOPE_FOR_YOU;
@@ -104,7 +105,8 @@ final class ActivityFeedService
             $onlyForGroupId,
             $excludedGroupIds,
             $groupVisibilityIn,
-            $hashtag
+            $hashtag,
+            $hallFeed
         );
 
         $hasMore = count($rows) > $limit;

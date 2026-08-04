@@ -477,6 +477,7 @@ add_filter('bcc_system_health', function (array $health): array {
             'follow_writer_unfollow',
             'group_writer_join',
             'group_writer_leave',
+            'group_writer_transfer',
             'notification_writer_send',
             'reaction_writer_set',
             'reaction_writer_remove',
