@@ -15,8 +15,6 @@ if (!defined('ABSPATH')) {
  * Access gates return RESTRICTIVE defaults (fail-closed) so suspended
  * users cannot regain access during trust engine maintenance or plugin
  * deactivation. Admins are exempt via the Permissions class bypass.
- * getEligiblePanelistUserIds() returns [] to prevent unqualified
- * panelist selection.
  *
  * Observability: every method records to DegradationMetrics. The
  * fail-closed methods (`isSuspended`, `lockActiveVoteForDispute`)
@@ -48,14 +46,6 @@ final class NullTrustReadService implements TrustReadServiceInterface
     public function getVotesByIds(array $voteIds): array
     {
         \BCC\Core\Observability\DegradationMetrics::record('null_trust_read', 'activation');
-        return [];
-    }
-
-    public function getEligiblePanelistUserIds(array $excludedUserIds, int $limit): array
-    {
-        // Fail-open empty: dispute scheduler proceeds with no panelists.
-        // The reconcile sweep will retry once bcc-trust is reachable.
-        \BCC\Core\Observability\DegradationMetrics::record('null_trust_read', 'eligible_panelists');
         return [];
     }
 

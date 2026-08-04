@@ -59,13 +59,9 @@ interface TrustReadServiceInterface
      */
     public function getVotesByIds(array $voteIds): array;
 
-    /**
-     * Return canonical wp_user_id values eligible to serve as dispute panelists.
-     *
-     * @param array<int, int> $excludedUserIds
-     * @return array<int, int>
-     */
-    public function getEligiblePanelistUserIds(array $excludedUserIds, int $limit): array;
+    // getEligiblePanelistUserIds() removed (Rank Phase 6, D-7): panelist
+    // selection retired with the five-member dispute panel — disputes
+    // are decided by open community voting on bcc-trust's poll engine.
 
     /**
      * Whether the given user is currently suspended.
