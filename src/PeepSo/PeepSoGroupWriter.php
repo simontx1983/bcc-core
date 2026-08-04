@@ -267,4 +267,148 @@ final class PeepSoGroupWriter
 
         return $groupId;
     }
+
+    /**
+     * Transfer ownership of $groupId from $fromUserId to $toUserId.
+     *
+     * This is the SANCTIONED WRITE PATH ONLY (Rank Phase 7, §21.2). The
+     * BCC policy gates — capability resolution (transfer_community /
+     * receive_community), ownership caps, and the 30-day custody
+     * cooldown — live in bcc-trust (CapabilityResolver +
+     * CommunityCustodyService); callers MUST gate before invoking per
+     * the peepso-write-guard rule. The preconditions below are defense
+     * in depth, not the policy.
+     *
+     * Mirrors PeepSo's canonical owner-change sequence exactly
+     * (peepso-groups/classes/api/groupuserajax.php, member_modify with
+     * role=member_owner):
+     *
+     *   1. Capture the current owner from the PeepSoGroup model.
+     *   2. Promote the receiver's EXISTING membership row to
+     *      member_owner via PeepSoGroupUser::member_modify (which also
+     *      refreshes the members-count post meta internally).
+     *   3. Switch the owner pointer: $group->update(['owner_id' => …])
+     *      (post_author via PeepSo's post_data_map).
+     *   4. Demote the previous owner to member_manager.
+     *   5. Fire `peepso_action_group_user_role_change_manager` (old
+     *      owner) then `peepso_action_group_user_role_change_owner`
+     *      (new owner) — same order as PeepSo's AJAX layer, so
+     *      notification/activity subscribers behave identically.
+     *
+     * Preconditions (all failures return false + Logger::error):
+     *   - group exists (PeepSoGroup resolves the id)
+     *   - $fromUserId IS the current owner (both the post_author-backed
+     *     owner_id AND the gm_user_status='member_owner' row)
+     *   - $toUserId has an ACTIVE membership row (gm_user_status LIKE
+     *     'member%', not owner). NEVER inserts one — §C2 single-graph:
+     *     membership creation goes through join(), not through a
+     *     transfer side effect.
+     *
+     * Returns true only when the full sequence completed. A mid-sequence
+     * failure (e.g. the demote UPDATE failing after the promote landed)
+     * returns false with an error log describing the partial state —
+     * PeepSo tolerates the intermediate shape (its own AJAX layer does
+     * not check these writes at all) and a retry is safe.
+     */
+    public static function transferOwnership(int $groupId, int $fromUserId, int $toUserId): bool
+    {
+        if ($groupId <= 0 || $fromUserId <= 0 || $toUserId <= 0 || $fromUserId === $toUserId) {
+            return false;
+        }
+        if (!class_exists('PeepSoGroup') || !class_exists('PeepSoGroupUser')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_transfer');
+            static $loggedOnce = false;
+            if (!$loggedOnce) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in ' . __METHOD__);
+                $loggedOnce = true;
+            }
+            return false;
+        }
+
+        // Group must exist. PeepSoGroup's constructor resolves via
+        // get_posts; a missing/foreign id leaves the id unresolved.
+        $group = new \PeepSoGroup($groupId);
+        if ((int) $group->get('id') !== $groupId) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group transfer refused — group not found', [
+                'group_id' => $groupId,
+            ]);
+            return false;
+        }
+
+        // $fromUserId must be the CURRENT owner on both books: the
+        // post_author-backed owner_id AND the membership-row role. A
+        // mismatch means the caller is stale (or the two stores drifted)
+        // — refuse rather than guess.
+        $currentOwnerId = (int) $group->get('owner_id');
+        if ($currentOwnerId !== $fromUserId) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group transfer refused — from-user is not the owner', [
+                'group_id'      => $groupId,
+                'from_user_id'  => $fromUserId,
+                'current_owner' => $currentOwnerId,
+            ]);
+            return false;
+        }
+        $fromStatus = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus($fromUserId, $groupId);
+        if ($fromStatus !== 'member_owner') {
+            \BCC\Core\Log\Logger::error('[bcc-core] group transfer refused — owner membership row missing', [
+                'group_id'     => $groupId,
+                'from_user_id' => $fromUserId,
+                'from_status'  => (string) $fromStatus,
+            ]);
+            return false;
+        }
+
+        // Receiver must ALREADY be an active member (gm_user_status LIKE
+        // 'member%' — same ACTIVE convention as PeepSoGroupRepository).
+        // pending_* / banned / block_invites / absent rows are refused;
+        // we never insert a membership row here (§C2 single-graph).
+        $toStatus = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus($toUserId, $groupId);
+        if ($toStatus === null || strpos($toStatus, 'member') !== 0 || $toStatus === 'member_owner') {
+            \BCC\Core\Log\Logger::error('[bcc-core] group transfer refused — receiver has no active membership', [
+                'group_id'   => $groupId,
+                'to_user_id' => $toUserId,
+                'to_status'  => (string) $toStatus,
+            ]);
+            return false;
+        }
+
+        // Step 2 — promote the receiver's existing row to member_owner.
+        // member_modify returns FALSE on a wpdb UPDATE failure and also
+        // refreshes PeepSo's members-count post meta internally.
+        $receiver = new \PeepSoGroupUser($groupId, $toUserId);
+        if ($receiver->member_modify('member_owner') !== true) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group transfer failed — receiver promote did not apply', [
+                'group_id'   => $groupId,
+                'to_user_id' => $toUserId,
+            ]);
+            return false;
+        }
+
+        // Step 3 — switch the owner pointer (post_author). PeepSo's
+        // update() maps owner_id through post_data_map → wp_update_post.
+        $group->update(['owner_id' => $toUserId]);
+
+        // Step 4 — demote the previous owner to member_manager. On
+        // failure the group would carry TWO member_owner rows — surface
+        // loudly and return false; a retry re-runs the sequence safely
+        // (the owner_id check above will then refuse, so the operator
+        // sees the partial state instead of a silent success).
+        $oldOwner = new \PeepSoGroupUser($groupId, $fromUserId);
+        if ($oldOwner->member_modify('member_manager') !== true) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group transfer PARTIAL — old-owner demote did not apply', [
+                'group_id'     => $groupId,
+                'from_user_id' => $fromUserId,
+                'to_user_id'   => $toUserId,
+            ]);
+            return false;
+        }
+
+        // Step 5 — fire both role-change hooks in PeepSo's AJAX order
+        // (manager for the demoted old owner, then owner for the
+        // receiver) so downstream subscribers see identical events.
+        do_action('peepso_action_group_user_role_change_manager', $groupId, $fromUserId);
+        do_action('peepso_action_group_user_role_change_owner', $groupId, $toUserId);
+
+        return true;
+    }
 }

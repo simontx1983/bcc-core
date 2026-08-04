@@ -84,6 +84,7 @@ final class PeepSoActivityRepository
      * @param list<int>|null $excludedGroupIds  INERT for global-feed inclusion as of the per-post-visibility phase. The non-group (global) feed now syndicates a group-tagged post ONLY when it carries `_bcc_post_visibility = 'public_all'` post-meta; non-group posts (no `peepso_group_id`) are always included. The old "(non-open groups) - (viewer memberships)" exclusion-list no longer drives the WHERE — the per-post visibility gate supersedes it. The param is retained in the signature so existing callers (which still pass a computed list) keep working without churn, but it is intentionally unused in the query. Removed cleanly when the call sites stop computing the list.
      * @param list<string>|null $groupVisibilityIn Per-post visibility allow-list for the GROUP-SCOPED path. Only applies when non-null AND `$onlyForGroupId !== null`. Adds an INNER JOIN on `_bcc_post_visibility` post-meta restricting to the given values (bcc-trust passes ['public_group','public_all'] for a non-member teaser feed). INNER (not LEFT) JOIN: posts with absent `_bcc_post_visibility` meta are EXCLUDED for non-members — absent ⇒ members_only ⇒ hidden — which is the security invariant. When null (member read) the join is omitted so members see every post in the group. Ignored on the global path (`$onlyForGroupId === null`), which has its own 'public_all' gate.
      * @param ?string $hashtag Optional hashtag filter (tag text WITHOUT the leading '#'). When a non-empty string, restricts the candidate set to activities whose backing wp_post.post_content contains the tag via `p.post_content LIKE '%#<tag>%'`. This mirrors how PeepSo itself associates a post with a hashtag (substring match on the rendered '#tag' token), so the filtered set is consistent with PeepSo's own `ht_count` accounting. null/'' = no hashtag filter. The filter is a pure narrowing predicate — it can never WIDEN the candidate set, so every other visibility / exclusion clause still applies in full.
+     * @param ?string $hallFeed Ranked-Hall channel selector for the GROUP-SCOPED path only (Rank Phase 7, §21.3). Only applies when `$onlyForGroupId !== null`; ignored (no-op) on every global path. 'ranked' → INNER JOIN on `_bcc_ranked_feed = '1'` post-meta so ONLY ranked-channel posts surface. 'main' → LEFT JOIN + IS NULL anti-join so ranked-channel posts are EXCLUDED from the group's main feed. null = no channel filter (legacy callers unchanged). bcc-trust's FeedRankingService passes 'ranked'/'main' for /groups/{id}/feed; the write-side gate (Journeyman+ AND Neutral+ AND Hall member) lives in bcc-trust — bcc-core stays unaware of the policy, same coupling-avoidance pattern as the exclusion channels above.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
      */
@@ -98,7 +99,8 @@ final class PeepSoActivityRepository
         ?int $onlyForGroupId = null,
         ?array $excludedGroupIds = null,
         ?array $groupVisibilityIn = null,
-        ?string $hashtag = null
+        ?string $hashtag = null,
+        ?string $hallFeed = null
     ): array {
         global $wpdb;
 
@@ -255,6 +257,34 @@ final class PeepSoActivityRepository
             }
         }
 
+        // Ranked-Hall channel filter (group-scoped path ONLY — Rank
+        // Phase 7, §21.3 per-Hall second feed).
+        //
+        //   'ranked' → INNER JOIN on `_bcc_ranked_feed = '1'`: only
+        //              posts explicitly stamped into the ranked channel
+        //              surface. Absent meta ⇒ main-channel post ⇒
+        //              excluded here.
+        //   'main'   → LEFT JOIN + IS NULL anti-join: ranked-channel
+        //              posts are excluded from the group's main feed so
+        //              the two channels never double-serve a post.
+        //   null     → no channel filter (legacy/global callers).
+        //
+        // Literal meta key/value (no placeholders) — constants, same
+        // inline style as the `peepso_group_id` JOIN above. Guarded on
+        // $onlyForGroupId so the global feed can never grow this JOIN.
+        $rankedJoin = '';
+        if ($onlyForGroupId !== null && $hallFeed === 'ranked') {
+            $rankedJoin = ' INNER JOIN ' . $wpdb->postmeta . ' rk_pm
+                               ON rk_pm.post_id    = p.ID
+                              AND rk_pm.meta_key   = \'_bcc_ranked_feed\'
+                              AND rk_pm.meta_value = \'1\' ';
+        } elseif ($onlyForGroupId !== null && $hallFeed === 'main') {
+            $rankedJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' rk_pm
+                              ON rk_pm.post_id  = p.ID
+                             AND rk_pm.meta_key = \'_bcc_ranked_feed\' ';
+            $where[] = 'rk_pm.post_id IS NULL';
+        }
+
         // Global-feed visibility gate (non-group path only).
         //
         // Rule: a group-tagged post (one carrying `peepso_group_id`
@@ -310,6 +340,7 @@ final class PeepSoActivityRepository
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                   ' . $groupJoin . '
                   ' . $visibilityInJoin . '
+                  ' . $rankedJoin . '
                   ' . $groupVisibilityJoin . '
                  WHERE ' . implode(' AND ', $where) . '
                  ORDER BY p.post_date_gmt DESC, a.act_id DESC

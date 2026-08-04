@@ -547,6 +547,54 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * How many User-kind (member-created) groups this user CURRENTLY
+     * owns. Backs the §21.2 ownership caps (Rank Phase 7): the
+     * CapabilityResolver's custody gate compares this count against the
+     * per-rank cap from rank-scoring config.
+     *
+     * "User-kind" = the group post carries NO `_bcc_group_kind` post
+     * meta (LEFT JOIN … IS NULL). Kinded groups — hall / holders /
+     * delegators / system — are infra- or gate-provisioned and NEVER
+     * count toward a member's cap.
+     *
+     * Ownership = gm_user_status = 'member_owner' on a published
+     * peepso-group post. Single aggregate COUNT (§4 bounded).
+     * INTENTIONALLY UNCACHED — this feeds a custody security gate and
+     * PeepSo owns ownership-changing write paths (its own UI role
+     * changes) that fire no hook BCC can bust on; same uncached-read
+     * convention as {@see getUserMemberGroupIds}.
+     */
+    public static function countOwnedUserGroups(int $userId): int
+    {
+        if ($userId <= 0) {
+            return 0;
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $sql = $wpdb->prepare(
+            "SELECT COUNT(*)
+               FROM {$members} gm
+         INNER JOIN {$wpdb->posts} p ON p.ID = gm.gm_group_id
+          LEFT JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = p.ID
+                                             AND pm_kind.meta_key = %s
+              WHERE gm.gm_user_id     = %d
+                AND gm.gm_user_status = %s
+                AND p.post_type       = %s
+                AND p.post_status     = %s
+                AND pm_kind.meta_value IS NULL",
+            self::META_KIND,
+            $userId,
+            'member_owner',
+            self::POST_TYPE,
+            self::POST_STATUS
+        );
+
+        return (int) $wpdb->get_var($sql);
+    }
+
+    /**
      * IDs of all browsable peepso-groups — published, post_type =
      * 'peepso-group', not `is_secret`. Drives the discovery endpoint.
      *
