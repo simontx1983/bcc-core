@@ -347,7 +347,7 @@ final class ServiceLocator
         // SECURITY: Exact class match only — subclasses are NOT accepted.
         // Accepting subclasses would allow a rogue plugin to extend an
         // allowed class and override trust-critical methods (e.g.,
-        // isSuspended, getEligiblePanelistUserIds) while passing the
+        // isSuspended, lockActiveVoteForDispute) while passing the
         // allowlist check. Only the explicitly registered class names
         // from trusted BCC plugins are permitted.
         foreach ($allowed as $fqcn) {

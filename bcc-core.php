@@ -446,7 +446,6 @@ add_filter('bcc_system_health', function (array $health): array {
             'activation',
             'is_suspended',
             'lock_active_vote_for_dispute',
-            'eligible_panelists',
         ],
         // Other NullServices use a single `activation` event per service.
         // The "is this NullService active?" signal is the operationally
@@ -540,7 +539,12 @@ add_filter('bcc_system_health', function (array $health): array {
         // member's ledger until re-fired or repaired. Fail-safe strict
         // (missing evidence can only delay a promotion), but sustained
         // activation means the ledger is silently under-recording.
-        'rank_scoring' => ['tier_snapshot_failed', 'login_write_failed', 'evidence_ingest_failed'],
+        // `poll_close_failed` (Phase 6) = the hourly meaningful-vote
+        // poll-close sweep threw; open polls past their windows are not
+        // being evaluated — disputes stall open rather than resolving
+        // wrongly (fail-safe strict), but sustained activation means
+        // binding outcomes and day-90 Inconclusive closes are frozen.
+        'rank_scoring' => ['tier_snapshot_failed', 'login_write_failed', 'evidence_ingest_failed', 'poll_close_failed'],
         // audit_log_swallow — silent-catch read paths that are supposed
         // to be reliable, plus the WRITE path inside AuditLogger::log()
         // itself (the only swallow that §VIII.30 deliberately requires:
