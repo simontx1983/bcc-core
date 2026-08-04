@@ -638,14 +638,10 @@ add_filter('bcc_system_health', function (array $health): array {
         //     trust-graph / stats) threw in VoteJobDispatcher::handlePostVote.
         //     Trust-graph + stats recover via recurring sweeps; fraud analysis
         //     has none, so its failure is the one that leaves a stale bonus.
-        //   - dispute_backfill_failed: DisputeResolver's panelist-accuracy
-        //     backfill threw after a dispute resolved. Non-fatal (the credited
-        //     rows survive; only their outcome_match mark is missing) and there
-        //     is no reconciliation sweep, so sustained activation = accuracy
-        //     marks silently accruing NULL.
+        // (dispute_backfill_failed retired with the §D5 panelist-accuracy
+        // backfill — Rank Phase 6, D-7: the recorder was deleted.)
         'post_commit_task'     => [
             'vote_subtask_failed',
-            'dispute_backfill_failed',
         ],
         // gated_group_provision — `bcc_gated_group_provision` cron
         // sweep failure modes. The sweep iterates verified collections
