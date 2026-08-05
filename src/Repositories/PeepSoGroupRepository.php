@@ -938,8 +938,14 @@ final class PeepSoGroupRepository
      * so every surface silently emitted "Quiet" / heat=cold regardless
      * of real activity. Fixed 2026-05-08.
      *
+     * `actives` is the count of DISTINCT authors who posted in the window
+     * — "how many people are actually talking here", as opposed to how
+     * many joined. It rides on this query rather than a second one: the
+     * rows are already grouped and scanned, so it costs one aggregate
+     * over the same index path.
+     *
      * @param int[] $groupIds
-     * @return array<int, object{posts: int, last_at: string|null}>
+     * @return array<int, object{posts: int, actives: int, last_at: string|null}>
      */
     public static function getActivityHeat(array $groupIds, int $sinceSeconds = 7 * DAY_IN_SECONDS): array
     {
@@ -965,6 +971,7 @@ final class PeepSoGroupRepository
         $sql = $wpdb->prepare(
             "SELECT pm.meta_value AS group_id,
                     COUNT(*) AS posts,
+                    COUNT(DISTINCT p.post_author) AS actives,
                     MAX(p.post_date_gmt) AS last_at
                FROM {$activities} a
          INNER JOIN {$wpdb->posts}    p  ON p.ID       = a.act_external_id
@@ -978,13 +985,14 @@ final class PeepSoGroupRepository
             ...$params
         );
 
-        /** @var list<object{group_id: numeric-string, posts: numeric-string, last_at: string|null}>|null $rows */
+        /** @var list<object{group_id: numeric-string, posts: numeric-string, actives: numeric-string, last_at: string|null}>|null $rows */
         $rows = $wpdb->get_results($sql);
 
         $map = [];
         foreach ($rows ?: [] as $row) {
             $map[(int) $row->group_id] = (object) [
                 'posts'   => (int) $row->posts,
+                'actives' => (int) $row->actives,
                 'last_at' => $row->last_at,
             ];
         }
