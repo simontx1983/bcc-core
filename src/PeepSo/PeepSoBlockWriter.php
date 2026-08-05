@@ -16,9 +16,10 @@
  *      writes duplicate rows; we SELECT first so a double-tap doesn't
  *      pollute the table.
  *
- *   3. We can fire BCC's own `bcc_user_blocked` event AND PeepSo's
- *      legacy `peepso_user_blocked` hook in the same write — keeping
- *      both subscribers in sync.
+ *   3. We can fire PeepSo's legacy `peepso_user_blocked` hook on the
+ *      write — PeepSo-native-wire compat for any PeepSo addon that
+ *      listens there. (The block audit trail is written inline via
+ *      AuditLogger in bcc-trust's MyBlocksEndpoint, not via this emit.)
  *
  * Schema (peepso_blocks):
  *   - blk_id          BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT
@@ -106,14 +107,12 @@ final class PeepSoBlockWriter
             }
         }
 
-        // Events fire AFTER releasing the lock so a slow subscriber can't hold
+        // Fire AFTER releasing the lock so a slow PeepSo addon can't hold
         // the DB lock (or deadlock against a lock it takes itself).
-        // Legacy PeepSo hook — keeps any third-party subscriber that
-        // listens on PeepSo's wire intact.
+        // Legacy PeepSo hook — PeepSo-native-wire compat for any PeepSo
+        // addon that listens there. The block audit trail is written inline
+        // via AuditLogger in bcc-trust's MyBlocksEndpoint, not here.
         do_action('peepso_user_blocked', ['from' => $blockerId, 'to' => $blockedId]);
-
-        // §A3 BCC event bus — primary subscriber surface.
-        do_action('bcc_user_blocked', $blockerId, $blockedId);
 
         return 'created';
     }
@@ -144,8 +143,10 @@ final class PeepSoBlockWriter
             return false;
         }
 
+        // Legacy PeepSo hook — PeepSo-native-wire compat for any PeepSo
+        // addon that listens there. The unblock audit trail is written
+        // inline via AuditLogger in bcc-trust's MyBlocksEndpoint, not here.
         do_action('peepso_user_unblocked', ['from' => $blockerId, 'to' => $blockedId]);
-        do_action('bcc_user_unblocked', $blockerId, $blockedId);
 
         return true;
     }
