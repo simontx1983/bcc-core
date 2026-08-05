@@ -5,7 +5,11 @@ name: Deploy
 #
 #   staging    — automatic, AFTER the CI workflow succeeds on a push to main.
 #   production — manual only (workflow_dispatch → environment: production),
-#                so prod stays a deliberate promotion.
+#                so prod stays a deliberate promotion. The job now declares
+#                the GitHub `environment:` too, so protection rules (required
+#                reviewers / wait timers) engage once the environment is
+#                configured — previously the input was gate-shaped but gated
+#                nothing (2026-08-05 hardening).
 #
 # Plugin-scoped rsync: only wp-content/plugins/bcc-core/ is touched, so the
 # webroot .htaccess (incl. the LSCache Authorization block), uploads/, and
@@ -41,6 +45,10 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
+    # A hung ssh/rsync must not hold the per-env concurrency lock for GitHub's
+    # 6-hour default.
+    timeout-minutes: 15
+    environment: ${{ github.event.inputs.environment || 'staging' }}
     env:
       PLUGIN: bcc-core
     steps:
@@ -50,6 +58,13 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENVIRONMENT="${{ github.event.inputs.environment }}"
             REF="${{ github.ref }}"
+            # Production is promoted from main ONLY — a dispatch from a
+            # feature branch must never ship unreviewed code to prod
+            # (2026-08-05 hardening; previously any ref deployed).
+            if [ "$ENVIRONMENT" = "production" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then
+              echo "::error::production deploys must be dispatched from main (got ${{ github.ref }})"
+              exit 1
+            fi
           else
             ENVIRONMENT="staging"
             REF="${{ github.event.workflow_run.head_sha }}"
@@ -75,13 +90,38 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p "${{ secrets.DEPLOY_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          # Prefer a PINNED host key (secret DEPLOY_HOST_KEY, captured once via
+          # `ssh-keyscan -p PORT HOST`): zero network, zero flake, and real
+          # MITM protection — re-scanning on every run made
+          # StrictHostKeyChecking=yes theater. Fallback: retried keyscan (the
+          # single un-retried scan failed ~50% of dispatches on this host;
+          # stderr was also discarded, which is why it never self-explained).
+          HK="${{ secrets.DEPLOY_HOST_KEY }}"
+          if [ -n "$HK" ]; then
+            printf '%s\n' "$HK" > ~/.ssh/known_hosts
+          else
+            for i in 1 2 3 4 5; do
+              ssh-keyscan -T 10 -p "${{ secrets.DEPLOY_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" > ~/.ssh/known_hosts && [ -s ~/.ssh/known_hosts ] && break
+              echo "keyscan attempt $i failed" >&2
+              sleep 2
+            done
+            [ -s ~/.ssh/known_hosts ] || { echo "::error::ssh-keyscan produced no host key after 5 attempts"; exit 1; }
+          fi
 
-      - name: Deploy (plugin-scoped rsync, --delete)
+      - name: Deploy (plugin-scoped rsync, delayed delete + updates)
         run: |
-          TARGET="${{ secrets.DEPLOY_BASE }}/${{ steps.t.outputs.subpath }}"
+          SUBPATH="${{ steps.t.outputs.subpath }}"
+          # Belt-and-braces: an empty subpath would point --delete at
+          # DEPLOY_BASE itself.
+          test -n "$SUBPATH" || { echo "::error::empty deploy subpath"; exit 1; }
+          TARGET="${{ secrets.DEPLOY_BASE }}/$SUBPATH"
           echo "rsync → ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:$TARGET"
-          rsync -az --delete \
+          # --delay-updates stages changed files and renames them into place in
+          # one final sweep; --delete-delay defers deletions until after that
+          # sweep. Collapses the mixed-tree window from the full transfer
+          # duration to a sub-second rename pass — the window that produced
+          # cross-plugin fatals mid-deploy (2026-08-05 incident).
+          rsync -az --delete --delete-delay --delay-updates \
             --exclude='.git' --exclude='.github' \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes" \
             ./ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:$TARGET/"
@@ -92,3 +132,27 @@ jobs:
             -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes \
             "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
             "grep -m1 'Version:' '${{ secrets.DEPLOY_BASE }}/${{ steps.t.outputs.subpath }}/$PLUGIN.php'"
+
+      - name: Health probe (whole plugin trio)
+        run: |
+          if [ "${{ steps.t.outputs.environment }}" = "production" ]; then
+            BASE="https://bluecollarcrypto.io"
+          else
+            BASE="https://stage.bluecollarcrypto.io"
+          fi
+          # Probes SIBLING plugins too: bcc-search registers under the shared
+          # bcc/v1 namespace, so only a plugin-owned ROUTE reveals a
+          # deactivated/fataled plugin (404 = route gone, 5xx = fatal). This
+          # step would have caught the 2026-08-05 bcc-search deactivation in
+          # seconds instead of via user report. 400/401/403 mean the route is
+          # alive and enforcing its own rules — that's healthy here.
+          probe () {
+            code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$BASE$1")
+            case "$code" in
+              200|400|401|403) echo "OK   $code $1" ;;
+              *) echo "::error::FAIL $code $1 (404=route gone/plugin deactivated, 5xx=fatal, 000=unreachable)"; exit 1 ;;
+            esac
+          }
+          probe "/wp-json/bcc/v1/ranks"
+          probe "/wp-json/bcc/v1/search/groups?q=ping"
+          probe "/wp-json/bcc/v1/cards?per_page=1"
