@@ -44,11 +44,12 @@ final class PeepSoGroupWriterTransferTest extends TestCase
                 self::OWNER    => 'member_owner',
                 self::RECEIVER => 'member',
             ],
-            'modify_ok'    => [],
-            'modify_calls' => [],
-            'updates'      => [],
-            'actions'      => [],
-            'errors'       => [],
+            'modify_ok'      => [],
+            'update_applies' => true,
+            'modify_calls'   => [],
+            'updates'        => [],
+            'actions'        => [],
+            'errors'         => [],
         ];
     }
 
@@ -137,6 +138,29 @@ final class PeepSoGroupWriterTransferTest extends TestCase
 
         self::assertFalse(PeepSoGroupWriter::transferOwnership(self::GROUP, self::OWNER, self::RECEIVER));
         self::assertSame([], $GLOBALS['__bcc_gt_fixture']['updates']);
+        self::assertSame([], $GLOBALS['__bcc_gt_fixture']['actions']);
+        self::assertCount(1, $GLOBALS['__bcc_gt_fixture']['errors']);
+    }
+
+    public function testOwnerPointerVerificationFailsFastBeforeDemoteAndHooks(): void
+    {
+        // PeepSoGroup::update() is void and swallows wp_update_post
+        // failure — simulate the pointer NOT moving. Step 3b's re-read
+        // must catch it and fail fast BEFORE the old-owner demote and
+        // both role-change hooks.
+        $GLOBALS['__bcc_gt_fixture']['update_applies'] = false;
+
+        self::assertFalse(PeepSoGroupWriter::transferOwnership(self::GROUP, self::OWNER, self::RECEIVER));
+
+        // The promote landed and the pointer write was attempted…
+        self::assertSame(
+            [[self::GROUP, self::RECEIVER, 'member_owner']],
+            $GLOBALS['__bcc_gt_fixture']['modify_calls']
+        );
+        self::assertSame([['owner_id' => self::RECEIVER]], $GLOBALS['__bcc_gt_fixture']['updates']);
+
+        // …but the demote never ran, no hooks fired, and the PARTIAL
+        // state is loud.
         self::assertSame([], $GLOBALS['__bcc_gt_fixture']['actions']);
         self::assertCount(1, $GLOBALS['__bcc_gt_fixture']['errors']);
     }
