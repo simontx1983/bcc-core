@@ -1017,7 +1017,7 @@ final class PeepSoGroupRepository
      *
      * Order: a `CASE WHEN` synthesises a numeric `role_rank` so the
      * sort happens in SQL, not PHP — owner (1) → moderator/manager (2)
-     * → everyone else (3), tiebroken by `gm_create_date DESC` (newest
+     * → everyone else (3), tiebroken by `gm_joined DESC` (newest
      * joins first within rank). Ordering in PHP would force a full
      * candidate scan even for paginated reads.
      *
@@ -1050,7 +1050,7 @@ final class PeepSoGroupRepository
         $sql = $wpdb->prepare(
             "SELECT gm_user_id     AS user_id,
                     gm_user_status AS role,
-                    gm_create_date AS joined_at,
+                    gm_joined      AS joined_at,
                     CASE
                         WHEN gm_user_status = 'member_owner'                              THEN 1
                         WHEN gm_user_status IN ('member_moderator', 'member_manager')     THEN 2
@@ -1059,7 +1059,7 @@ final class PeepSoGroupRepository
                FROM {$members}
               WHERE gm_group_id = %d
                 AND gm_user_status LIKE %s
-              ORDER BY role_rank ASC, gm_create_date DESC, gm_id DESC
+              ORDER BY role_rank ASC, gm_joined DESC, gm_id DESC
               LIMIT %d OFFSET %d",
             $groupId,
             self::ACTIVE_MEMBER_STATUS,
