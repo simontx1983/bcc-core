@@ -360,10 +360,20 @@ final class ActivityFeedService
 
         $authorIds = array_values(array_unique(array_map(static fn($r) => (int) $r->act_user_id, $rows)));
 
-        // User-meta prime covers hydrateAuthors' bcc_handle reads AND the
-        // blog branch's post_author handle read — post objects are already
-        // cached above, so collecting post_author here is free. NB:
-        // get_users(['fields' => [...]]) does NOT prime user meta.
+        // Prime USER OBJECTS + user meta in one pass. The object prime
+        // matters: a live probe of cold /feed/hot caught ×7 single-user
+        // `SELECT * FROM wp_users WHERE ID = ?` queries — one per author —
+        // via PeepSoMediaCache::computeAvatar's get_userdata() during
+        // avatar resolution, because this block previously primed only
+        // user META. cache_users() (WP core, wp-includes/pluggable.php)
+        // loads all uncached users in ONE IN(...) query into the `users`
+        // cache group AND runs update_meta_cache('user', …) itself first
+        // (verified against this install's core), so it absorbs the
+        // standalone update_meta_cache call that used to sit here. The
+        // meta half still covers hydrateAuthors' bcc_handle reads AND
+        // the blog branch's post_author handle read — post objects are
+        // already cached above, so collecting post_author here is free.
+        // NB: get_users(['fields' => [...]]) primes NEITHER cache.
         $metaUserIds = $authorIds;
         foreach ($rows as $r) {
             if ((string) $r->act_module_id === 'blog') {
@@ -373,7 +383,7 @@ final class ActivityFeedService
                 }
             }
         }
-        update_meta_cache('user', array_values(array_unique($metaUserIds)));
+        cache_users(array_values(array_unique($metaUserIds)));
 
         $authors = $this->hydrateAuthors($authorIds, $viewerId);
 

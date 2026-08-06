@@ -288,7 +288,9 @@ final class PeepSoGroupWriter
      *      member_owner via PeepSoGroupUser::member_modify (which also
      *      refreshes the members-count post meta internally).
      *   3. Switch the owner pointer: $group->update(['owner_id' => …])
-     *      (post_author via PeepSo's post_data_map).
+     *      (post_author via PeepSo's post_data_map), then VERIFY the
+     *      pointer moved by re-reading the group — PeepSoGroup::update()
+     *      is void and swallows wp_update_post failure (step 3b below).
      *   4. Demote the previous owner to member_manager.
      *   5. Fire `peepso_action_group_user_role_change_manager` (old
      *      owner) then `peepso_action_group_user_role_change_owner`
@@ -387,6 +389,31 @@ final class PeepSoGroupWriter
         // Step 3 — switch the owner pointer (post_author). PeepSo's
         // update() maps owner_id through post_data_map → wp_update_post.
         $group->update(['owner_id' => $toUserId]);
+
+        // Step 3b — VERIFY the pointer actually moved. PeepSoGroup::update()
+        // is void and swallows a wp_update_post failure, so a silent miss
+        // here would leave the receiver promoted (step 2) while post_author
+        // still names the old owner — and we'd then demote the old owner
+        // and fire success hooks on top of a broken pointer. Re-read via a
+        // fresh PeepSoGroup (wp_update_post cleans the post cache, so this
+        // reflects the DB) and fail fast BEFORE the step-4 demote and the
+        // step-5 hooks, which have not run yet. PARTIAL-state semantics on
+        // this branch: receiver row = member_owner, old-owner row =
+        // member_owner, owner_id = old owner. No rollback of the
+        // already-applied step-2 promote is attempted; note that a retry
+        // of transferOwnership will be REFUSED by the receiver-status
+        // precondition (to_status is now member_owner), so the operator
+        // sees the partial state loudly instead of a double-fire.
+        $reread = new \PeepSoGroup($groupId);
+        if ((int) $reread->get('owner_id') !== $toUserId) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group transfer PARTIAL — owner pointer did not move', [
+                'group_id'      => $groupId,
+                'from_user_id'  => $fromUserId,
+                'to_user_id'    => $toUserId,
+                'current_owner' => (int) $reread->get('owner_id'),
+            ]);
+            return false;
+        }
 
         // Step 4 — demote the previous owner to member_manager. On
         // failure the group would carry TWO member_owner rows — surface

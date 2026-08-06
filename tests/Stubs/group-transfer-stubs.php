@@ -12,6 +12,9 @@
  *   owner_id          int      current owner per the PeepSoGroup model
  *   statuses          array<int, ?string>  per-user getMembershipStatus answers
  *   modify_ok         array<int, bool>     per-user member_modify verdicts (default true)
+ *   update_applies    bool     whether update(['owner_id'=>…]) lands in owner_id
+ *                              (default true; false = the swallowed
+ *                              wp_update_post failure the step-3b re-read catches)
  *   modify_calls      list<array{int,int,string}>  [groupId, userId, role]
  *   updates           list<array>          PeepSoGroup->update() payloads
  *   actions           list<array>          do_action invocations
@@ -96,6 +99,15 @@ namespace {
             public function update(array $data): void
             {
                 $GLOBALS['__bcc_gt_fixture']['updates'][] = $data;
+                // Mirror PeepSo: update() is VOID and swallows a
+                // wp_update_post failure. On success the owner pointer
+                // lands in post_author, so a re-instantiated PeepSoGroup
+                // reads the NEW owner_id — model that by applying the
+                // write to the fixture. update_applies=false simulates
+                // the swallowed failure for the step-3b verification.
+                if (($GLOBALS['__bcc_gt_fixture']['update_applies'] ?? true) && isset($data['owner_id'])) {
+                    $GLOBALS['__bcc_gt_fixture']['owner_id'] = (int) $data['owner_id'];
+                }
             }
         }
     }

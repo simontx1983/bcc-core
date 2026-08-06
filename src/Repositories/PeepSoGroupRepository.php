@@ -479,8 +479,16 @@ final class PeepSoGroupRepository
      * excluded — only rows where gm_user_status starts with 'member'
      * surface here.
      *
+     * Clock-split note (BCC norm = UTC): `gm_joined` is a TIMESTAMP and
+     * MySQL renders it in the SESSION time zone (SYSTEM = Central on
+     * prod/staging), so the `joined_at` wall-time string is NOT UTC —
+     * consumers that stamp it as UTC are 5–6h wrong. `gm_joined_utc`
+     * (UNIX_TIMESTAMP epoch seconds) is tz-proof; consumers MUST prefer
+     * it and format in PHP. `joined_at` stays for back-compat only
+     * (bcc-trust switches in a paired PR; deploy order core-first).
+     *
      * @param int[] $groupIds
-     * @return array<int, object{group_id: numeric-string, joined_at: string}>
+     * @return array<int, object{group_id: numeric-string, joined_at: string, gm_joined_utc: numeric-string}>
      */
     public static function findUserMemberships(int $userId, array $groupIds): array
     {
@@ -494,7 +502,9 @@ final class PeepSoGroupRepository
 
         $args = array_merge([$userId], $groupIds, [self::ACTIVE_MEMBER_STATUS]);
         $sql = $wpdb->prepare(
-            "SELECT gm_group_id AS group_id, gm_joined AS joined_at
+            "SELECT gm_group_id AS group_id,
+                    gm_joined AS joined_at,
+                    UNIX_TIMESTAMP(gm_joined) AS gm_joined_utc
                FROM {$members}
               WHERE gm_user_id = %d
                 AND gm_group_id IN ({$placeholders})
@@ -503,7 +513,7 @@ final class PeepSoGroupRepository
             ...$args
         );
 
-        /** @var list<object{group_id: numeric-string, joined_at: string}>|null $rows */
+        /** @var list<object{group_id: numeric-string, joined_at: string, gm_joined_utc: numeric-string}>|null $rows */
         $rows = $wpdb->get_results($sql);
 
         $map = [];
@@ -1030,7 +1040,15 @@ final class PeepSoGroupRepository
      * method on this repository follows the same uncached-read
      * convention for this reason.
      *
-     * @return list<object{user_id: numeric-string, role: string, joined_at: string}>
+     * Clock-split note (BCC norm = UTC): `gm_joined` is a TIMESTAMP and
+     * MySQL renders it in the SESSION time zone (SYSTEM = Central on
+     * prod/staging), so the `joined_at` wall-time string is NOT UTC —
+     * consumers that stamp it as UTC are 5–6h wrong. `gm_joined_utc`
+     * (UNIX_TIMESTAMP epoch seconds) is tz-proof; consumers MUST prefer
+     * it and format in PHP. `joined_at` stays for back-compat only
+     * (bcc-trust switches in a paired PR; deploy order core-first).
+     *
+     * @return list<object{user_id: numeric-string, role: string, joined_at: string, gm_joined_utc: numeric-string}>
      */
     public static function listGroupMembers(int $groupId, int $offset, int $limit): array
     {
@@ -1051,6 +1069,7 @@ final class PeepSoGroupRepository
             "SELECT gm_user_id     AS user_id,
                     gm_user_status AS role,
                     gm_joined      AS joined_at,
+                    UNIX_TIMESTAMP(gm_joined) AS gm_joined_utc,
                     CASE
                         WHEN gm_user_status = 'member_owner'                              THEN 1
                         WHEN gm_user_status IN ('member_moderator', 'member_manager')     THEN 2
@@ -1067,17 +1086,20 @@ final class PeepSoGroupRepository
             $offset
         );
 
-        /** @var list<object{user_id: numeric-string, role: string, joined_at: string, role_rank: numeric-string}>|null $rows */
+        /** @var list<object{user_id: numeric-string, role: string, joined_at: string, gm_joined_utc: numeric-string, role_rank: numeric-string}>|null $rows */
         $rows = $wpdb->get_results($sql);
 
         $out = [];
         foreach ($rows ?: [] as $row) {
             // Drop the synthetic role_rank from the wire shape — caller
-            // doesn't need it; the stable contract is {user_id, role, joined_at}.
+            // doesn't need it; the stable contract is {user_id, role,
+            // joined_at, gm_joined_utc} (prefer gm_joined_utc — see the
+            // clock-split note in the method docblock).
             $out[] = (object) [
-                'user_id'   => $row->user_id,
-                'role'      => $row->role,
-                'joined_at' => $row->joined_at,
+                'user_id'       => $row->user_id,
+                'role'          => $row->role,
+                'joined_at'     => $row->joined_at,
+                'gm_joined_utc' => $row->gm_joined_utc,
             ];
         }
         return $out;
