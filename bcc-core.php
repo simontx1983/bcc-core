@@ -413,6 +413,60 @@ add_action(
     [\BCC\Core\Observability\DegradationAlerter::class, 'evaluate']
 );
 
+// ── Headless REST origin ───────────────────────────────────────
+// This install runs the headless split: WP_SITEURL is the WordPress
+// origin (cms.*), while WP_HOME is the public front door served by
+// the Next.js app. WordPress builds rest_url() from home_url(), not
+// site_url(), so every REST URL it generates points at the frontend
+// — where no REST route exists. That silently breaks:
+//
+//   - the /wp-json index and the <head> discovery link;
+//   - wp-admin's own REST calls (the block editor, site health),
+//     which would otherwise go cross-origin to the Next.js app;
+//   - every callback URL derived from rest_url() — X
+//     (XOAuthService.php:33), GitHub (GitHubOAuthService.php:37) and
+//     the Helius webhook (HeliusWebhookEndpoint.php:88-91).
+//
+// Rebase the origin onto site_url(). Deliberately a no-op when the
+// two already match, so local dev and any non-split install are
+// untouched — this needs no environment gate.
+//
+// Note: the callbacks above are baked into third-party dashboards at
+// registration time, so this filter fixes what WP *generates* going
+// forward; already-registered callbacks must still be re-issued.
+add_filter('rest_url', static function ($url) {
+    if (!is_string($url) || $url === '') {
+        return $url;
+    }
+
+    $originOf = static function (string $candidate): ?string {
+        $parts = wp_parse_url($candidate);
+        if (!is_array($parts)) {
+            return null;
+        }
+        $scheme = isset($parts['scheme']) && is_string($parts['scheme']) ? $parts['scheme'] : '';
+        $host   = isset($parts['host'])   && is_string($parts['host'])   ? $parts['host']   : '';
+        if ($scheme === '' || $host === '') {
+            return null;
+        }
+        $port = isset($parts['port']) && is_int($parts['port']) ? ':' . $parts['port'] : '';
+
+        return strtolower($scheme . '://' . $host) . $port;
+    };
+
+    $homeOrigin = $originOf((string) home_url());
+    $siteOrigin = $originOf((string) site_url());
+
+    if ($homeOrigin === null || $siteOrigin === null || $homeOrigin === $siteOrigin) {
+        return $url;
+    }
+    if (strncasecmp($url, $homeOrigin, strlen($homeOrigin)) !== 0) {
+        return $url;
+    }
+
+    return $siteOrigin . substr($url, strlen($homeOrigin));
+}, 10, 1);
+
 // ── System health filter contributors ──────────────────────────
 // Phase 3 of the post-stabilization observability initiative
 // (2026-05-09). Each plugin contributes a top-level block via
