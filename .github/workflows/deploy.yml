@@ -135,10 +135,13 @@ jobs:
 
       - name: Health probe (whole plugin trio)
         run: |
+          # Hosts come from repo variables so the domain cutover (WP moving
+          # off the apex to api.*) is a settings change, not a timed merge
+          # across three repos. Unset => the pre-cutover defaults below.
           if [ "${{ steps.t.outputs.environment }}" = "production" ]; then
-            BASE="https://bluecollarcrypto.io"
+            BASE="${{ vars.PROD_HEALTH_BASE || 'https://bluecollarcrypto.io' }}"
           else
-            BASE="https://stage.bluecollarcrypto.io"
+            BASE="${{ vars.STAGE_HEALTH_BASE || 'https://stage.bluecollarcrypto.io' }}"
           fi
           # Probes SIBLING plugins too: bcc-search registers under the shared
           # bcc/v1 namespace, so only a plugin-owned ROUTE reveals a
