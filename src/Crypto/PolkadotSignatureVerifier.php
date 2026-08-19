@@ -206,7 +206,21 @@ final class PolkadotSignatureVerifier
         if ($raw === '') {
             return '';
         }
-        $first = trim(explode(',', $raw)[0]);
+        // Take the first EXACT entry, skipping any `regex:` preview
+        // patterns. Those are Origin-header matching rules, not usable
+        // URL bases — posting to "regex:^https://…/api/internal/…" fails
+        // every wallet verification. bcc-trust's FrontendOrigin enforces
+        // the same rule for its consumers; this is bcc-core's own copy
+        // because the dependency runs trust -> core, never the reverse.
+        $first = '';
+        foreach (explode(',', $raw) as $entry) {
+            $entry = trim($entry);
+            if ($entry === '' || str_starts_with($entry, 'regex:')) {
+                continue;
+            }
+            $first = $entry;
+            break;
+        }
         if ($first === '') {
             return '';
         }
