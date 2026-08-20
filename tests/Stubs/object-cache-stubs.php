@@ -67,6 +67,25 @@ namespace {
         }
     }
 
+    if (!function_exists('wp_cache_get_multiple')) {
+        /**
+         * WP returns a key=>value map covering EVERY requested key, with
+         * `false` for misses — not a compacted map. Consumers branch on
+         * that shape.
+         *
+         * @param  list<string> $keys
+         * @return array<string, mixed>
+         */
+        function wp_cache_get_multiple(array $keys, string $group = ''): array
+        {
+            $out = [];
+            foreach ($keys as $key) {
+                $out[$key] = wp_cache_get($key, $group);
+            }
+            return $out;
+        }
+    }
+
     if (!function_exists('wp_cache_set')) {
         /** @param mixed $value */
         function wp_cache_set(string $key, $value, string $group = '', int $ttl = 0): bool

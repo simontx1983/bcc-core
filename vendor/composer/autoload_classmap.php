@@ -83,6 +83,7 @@ return array(
     'BCC\\Core\\Repositories\\PeepSoPageRepository' => $baseDir . '/src/Repositories/PeepSoPageRepository.php',
     'BCC\\Core\\Security\\Throttle' => $baseDir . '/src/Security/Throttle.php',
     'BCC\\Core\\ServiceLocator' => $baseDir . '/src/ServiceLocator.php',
+    'BCC\\Core\\Support\\HeadlessOrigin' => $baseDir . '/src/Support/HeadlessOrigin.php',
     'BCC\\Core\\Wallet\\ChallengeRepository' => $baseDir . '/src/Wallet/ChallengeRepository.php',
     'BCC\\Core\\Wallet\\WalletIdentityService' => $baseDir . '/src/Wallet/WalletIdentityService.php',
     'BCC\\Core\\Wallet\\WalletVerificationRequest' => $baseDir . '/src/Wallet/WalletVerificationRequest.php',

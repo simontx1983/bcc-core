@@ -98,6 +98,7 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\Repositories\\PeepSoPageRepository' => __DIR__ . '/../..' . '/src/Repositories/PeepSoPageRepository.php',
         'BCC\\Core\\Security\\Throttle' => __DIR__ . '/../..' . '/src/Security/Throttle.php',
         'BCC\\Core\\ServiceLocator' => __DIR__ . '/../..' . '/src/ServiceLocator.php',
+        'BCC\\Core\\Support\\HeadlessOrigin' => __DIR__ . '/../..' . '/src/Support/HeadlessOrigin.php',
         'BCC\\Core\\Wallet\\ChallengeRepository' => __DIR__ . '/../..' . '/src/Wallet/ChallengeRepository.php',
         'BCC\\Core\\Wallet\\WalletIdentityService' => __DIR__ . '/../..' . '/src/Wallet/WalletIdentityService.php',
         'BCC\\Core\\Wallet\\WalletVerificationRequest' => __DIR__ . '/../..' . '/src/Wallet/WalletVerificationRequest.php',

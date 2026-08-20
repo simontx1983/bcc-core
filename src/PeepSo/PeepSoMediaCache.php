@@ -47,6 +47,8 @@ declare(strict_types=1);
 
 namespace BCC\Core\PeepSo;
 
+use BCC\Core\Support\HeadlessOrigin;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -75,7 +77,7 @@ final class PeepSoMediaCache
         if ($userId <= 0) {
             // Anon/invalid — no stable identity to key on; resolve uncached.
             $url = get_avatar_url($userId);
-            return is_string($url) ? $url : '';
+            return self::onWordPressOrigin(is_string($url) ? $url : '');
         }
 
         $key    = self::AVATAR_PREFIX . $userId;
@@ -83,12 +85,12 @@ final class PeepSoMediaCache
         // '' is a valid cached value ("no custom avatar"); only `false`
         // (miss) falls through to recompute.
         if (is_string($cached)) {
-            return $cached;
+            return self::onWordPressOrigin($cached);
         }
 
         $url = self::computeAvatar($userId);
         wp_cache_set($key, $url, self::CACHE_GROUP, self::CACHE_TTL);
-        return $url;
+        return self::onWordPressOrigin($url);
     }
 
     /**
@@ -131,12 +133,12 @@ final class PeepSoMediaCache
             // non-string (miss) falls through to recompute — same
             // contract as avatarUrl().
             if (is_string($hit)) {
-                $out[$id] = $hit;
+                $out[$id] = self::onWordPressOrigin($hit);
                 continue;
             }
             $url = self::computeAvatar($id);
             wp_cache_set(self::AVATAR_PREFIX . $id, $url, self::CACHE_GROUP, self::CACHE_TTL);
-            $out[$id] = $url;
+            $out[$id] = self::onWordPressOrigin($url);
         }
         return $out;
     }
@@ -156,12 +158,32 @@ final class PeepSoMediaCache
         // Cached '' encodes "no cover" (→ null); a non-empty string is the
         // URL; only `false` (miss) recomputes.
         if (is_string($cached)) {
-            return $cached === '' ? null : $cached;
+            return $cached === '' ? null : self::onWordPressOrigin($cached);
         }
 
         $url = self::computeCover($userId);
         wp_cache_set($key, $url ?? '', self::CACHE_GROUP, self::CACHE_TTL);
-        return $url;
+        return $url === null ? null : self::onWordPressOrigin($url);
+    }
+
+    /**
+     * Point a resolved media URL at the origin that actually serves
+     * /wp-content. See {@see HeadlessOrigin} for the rule; a no-op on
+     * any install where WP_HOME and WP_SITEURL agree.
+     *
+     * Applied on the way OUT rather than inside compute*() — deliberately.
+     * PeepSo persists a generated avatar's finished URL into usermeta
+     * (`peepso_name_based_avatar_url`) and returns that string verbatim
+     * forever after, so URLs minted before the headless cutover stayed
+     * frozen on the old origin and 403'd against the Next.js app. Those
+     * frozen values had also been copied into this cache. Normalizing at
+     * the read boundary repairs both at once and lets already-poisoned
+     * entries self-heal, so shipping this needs no cache flush and no
+     * usermeta migration.
+     */
+    private static function onWordPressOrigin(string $url): string
+    {
+        return HeadlessOrigin::toWordPress($url);
     }
 
     /**
