@@ -434,37 +434,14 @@ add_action(
 // Note: the callbacks above are baked into third-party dashboards at
 // registration time, so this filter fixes what WP *generates* going
 // forward; already-registered callbacks must still be re-issued.
+//
+// The rule itself lives in HeadlessOrigin — PeepSo media URLs need the
+// identical rebase (PeepSoMediaCache), so it is shared rather than
+// duplicated (§11).
 add_filter('rest_url', static function ($url) {
-    if (!is_string($url) || $url === '') {
-        return $url;
-    }
-
-    $originOf = static function (string $candidate): ?string {
-        $parts = wp_parse_url($candidate);
-        if (!is_array($parts)) {
-            return null;
-        }
-        $scheme = isset($parts['scheme']) && is_string($parts['scheme']) ? $parts['scheme'] : '';
-        $host   = isset($parts['host'])   && is_string($parts['host'])   ? $parts['host']   : '';
-        if ($scheme === '' || $host === '') {
-            return null;
-        }
-        $port = isset($parts['port']) && is_int($parts['port']) ? ':' . $parts['port'] : '';
-
-        return strtolower($scheme . '://' . $host) . $port;
-    };
-
-    $homeOrigin = $originOf((string) home_url());
-    $siteOrigin = $originOf((string) site_url());
-
-    if ($homeOrigin === null || $siteOrigin === null || $homeOrigin === $siteOrigin) {
-        return $url;
-    }
-    if (strncasecmp($url, $homeOrigin, strlen($homeOrigin)) !== 0) {
-        return $url;
-    }
-
-    return $siteOrigin . substr($url, strlen($homeOrigin));
+    return is_string($url)
+        ? \BCC\Core\Support\HeadlessOrigin::toWordPress($url)
+        : $url;
 }, 10, 1);
 
 // ── System health filter contributors ──────────────────────────
