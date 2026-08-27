@@ -836,6 +836,11 @@ add_filter('rest_pre_dispatch', static function ($result, $server, $request) {
 // single admin-only endpoint for monitoring, alerting, and debugging.
 
 add_action('rest_api_init', function () {
+    // Environment-identity probe for the site-URL drift guard. Reads the
+    // wp_options ROWS directly — the only way to see past WP_SITEURL/WP_HOME,
+    // which make WordPress ignore those rows entirely. Shared-secret gated.
+    \BCC\Core\Rest\IdentityEndpoint::register();
+
     register_rest_route('bcc/v1', '/system/health', [
         'methods'             => \WP_REST_Server::READABLE,
         'permission_callback' => function () { return current_user_can('manage_options'); },
