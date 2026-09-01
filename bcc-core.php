@@ -590,6 +590,7 @@ add_filter('bcc_system_health', function (array $health): array {
             'score_mutation_before_snapshot',   // Phase 1 — ScoreMutationLogger::readCurrentScore
             'discovery_owner_verified_status',  // Phase 1.8 — PageDiscoveryService verified-badge lookup
             'log_write_failed',                 // 2026-05-13 — AuditLogger::log insert returned false
+            'meta_encode_failed',               // 2026-09-01 — audit meta could not be JSON-encoded; base row still written, context lost
         ],
         // account_security_mail — bcc-trust AccountSecurityMailer wp_mail
         // failures. These are the side-channel emails that warn a user
