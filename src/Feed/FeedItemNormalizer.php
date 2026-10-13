@@ -107,6 +107,15 @@ final class FeedItemNormalizer
         '202' => 'review',
         '203' => 'dispute_signed',
         '204' => 'blog_excerpt',
+        // Validator announcements (api-contract-v1.md §4.32). Safe to admit
+        // ahead of its writer: this entry lets the kind resolve and admits
+        // 205 into publicFeedModuleIds(), but NO WRITER EMITS 205 until
+        // bcc-trust's A3-trust ships, so no row can carry it. The feature
+        // also stays behind `bcc_announcements_enabled` (default off).
+        //
+        // ⚠ Announcements take NO reactions — see
+        // ReactionGrammarMap::GRAMMAR_NONE, which this kind maps to.
+        '205' => 'announcement',
 
         // BCC-owned modules — string keys (legacy fallback). The
         // pre-2026-05-15 writer wrote these as strings, but the

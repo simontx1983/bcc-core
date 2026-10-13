@@ -96,11 +96,34 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
     #[CoversClass(ActivityFeedService::class)]
     final class FeedModuleAllowlistTest extends TestCase
     {
-        /** The exact numeric modules that may surface publicly. */
-        private const ALLOWED = [1, 4, 200, 201, 202, 203, 204];
+        /**
+         * The exact numeric modules that may surface publicly.
+         *
+         * 205 (`announcement`) is admitted ahead of its writer: no code
+         * emits module 205 until bcc-trust's A3-trust ships, so admitting
+         * it here cannot surface a row. Listing it is what proves the
+         * normalization landed — this assertion is `assertSame` on the
+         * sorted set, so the entry cannot be added to the map without
+         * being accounted for here.
+         */
+        private const ALLOWED = [1, 4, 200, 201, 202, 203, 204, 205];
 
         /** Non-post / unsupported modules that must be excluded. */
         private const EXCLUDED = [0, 6, 8, 9, 30, 111, 6661];
+
+        /**
+         * The prepared-statement fragment the allowlist must produce.
+         *
+         * ⚠ The placeholder count is a LITERAL on purpose, and was four
+         * duplicated literals until module 205 made all four fail at once.
+         * Deriving it from `count(self::ALLOWED)` would make these
+         * assertions vacuous — they would then match whatever the
+         * production code emitted, including an allowlist that had
+         * silently grown. One literal in one place keeps the assertion
+         * meaningful while making the next addition a one-line update
+         * rather than a four-line hunt.
+         */
+        private const MODULE_IN_PLACEHOLDERS = 'a.act_module_id IN (%d,%d,%d,%d,%d,%d,%d,%d)';
 
         /** @var mixed */
         private $priorWpdb;
@@ -158,7 +181,7 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
             PeepSoActivityRepository::getActivities(null, null, null, null, 10);
 
             self::assertStringContainsString(
-                'a.act_module_id IN (%d,%d,%d,%d,%d,%d,%d)',
+                self::MODULE_IN_PLACEHOLDERS,
                 $wpdb->lastSql(),
                 'null $moduleIds must narrow to the numeric allowlist, not "all modules"'
             );
@@ -177,7 +200,7 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
             // onlyForGroupId set → group-scoped path still gets the allowlist.
             PeepSoActivityRepository::getActivities([5], null, null, null, 10, null, null, 42);
 
-            self::assertStringContainsString('a.act_module_id IN (%d,%d,%d,%d,%d,%d,%d)', $wpdb->lastSql());
+            self::assertStringContainsString(self::MODULE_IN_PLACEHOLDERS, $wpdb->lastSql());
             foreach (self::ALLOWED as $id) {
                 self::assertContains($id, $wpdb->lastArgs());
             }
@@ -223,7 +246,7 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
 
             PeepSoActivityRepository::getById(7, FeedItemNormalizer::publicFeedModuleIds());
 
-            self::assertStringContainsString('a.act_module_id IN (%d,%d,%d,%d,%d,%d,%d)', $wpdb->lastSql());
+            self::assertStringContainsString(self::MODULE_IN_PLACEHOLDERS, $wpdb->lastSql());
             self::assertContains(7, $wpdb->lastArgs());
             foreach (self::ALLOWED as $id) {
                 self::assertContains($id, $wpdb->lastArgs());
@@ -275,7 +298,7 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
 
                 self::assertNull($result, "module {$badModule} must not resolve via /feed/{id}");
                 // The permalink enforced the allowlist in SQL, not just after.
-                self::assertStringContainsString('a.act_module_id IN (%d,%d,%d,%d,%d,%d,%d)', $wpdb->lastSql());
+                self::assertStringContainsString(self::MODULE_IN_PLACEHOLDERS, $wpdb->lastSql());
             }
         }
 
