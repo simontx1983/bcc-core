@@ -227,19 +227,53 @@ final class ReactionGrammarMap
     }
 
     /**
+     * `counts` as it must appear ON THE WIRE.
+     *
+     * ⚠⚠ AN EMPTY COUNTS DICT MUST SERIALIZE AS `{}`, NOT `[]`, and PHP
+     * will not do that on its own: `json_encode([])` emits a JSON ARRAY.
+     * Measured before this existed — the no-reactions block went out as
+     * `{"kind_grammar":"none","counts":[],"viewer_reaction":null}` while
+     * api-contract-v1.md §2.11 and §4.32.15 both say an empty object.
+     *
+     * It is not a cosmetic difference. `counts` is an object for every
+     * other grammar, so emitting an array for exactly one kind changes
+     * the field's TYPE on the wire — a typed client declaring
+     * `Record<string, number>`, or any schema validator, is entitled to
+     * reject it, and a consumer that happens to tolerate it does so by
+     * luck rather than by contract.
+     *
+     * Applied at the SERIALIZATION BOUNDARY, not inside
+     * {@see emptyCountsFor}, because hydration mutates the dict by key
+     * (`array_key_exists` / `$counts[$kind] = …`) and an object would
+     * break that. Callers build an array, then hand it through here.
+     *
+     * @param  array<string, int> $counts
+     * @return array<string, int>|\stdClass
+     */
+    public static function countsForWire(array $counts)
+    {
+        return $counts === [] ? new \stdClass() : $counts;
+    }
+
+    /**
      * Empty reactions block for the given post_kind — derives the
      * grammar and emits the contract-shape `{kind_grammar, counts,
      * viewer_reaction}` block. The normalizer calls this when no
      * reactions hydrator has run.
      *
-     * @return array{kind_grammar: string, counts: array<string, int>, viewer_reaction: null}
+     * `counts` goes through {@see countsForWire} because this is a
+     * serialization boundary: under the `none` grammar the dict is empty,
+     * and an empty PHP array would encode as `[]` rather than the `{}`
+     * the contract specifies.
+     *
+     * @return array{kind_grammar: string, counts: array<string, int>|\stdClass, viewer_reaction: null}
      */
     public static function emptyReactionsFor(string $postKind): array
     {
         $grammar = self::grammarFor($postKind);
         return [
             'kind_grammar'    => $grammar,
-            'counts'          => self::emptyCountsFor($grammar),
+            'counts'          => self::countsForWire(self::emptyCountsFor($grammar)),
             'viewer_reaction' => null,
         ];
     }

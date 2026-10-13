@@ -29,6 +29,11 @@ use PHPUnit\Framework\TestCase;
  *  4. THE CHANGE LEAKS INTO ANOTHER KIND. Every pre-existing post_kind must
  *     keep its exact grammar and its exact kind list. This is an additive
  *     change or it is a regression.
+ *  6. THE EMPTY COUNTS DICT SERIALIZES AS `[]`. PHP encodes an empty
+ *     array as a JSON ARRAY, so the one grammar whose dict is empty would
+ *     ship a different TYPE for `counts` than every other grammar. Only
+ *     an assertion on the ENCODED JSON can see this — every PHP-level
+ *     check passes either way.
  *  5. `allKnownKinds()` SHRINKS. It is the reactions endpoint's
  *     request-validation enum. If adding a grammar changed it, every other
  *     kind's accepted request set would move.
@@ -110,18 +115,76 @@ final class AnnouncementNoReactionsGrammarTest extends TestCase
     }
 
     /**
-     * `counts` must be an EMPTY object, not a zero-filled one. A consumer
-     * fallback that lights an affordance from "any non-zero legacy count"
-     * cannot fire against an empty set, whereas a zero-filled social dict
-     * would at least give it something to read.
+     * `counts` must carry no kinds. A consumer fallback that lights an
+     * affordance from "any non-zero legacy count" cannot fire against an
+     * empty set, whereas a zero-filled social dict would at least give it
+     * something to read.
      */
     public function testTheEmptyReactionsBlockForAnAnnouncementCarriesNoCounts(): void
     {
         $block = ReactionGrammarMap::emptyReactionsFor(self::ANNOUNCEMENT);
 
         self::assertSame(ReactionGrammarMap::GRAMMAR_NONE, $block['kind_grammar']);
-        self::assertSame([], $block['counts']);
+        self::assertSame([], (array) $block['counts']);
         self::assertNull($block['viewer_reaction']);
+    }
+
+    // ── 2b. The SERIALIZED shape — MUST-NOT-HAPPEN #6 ─────────────────────
+
+    /**
+     * ⚠⚠ THE WIRE SHAPE IS `{}`, NOT `[]`, AND PHP DOES NOT DO THAT FOR
+     * FREE. `json_encode([])` emits a JSON ARRAY. Before
+     * {@see ReactionGrammarMap::countsForWire} existed this block went out
+     * as `{"kind_grammar":"none","counts":[],"viewer_reaction":null}`,
+     * which contradicts api-contract-v1.md §2.11 and §4.32.15.
+     *
+     * Not cosmetic: `counts` is an object for every other grammar, so an
+     * array here changes the field's TYPE on the wire for exactly one
+     * kind. A client declaring `Record<string, number>` is entitled to
+     * reject it, and one that tolerates it does so by luck.
+     *
+     * Asserted on the ENCODED JSON, because that is the only place the
+     * difference is observable — every PHP-level assertion passes either
+     * way.
+     */
+    public function testTheAnnouncementCountsSerializeAsAnEmptyObjectNotAnArray(): void
+    {
+        $json = json_encode(ReactionGrammarMap::emptyReactionsFor(self::ANNOUNCEMENT));
+
+        self::assertSame(
+            '{"kind_grammar":"none","counts":{},"viewer_reaction":null}',
+            $json
+        );
+        self::assertStringContainsString('"counts":{}', (string) $json);
+        self::assertStringNotContainsString('"counts":[]', (string) $json);
+    }
+
+    /** The helper is the boundary, so pin it directly too. */
+    public function testCountsForWireTurnsOnlyTheEmptyDictIntoAnObject(): void
+    {
+        self::assertSame('{}', json_encode(ReactionGrammarMap::countsForWire([])));
+
+        // A populated dict passes through untouched — the cast must not
+        // reshape anything that already encodes as an object.
+        self::assertSame(
+            '{"like":2,"fire":0}',
+            json_encode(ReactionGrammarMap::countsForWire(['like' => 2, 'fire' => 0]))
+        );
+    }
+
+    /**
+     * Anti-vacuity: a social kind's counts were ALREADY an object, so the
+     * assertion above must not be passing because everything is an object
+     * now. This pins that the zero-filled dict is unchanged.
+     */
+    public function testASocialKindsCountsStillSerializeAsTheSameObject(): void
+    {
+        $json = json_encode(ReactionGrammarMap::emptyReactionsFor('status'));
+
+        self::assertSame(
+            '{"kind_grammar":"social","counts":{"like":0,"love":0,"haha":0,"wow":0,"fire":0},"viewer_reaction":null}',
+            $json
+        );
     }
 
     public function testEmptyCountsForTheNoneGrammarIsEmpty(): void
