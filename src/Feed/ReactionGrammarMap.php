@@ -40,6 +40,42 @@ final class ReactionGrammarMap
     public const GRAMMAR_TRIBAL = 'tribal';
 
     /**
+     * No reactions apply to this post_kind at all. Empty kind set.
+     *
+     * ⚠ NOT the same as {@see GRAMMAR_TRIBAL}, which also exposes no kinds
+     * today. `tribal` is documented in api-contract-v1.md §2.11 and
+     * glossary.md as RESERVED FOR V2, with planned kinds (`same_wallet`,
+     * `onchain_confirm`) and an identity-forward visual grammar — a
+     * placeholder for a grammar that WILL carry kinds. Borrowing it to mean
+     * "never gets reactions" would have to be reclaimed in V2 and would read
+     * as "identity-forward reactions are coming" on content that is never
+     * getting any. The two render identically today, which is exactly how
+     * they would get conflated, so the distinction is stated here and in
+     * both documents.
+     *
+     * ⚠⚠ THIS VALUE DOES NOT REMOVE A REACTION CONTROL FROM THE CLIENT, and
+     * must not be relied on to. The per-kind reaction rail was replaced by a
+     * single Stoke control that reads `heat_stage`/`viewer_has_stoked`/
+     * `stoke_count` and does not consult `kind_grammar` at all. What this
+     * value does buy, with no additional code:
+     *
+     *   - `counts` comes back as an EMPTY object, so a client fallback that
+     *     lights an affordance from "any non-zero legacy count" can never
+     *     fire;
+     *   - {@see kindBelongsToGrammar} returns false for EVERY kind, and the
+     *     reactions endpoint validates set-reaction requests with exactly
+     *     that call — so the reactions WRITE path fails closed;
+     *   - {@see \BCC\Trust\Core\Support\ReactionStateComposer} iterates
+     *     `kindsFor()`, so it performs zero lookups.
+     *
+     * Suppressing the rendered affordance is a separate change in the
+     * consuming client. See api-contract-v1.md §4.32.15.
+     *
+     * @since v1.78 (announcements — an official notice takes no reactions)
+     */
+    public const GRAMMAR_NONE = 'none';
+
+    /**
      * Trust-grammar reaction kinds. `solid` is the ONLY trust reaction.
      *
      * `vouch` and `stand_behind` are NOT reactions — they belong to the
@@ -101,6 +137,12 @@ final class ReactionGrammarMap
         // resolves to 'pull_batch' still grade with the social grammar.
         'pull_batch'      => self::GRAMMAR_SOCIAL,
         'blog_excerpt'    => self::GRAMMAR_SOCIAL,
+
+        // No grammar — an official validator notice takes no reactions at
+        // all. Registered EXPLICITLY rather than left to the `?? social`
+        // default below, which would zero-fill {like,love,haha,wow,fire}
+        // onto an operator's announcement. See GRAMMAR_NONE.
+        'announcement'    => self::GRAMMAR_NONE,
     ];
 
     /**
@@ -138,6 +180,11 @@ final class ReactionGrammarMap
             self::GRAMMAR_TRUST  => self::TRUST_KINDS,
             self::GRAMMAR_SOCIAL => self::SOCIAL_KINDS,
             self::GRAMMAR_TRIBAL => [],
+            // Listed rather than left to `default`, so the empty set is a
+            // declared property of this grammar and not an artefact of an
+            // unrecognised value. A reader checking "does `none` really
+            // expose nothing" finds the answer here.
+            self::GRAMMAR_NONE   => [],
             default              => [],
         };
     }
