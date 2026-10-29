@@ -188,10 +188,18 @@ jobs:
       - name: Health probe (whole plugin trio)
         run: |
           # Hosts come from repo variables so the domain cutover (WP moving
-          # off the apex to api.*) is a settings change, not a timed merge
-          # across three repos. Unset => the pre-cutover defaults below.
+          # off the apex to cms.*) is a settings change, not a timed merge
+          # across three repos.
+          #
+          # The production fallback is now cms., POST-cutover. It used to be the
+          # apex, which is a trap: the apex is the Vercel frontend and returns
+          # 403 on /wp-json — and 403 was in this probe's accept list. So if
+          # PROD_HEALTH_BASE were ever cleared, every production probe would
+          # have hit the wrong host, got 403, and reported OK. Measured
+          # 2026-10-29: all three paths below answer 403 on the apex and 200 on
+          # cms., with and without redirect following.
           if [ "${{ steps.t.outputs.environment }}" = "production" ]; then
-            BASE="${{ vars.PROD_HEALTH_BASE || 'https://bluecollarcrypto.io' }}"
+            BASE="${{ vars.PROD_HEALTH_BASE || 'https://cms.bluecollarcrypto.io' }}"
           else
             BASE="${{ vars.STAGE_HEALTH_BASE || 'https://stage.bluecollarcrypto.io' }}"
           fi
@@ -199,13 +207,22 @@ jobs:
           # bcc/v1 namespace, so only a plugin-owned ROUTE reveals a
           # deactivated/fataled plugin (404 = route gone, 5xx = fatal). This
           # step would have caught the 2026-08-05 bcc-search deactivation in
-          # seconds instead of via user report. 400/401/403 mean the route is
-          # alive and enforcing its own rules — that's healthy here.
+          # seconds instead of via user report.
+          #
+          # 200 ONLY, matching bcc-trust. The old accept list included
+          # 400/401/403 as "route alive, enforcing its own rules" — tolerable
+          # when BASE was the apex, which 403s every /wp-json request by design.
+          # With BASE correctly cms., a 403 here means WP REST is genuinely
+          # broken, and accepting it would let the probe pass through exactly
+          # the outage it exists to catch. All three routes below are public
+          # reads and return 200 on both environments today (measured
+          # 2026-10-29); if one ever needs auth, probe a public route from that
+          # plugin instead of widening this list.
           probe () {
             code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$BASE$1")
             case "$code" in
-              200|400|401|403) echo "OK   $code $1" ;;
-              *) echo "::error::FAIL $code $1 (404=route gone/plugin deactivated, 5xx=fatal, 000=unreachable)"; exit 1 ;;
+              200) echo "OK   $code $1" ;;
+              *) echo "::error::FAIL $code $1 (403=REST blocked/wrong host, 404=route gone/plugin deactivated, 5xx=fatal, 000=unreachable)"; exit 1 ;;
             esac
           }
           probe "/wp-json/bcc/v1/ranks"
