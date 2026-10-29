@@ -28,6 +28,10 @@ on:
         type: choice
         options: [staging, production]
         default: staging
+      expected_sha:
+        description: "REQUIRED for production: the full 40-character commit SHA approved for deploy"
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -84,6 +88,54 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.t.outputs.ref }}
+
+      # ⚠⚠ THE PRODUCTION RACE GUARD — asserts the CHECKED-OUT COMMIT, not
+      # the current value of main.
+      #
+      # A production dispatch resolves REF to `refs/heads/main`; there is no
+      # SHA input upstream of this step. And `concurrency` serialises deploys
+      # with cancel-in-progress: false, so a dispatch can QUEUE behind an
+      # in-flight deploy and check out main at an arbitrary later time. No
+      # out-of-band read of main before dispatching can bound that window —
+      # which is why a procedural re-read is not a substitute for this step.
+      #
+      # Once checkout has run, the bytes that will be rsynced are fixed, so
+      # verifying THOSE is race-free regardless of what main does next.
+      #
+      # Placed immediately after checkout and BEFORE `Set up SSH`, so a
+      # refusal happens with no deploy key written and no connection to the
+      # host. Staging is untouched: the `if` gates on production, and the
+      # workflow_run auto-deploy passes no inputs at all.
+      #
+      # ⚠ expected_sha arrives through `env`, never interpolated into the
+      # script body — a ${{ }} expansion inside `run:` is a shell-injection
+      # seam for anyone who can dispatch the workflow.
+      - name: Refuse unless the checked-out commit is the approved SHA
+        if: steps.t.outputs.environment == 'production'
+        env:
+          EXPECTED_SHA: ${{ github.event.inputs.expected_sha }}
+        run: |
+          EXPECTED="$EXPECTED_SHA"
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::production deploys require expected_sha (the approved full 40-character commit SHA)"
+            exit 1
+          fi
+          if [ ${#EXPECTED} -ne 40 ]; then
+            echo "::error::expected_sha must be a FULL 40-character SHA (got ${#EXPECTED} characters)"
+            exit 1
+          fi
+          case "$EXPECTED" in
+            *[!0-9a-f]*)
+              echo "::error::expected_sha must be 40 lowercase hexadecimal characters"
+              exit 1
+              ;;
+          esac
+          ACTUAL="$(git rev-parse HEAD)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::REFUSING TO DEPLOY — checked-out HEAD $ACTUAL does not match the approved $EXPECTED. main moved between approval and dispatch."
+            exit 1
+          fi
+          echo "Approved commit confirmed: $ACTUAL"
 
       - name: Set up SSH
         run: |
