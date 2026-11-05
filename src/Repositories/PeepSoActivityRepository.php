@@ -57,6 +57,14 @@ final class PeepSoActivityRepository
     private const TABLE_SUFFIX = 'peepso_activities';
 
     /**
+     * Post-meta marker tying a status post to the page it was written for.
+     * bcc-trust stamps it after its write gate passes; the marker is the only
+     * thing the page-scoped read filters on, so a post stays on its page
+     * whatever happens to the author's standing later.
+     */
+    public const PAGE_TARGET_META = '_bcc_page_id';
+
+    /**
      * Explicit SELECT list — peepso_activities columns plus the three
      * fields synthesized from the wp_posts JOIN. Aliases keep the row
      * shape stable for the rest of the codebase (FeedItemNormalizer,
@@ -85,6 +93,7 @@ final class PeepSoActivityRepository
      * @param list<string>|null $groupVisibilityIn Per-post visibility allow-list for the GROUP-SCOPED path. Only applies when non-null AND `$onlyForGroupId !== null`. Adds an INNER JOIN on `_bcc_post_visibility` post-meta restricting to the given values (bcc-trust passes ['public_group','public_all'] for a non-member teaser feed). INNER (not LEFT) JOIN: posts with absent `_bcc_post_visibility` meta are EXCLUDED for non-members — absent ⇒ members_only ⇒ hidden — which is the security invariant. When null (member read) the join is omitted so members see every post in the group. Ignored on the global path (`$onlyForGroupId === null`), which has its own 'public_all' gate.
      * @param ?string $hashtag Optional hashtag filter (tag text WITHOUT the leading '#'). When a non-empty string, restricts the candidate set to activities whose backing wp_post.post_content contains the tag via `p.post_content LIKE '%#<tag>%'`. This mirrors how PeepSo itself associates a post with a hashtag (substring match on the rendered '#tag' token), so the filtered set is consistent with PeepSo's own `ht_count` accounting. null/'' = no hashtag filter. The filter is a pure narrowing predicate — it can never WIDEN the candidate set, so every other visibility / exclusion clause still applies in full.
      * @param ?string $hallFeed Ranked-Hall channel selector for the GROUP-SCOPED path only (Rank Phase 7, §21.3). Only applies when `$onlyForGroupId !== null`; ignored (no-op) on every global path. 'ranked' → INNER JOIN on `_bcc_ranked_feed = '1'` post-meta so ONLY ranked-channel posts surface. 'main' → LEFT JOIN + IS NULL anti-join so ranked-channel posts are EXCLUDED from the group's main feed. null = no channel filter (legacy callers unchanged). bcc-trust's FeedRankingService passes 'ranked'/'main' for /groups/{id}/feed; the write-side gate (Journeyman+ AND Neutral+ AND Hall member) lives in bcc-trust — bcc-core stays unaware of the policy, same coupling-avoidance pattern as the exclusion channels above.
+     * @param int|null $onlyForPageId           null = no page filter; positive int = only activities whose backing wp_post carries {@see self::PAGE_TARGET_META} post-meta matching this page; non-positive = no posts (returns []). Used by /bcc/v1/pages/{id}/feed. INNER JOIN on the marker alone: the author's current standing is deliberately not consulted here. Pure narrowing — the global-feed visibility gate below still applies, since this path leaves `$onlyForGroupId` null.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
      */
@@ -100,7 +109,8 @@ final class PeepSoActivityRepository
         ?array $excludedGroupIds = null,
         ?array $groupVisibilityIn = null,
         ?string $hashtag = null,
-        ?string $hallFeed = null
+        ?string $hallFeed = null,
+        ?int $onlyForPageId = null
     ): array {
         global $wpdb;
 
@@ -110,6 +120,9 @@ final class PeepSoActivityRepository
             return [];
         }
         if ($onlyForGroupId !== null && $onlyForGroupId <= 0) {
+            return [];
+        }
+        if ($onlyForPageId !== null && $onlyForPageId <= 0) {
             return [];
         }
 
@@ -257,6 +270,19 @@ final class PeepSoActivityRepository
             }
         }
 
+        // Page scope: filter to activities whose backing wp_post was written
+        // for a specific page. Same INNER JOIN shape as the group scope above,
+        // on a marker this codebase writes itself. Bound here, after gm_pm and
+        // vis_in_pm, because that is the order the joins render in $sql.
+        $pageJoin = '';
+        if ($onlyForPageId !== null) {
+            $pageJoin = ' INNER JOIN ' . $wpdb->postmeta . ' pg_pm
+                             ON pg_pm.post_id    = p.ID
+                            AND pg_pm.meta_key   = \'' . self::PAGE_TARGET_META . '\'
+                            AND pg_pm.meta_value = %s ';
+            $joinParams[] = (string) $onlyForPageId;
+        }
+
         // Ranked-Hall channel filter (group-scoped path ONLY — Rank
         // Phase 7, §21.3 per-Hall second feed).
         //
@@ -325,7 +351,7 @@ final class PeepSoActivityRepository
         }
 
         // Final argument order mirrors placeholder appearance in $sql:
-        // JOIN params (gm_pm, then vis_in_pm) → WHERE params → LIMIT.
+        // JOIN params (gm_pm, then vis_in_pm, then pg_pm) → WHERE params → LIMIT.
         $allParams = array_merge($joinParams, $params, [$limit]);
 
         // DISTINCT: row-multiplication guard. WP convention is one
@@ -340,6 +366,7 @@ final class PeepSoActivityRepository
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                   ' . $groupJoin . '
                   ' . $visibilityInJoin . '
+                  ' . $pageJoin . '
                   ' . $rankedJoin . '
                   ' . $groupVisibilityJoin . '
                  WHERE ' . implode(' AND ', $where) . '
