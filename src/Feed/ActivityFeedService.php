@@ -204,6 +204,76 @@ final class ActivityFeedService
     }
 
     /**
+     * Per-page stream — the activities written for a single page, by whoever
+     * wrote them.
+     *
+     * Backs `GET /bcc/v1/pages/{id}/feed`. Same cursor-paginated shape and
+     * same hydration as `getActivityForAuthor()`, filtered on the page marker
+     * instead of the author. Unscoped by author on purpose: a post stays on
+     * its page after its author stops being the page's operator.
+     *
+     * `$viewerId` is the request viewer (0 = anonymous), used for author
+     * hydration only.
+     *
+     * @param list<int>|null $excludedAuthorIds Same §O4.1 shadow-limit channel as `getFeed()`.
+     * @param list<int>|null $excludedActIds    §K1 Phase C per-row moderation hide list.
+     * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     */
+    public function getActivityForPage(
+        int $pageId,
+        int $viewerId,
+        ?string $cursor = null,
+        int $limit = 20,
+        ?array $excludedAuthorIds = null,
+        ?array $excludedActIds = null
+    ): array {
+        if ($pageId <= 0) {
+            return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+        }
+
+        $limit = max(1, min(50, $limit));
+        [$cursorTime, $cursorActId] = self::decodeCursor($cursor);
+
+        // Over-fetch by 1 to detect has_more without a separate count.
+        $rows = PeepSoActivityRepository::getActivities(
+            null,
+            null,
+            $cursorTime,
+            $cursorActId,
+            $limit + 1,
+            $excludedAuthorIds,
+            $excludedActIds,
+            null,
+            null,
+            null,
+            null,
+            null,
+            $pageId
+        );
+
+        $hasMore = count($rows) > $limit;
+        if ($hasMore) {
+            $rows = array_slice($rows, 0, $limit);
+        }
+
+        $items = $this->hydrateRows($rows, $viewerId);
+
+        $nextCursor = null;
+        if ($hasMore && $rows !== []) {
+            $last       = $rows[count($rows) - 1];
+            $nextCursor = self::encodeCursor((string) $last->act_time, (int) $last->act_id);
+        }
+
+        return [
+            'items'      => $items,
+            'pagination' => [
+                'next_cursor' => $nextCursor,
+                'has_more'    => $hasMore,
+            ],
+        ];
+    }
+
+    /**
      * Single-activity read for the post-detail permalink
      * (`GET /bcc/v1/feed/{id}`). Same per-row hydration `getFeed()`
      * uses (`hydrateRows`), so the returned item is byte-identical to
