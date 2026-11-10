@@ -142,6 +142,69 @@ final class PeepSoBlockRepository
     }
 
     /**
+     * One-directional batch sibling of `isBlocking` — for one blocker
+     * against a candidate set, which candidates does THIS user block?
+     *
+     * ⚠ Deliberately NOT `getMutuallyBlockedSet`. That one matches
+     * either direction, which is wrong for a viewer-relative read
+     * treatment: "the sender blocked me" must not hide the sender's
+     * message from me. The two are one `OR` leg apart and the wrong
+     * one silently over-matches, so they are separate methods rather
+     * than a flag.
+     *
+     * ⚠ Also deliberately not `getBlockedIds`. That has the right
+     * direction but returns the blocker's whole list under `LIMIT 500`,
+     * so a user with more than 500 blocks would silently read as
+     * "not blocked" for everyone past the cap. Intersecting with the
+     * caller's candidates instead means the cap applies to the page
+     * being rendered, not to the user's block list.
+     *
+     * @param list<int> $candidateIds candidate user ids (caller-bounded;
+     *                                defensively capped at 500, as the
+     *                                list reads below are)
+     * @return array<int, true> keyed by candidate id; a key is present
+     *                          iff $blockerId blocks that candidate
+     */
+    public static function getBlockedSet(int $blockerId, array $candidateIds): array
+    {
+        if ($blockerId <= 0 || $candidateIds === []) {
+            return [];
+        }
+        $unique = [];
+        foreach ($candidateIds as $raw) {
+            $id = (int) $raw;
+            if ($id > 0 && $id !== $blockerId) {
+                $unique[$id] = true;
+            }
+        }
+        if ($unique === []) {
+            return [];
+        }
+        $ids = array_slice(array_keys($unique), 0, 500);
+
+        global $wpdb;
+        $table = self::table();
+        $ph    = implode(',', array_fill(0, count($ids), '%d'));
+
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT blk_blocked_id FROM {$table}
+              WHERE blk_user_id = %d
+                AND blk_blocked_id IN ({$ph})",
+            ...array_merge([$blockerId], $ids)
+        ));
+
+        $out = [];
+        foreach (($rows ?: []) as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $out[$id] = true;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * IDs of users $blockerId is blocking. Bounded by LIMIT to keep
      * the feed-exclusion merge predictable; users with > 500 blocks
      * are pathological and almost certainly an abuse signal.
