@@ -12,22 +12,24 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
     require_once __DIR__ . '/Stubs/rendering-wpdb.php';
 
     /**
-     * Covers the two params the profile Blog tab needs once a blog post can
-     * live inside a PeepSo group:
+     * Covers the group-visibility surface the profile Blog tab needs once a
+     * blog post can live inside a PeepSo group:
      *
-     *   $restrictedGroupIds              — the ENFORCED group deny list.
-     *   $groupGateUsesRestrictedListOnly — drops the global 'public_all'
-     *                                      requirement so group access alone
-     *                                      decides visibility.
+     *   $restrictedGroupIds   — the ENFORCED group deny list.
+     *   $groupGateMode        — which visibility rule this read wants, in
+     *                           place of the global 'public_all' gate.
+     *   $viewerMemberGroupIds — carries members_only parity: a member sees
+     *                           every visibility, a non-member only the
+     *                           public two.
      *
-     * These assert the STATEMENT, not returned rows: the `$wpdb` double hands
-     * back whatever it is given, so it cannot prove row filtering. What it CAN
-     * prove is that the predicate reaches SQL at all — which is this change's
-     * real exposure, because the neighbouring `$excludedGroupIds` param is a
-     * documented no-op that would make a happy-path test pass while filtering
-     * nothing. The viewer-identity behaviour (member sees it, non-member does
-     * not, author always does) is tested in bcc-trust, where the viewer and
-     * the group-membership lookup actually exist.
+     * These assert the STATEMENT, not returned rows: the `$wpdb` double
+     * hands back whatever it is given, so it cannot prove row filtering.
+     * What it CAN prove is which predicates reach SQL — which is this
+     * change's real exposure, because the neighbouring `$excludedGroupIds`
+     * param is a documented no-op that would make a happy-path test pass
+     * while filtering nothing. The viewer-identity behaviour (member sees
+     * it, non-member does not, author always does) is tested in bcc-trust,
+     * where the viewer and the group-membership lookup actually exist.
      */
     #[CoversClass(PeepSoActivityRepository::class)]
     final class ActivityRestrictedGroupExclusionTest extends TestCase
@@ -36,6 +38,16 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
         private const DENY_7_9 = "NOT EXISTS (SELECT 1 FROM wp_postmeta rg_pm WHERE rg_pm.post_id = p.ID"
             . " AND rg_pm.meta_key = 'peepso_group_id' AND rg_pm.meta_value IN ('7','9'))";
+
+        private const NO_GROUP_ALT = "NOT EXISTS (SELECT 1 FROM wp_postmeta mg_abs WHERE mg_abs.post_id = p.ID"
+            . " AND mg_abs.meta_key = 'peepso_group_id')";
+
+        private const MEMBER_ALT = "EXISTS (SELECT 1 FROM wp_postmeta mg_pm WHERE mg_pm.post_id = p.ID"
+            . " AND mg_pm.meta_key = 'peepso_group_id' AND mg_pm.meta_value IN ('3','4'))";
+
+        private const PUBLIC_VIS_ALT = "EXISTS (SELECT 1 FROM wp_postmeta nmv_pm WHERE nmv_pm.post_id = p.ID"
+            . " AND nmv_pm.meta_key = '_bcc_post_visibility'"
+            . " AND nmv_pm.meta_value IN ('public_group','public_all'))";
 
         private const SELECT_PREFIX = 'SELECT DISTINCT a.act_id, p.post_author AS act_user_id, a.act_owner_id,'
             . ' a.act_module_id, a.act_external_id, p.post_date_gmt AS act_time, a.act_access,'
@@ -80,12 +92,11 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
         // ── Golden snapshots: "every other caller is byte-identical" ─────
         //
-        // The whole claim of this change is that it is additive. A shape
+        // The claim of this change is that it is additive. A containment
         // assertion cannot carry that claim, because a stray clause added
-        // anywhere else in the statement still satisfies every
-        // assertStringContainsString in this file. These two pin the ENTIRE
-        // statement for callers that pass neither new param, so any drift —
-        // mine or a later edit's — fails here.
+        // anywhere else still satisfies every assertStringContainsString in
+        // this file. These two pin the ENTIRE statement for callers that
+        // pass none of the new params, so any drift fails here.
 
         public function testGoldenSqlForADefaultCallIsUnchanged(): void
         {
@@ -102,7 +113,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
         /**
          * The shape ActivityFeedService sends: every legacy param populated,
-         * including the inert `$excludedGroupIds`, and neither new param.
+         * including the inert `$excludedGroupIds`, and none of the new ones.
          */
         public function testGoldenSqlForAFeedServiceShapedCallIsUnchanged(): void
         {
@@ -139,8 +150,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
         // ── The deny list ────────────────────────────────────────────────
 
         /**
-         * FAILS IF THE DENY PARAM IS IGNORED. Delete the implementation and
-         * the NOT EXISTS vanishes from the statement.
+         * FAILS IF THE DENY PARAM IS IGNORED.
          */
         public function testDenyListReachesSqlAsARealPredicate(): void
         {
@@ -154,27 +164,12 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
         }
 
         /**
-         * A post in NO group must survive. With NOT EXISTS this is free (the
-         * subquery matches nothing), which is part of why it beats a join.
-         */
-        public function testPostsInNoGroupSurviveTheDenyList(): void
-        {
-            $wpdb = $this->installWpdb();
-
-            PeepSoActivityRepository::getActivities(
-                null, null, null, null, 10, null, null, null, null, null, null, null, null, [7]
-            );
-
-            self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM wp_postmeta rg_pm', $wpdb->lastSql);
-        }
-
-        /**
          * A post carrying TWO `peepso_group_id` rows — one restricted, one
-         * allowed — must be dropped. The predicate therefore has to be
-         * per-POST, not per-ROW: with a LEFT JOIN plus NOT IN the allowed row
-         * satisfies the condition and SELECT DISTINCT collapses the duplicate
-         * back into one surviving item, which is a silent leak. Pinned by
-         * requiring the subquery form and forbidding the join form.
+         * allowed — must be dropped, so the predicate has to be per-POST.
+         * With a LEFT JOIN plus NOT IN the allowed row satisfies the
+         * condition and SELECT DISTINCT collapses the duplicate back into a
+         * surviving item: a silent leak. Pinned by requiring the subquery
+         * form and forbidding the join form.
          */
         public function testExclusionIsPerPostNotPerMetaRow(): void
         {
@@ -213,9 +208,6 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             self::assertStringContainsString("rg_pm.meta_value IN ('7','9')", $wpdb->lastSql);
         }
 
-        /**
-         * meta_value is varchar, so ids must bind as quoted strings.
-         */
         public function testIdsBindAsStringsBecauseMetaValueIsVarchar(): void
         {
             $wpdb = $this->installWpdb();
@@ -230,10 +222,8 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
         /**
          * MUTATION CONTROL. `$excludedGroupIds` (position 9) is inert by
-         * design. If someone ever patches a group leak by passing the list
-         * there, nothing is filtered — and no other test in this repo would
-         * notice. This pins the no-op so that mistake fails loudly here
-         * instead of shipping as a working gate.
+         * design. If someone patches a group leak by passing the list there,
+         * nothing is filtered — and no other test in this repo would notice.
          */
         public function testTheInertExcludedGroupIdsParamStillFiltersNothing(): void
         {
@@ -248,7 +238,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
         }
 
-        // ── The relax flag, and its fail-closed guards ───────────────────
+        // ── $groupGateMode, and its fail-closed guards ───────────────────
 
         public function testTheGlobalPublicAllGateIsThereByDefault(): void
         {
@@ -260,72 +250,60 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
         }
 
         /**
-         * FAILS IF THE RELAX PARAM IS IGNORED. Under the 'public_all' gate a
-         * members_only group blog is dropped for every viewer, the group's own
-         * members and the author included, so the deny list never gets to
-         * judge those rows. An EXPLICIT [] is the author-scoped read: every
-         * row is already the viewer's own, so nothing is restricted.
+         * FAILS IF THE MODE IS IGNORED. Under the 'public_all' gate a
+         * members_only group blog is dropped for every viewer, the group's
+         * own members and the author included, so the deny list never gets
+         * to judge those rows.
          */
-        public function testRelaxWithAnExplicitEmptyListRemovesTheGate(): void
+        public function testViewerAccessWithAUsableListRemovesTheGate(): void
         {
             $wpdb = $this->installWpdb();
 
             PeepSoActivityRepository::getActivities(
-                null, null, null, null, 10, null, null, null, null, null, null, null, null, [], true
+                null, null, null, null, 10, null, null, null, null, null, null, null, null, [7, 9],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, [3, 4]
             );
 
-            self::assertStringNotContainsString('public_all', $wpdb->lastSql);
+            self::assertStringNotContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
             self::assertStringNotContainsString('gx_pm', $wpdb->lastSql);
-            self::assertStringNotContainsString('vis_pm', $wpdb->lastSql);
-        }
-
-        public function testRelaxWithADenyListGatesOnGroupAccessAlone(): void
-        {
-            $wpdb = $this->installWpdb();
-
-            PeepSoActivityRepository::getActivities(
-                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [7, 9], true
-            );
-
             self::assertStringContainsString(self::DENY_7_9, $wpdb->lastSql);
-            self::assertStringNotContainsString('public_all', $wpdb->lastSql);
-            self::assertStringContainsString('p.post_author IN (42)', $wpdb->lastSql);
         }
 
         /**
-         * FAIL-CLOSED #1. `null` means "no list supplied", which is
-         * indistinguishable from "the caller's membership lookup degraded and
-         * passed us nothing". Honouring the flag there would drop the gate
-         * with nothing filtering in its place — every members_only and
-         * secret-group post exposed. The gate must stay.
+         * FAIL-CLOSED #1 — a NULL list. null means "no list supplied", which
+         * is indistinguishable from "my membership lookup failed and I am
+         * passing you nothing". Honouring the mode there would drop the gate
+         * with nothing in its place, exposing every members_only and
+         * secret-group post.
          */
-        public function testRelaxIsRefusedWithoutAListSoTheGateStays(): void
+        public function testViewerAccessIsRefusedWithoutAListSoTheGateStays(): void
         {
             $wpdb = $this->installWpdb();
 
             PeepSoActivityRepository::getActivities(
-                null, null, null, null, 10, null, null, null, null, null, null, null, null, null, true
+                null, null, null, null, 10, null, null, null, null, null, null, null, null, null,
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
             );
 
             self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
             self::assertStringNotContainsString('rg_pm', $wpdb->lastSql);
+            self::assertStringNotContainsString('nmv_pm', $wpdb->lastSql);
         }
 
         /**
-         * FAIL-CLOSED #2. For an anonymous viewer the deny list is every
-         * non-public group and has no ceiling, so §3 wants it bounded. Past
-         * the cap the list is REFUSED rather than truncated — a truncated
-         * deny list would silently stop hiding the groups that fell off the
-         * end. The gate stays, which hides strictly more.
+         * FAIL-CLOSED #2 — an over-long list is REFUSED, not truncated. A
+         * truncated deny list silently stops hiding whatever fell off the
+         * end.
          */
-        public function testAnOverLongListIsRefusedAndTheGateStays(): void
+        public function testAnOverCapListIsRefusedAndTheGateStays(): void
         {
             $wpdb = $this->installWpdb();
 
             $tooMany = range(1, PeepSoActivityRepository::RESTRICTED_GROUP_IDS_MAX + 1);
 
             PeepSoActivityRepository::getActivities(
-                null, null, null, null, 10, null, null, null, null, null, null, null, null, $tooMany, true
+                null, null, null, null, 10, null, null, null, null, null, null, null, null, $tooMany,
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
             );
 
             self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
@@ -339,44 +317,191 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             $atCap = range(1, PeepSoActivityRepository::RESTRICTED_GROUP_IDS_MAX);
 
             PeepSoActivityRepository::getActivities(
-                null, null, null, null, 10, null, null, null, null, null, null, null, null, $atCap, true
+                null, null, null, null, 10, null, null, null, null, null, null, null, null, $atCap,
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
             );
 
             self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM wp_postmeta rg_pm', $wpdb->lastSql);
-            self::assertStringNotContainsString('public_all', $wpdb->lastSql);
+            self::assertStringNotContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
         }
 
         /**
-         * On the group-scoped path the global gate never applied, so the flag
-         * must change NOTHING. Asserted by comparing the two statements
-         * directly — a containment assertion here would pass whether or not
-         * the flag were honoured, which is no assertion at all.
+         * FAIL-CLOSED #3 — an unrecognised mode relaxes nothing. This is the
+         * reason the param is a named mode and not a boolean: a typo, or a
+         * value from a future branch, must not widen a read.
          */
-        public function testRelaxChangesNothingOnTheGroupScopedPath(): void
+        public function testAnUnrecognisedModeRelaxesNothing(): void
         {
             $wpdb = $this->installWpdb();
 
             PeepSoActivityRepository::getActivities(
-                null, null, null, null, 10, null, null, 42, null, null, null, null, null, [7], false
+                null, null, null, null, 10, null, null, null, null, null, null, null, null, [7],
+                'nonsense-mode', null
             );
-            $withoutRelax = trim($wpdb->lastSql);
 
-            PeepSoActivityRepository::getActivities(
-                null, null, null, null, 10, null, null, 42, null, null, null, null, null, [7], true
-            );
-            $withRelax = trim($wpdb->lastSql);
-
-            self::assertSame($withoutRelax, $withRelax);
-            self::assertStringContainsString("gm_pm.meta_value = '42'", $withRelax);
+            self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
+            self::assertStringNotContainsString('nmv_pm', $wpdb->lastSql);
         }
 
         /**
-         * JOIN params render before WHERE params. The deny ids are bound as
-         * WHERE params precisely so this predicate cannot shift that order;
-         * bound into a JOIN slot instead, a group id would land in the group
-         * scope and the read would serve the wrong group's rows with no error.
+         * FAIL-CLOSED #4 — the group-scoped path has no gate behind the deny
+         * list, so a SUPPLIED-but-unusable list must refuse the read rather
+         * than serve the group unfiltered. Nothing is even queried.
          */
-        public function testDenyIdsBindAsWhereParamsBehindTheJoinParams(): void
+        public function testGroupScopedReadIsRefusedWhenASuppliedListIsUnusable(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            $tooMany = range(1, PeepSoActivityRepository::RESTRICTED_GROUP_IDS_MAX + 1);
+
+            $rows = PeepSoActivityRepository::getActivities(
+                null, null, null, null, 10, null, null, 42, null, null, null, null, null, $tooMany,
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
+            );
+
+            self::assertSame([], $rows);
+            self::assertSame(0, $wpdb->queryCount);
+        }
+
+        /**
+         * The author reading their own rows needs no deny list — every row
+         * the query can return is already theirs — and keeps seeing them
+         * after leaving the group. This is the only way to relax the gate
+         * without a list, and it must be asked for by name.
+         */
+        public function testAuthorScopedNeedsNoListAndDropsEveryGroupPredicate(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [],
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null
+            );
+
+            self::assertStringNotContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
+            self::assertStringNotContainsString('rg_pm', $wpdb->lastSql);
+            self::assertStringNotContainsString('nmv_pm', $wpdb->lastSql);
+            self::assertStringContainsString('p.post_author IN (42)', $wpdb->lastSql);
+        }
+
+        // ── members_only parity (the group feed's rule) ──────────────────
+
+        /**
+         * FAILS IF THE PARITY CLAUSE IS IGNORED. The deny list removes groups
+         * the viewer may not SEE; it says nothing about an OPEN group they
+         * can see but have not joined. members_only has to mean members_only
+         * there too, exactly as the group feed already enforces for a
+         * non-member.
+         */
+        public function testViewerAccessAppliesMembersOnlyParity(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [7, 9],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, [3, 4]
+            );
+
+            self::assertStringContainsString(
+                '(' . self::NO_GROUP_ALT . ' OR ' . self::MEMBER_ALT . ' OR ' . self::PUBLIC_VIS_ALT . ')',
+                $wpdb->lastSql
+            );
+        }
+
+        /**
+         * An anonymous reader belongs to nothing, so the membership
+         * alternative is omitted and only the public visibilities qualify.
+         * The no-group alternative must survive, or every non-group blog
+         * would vanish from every profile.
+         */
+        public function testAnonymousViewerGetsNoMembershipAlternative(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [7, 9],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
+            );
+
+            self::assertStringContainsString(
+                '(' . self::NO_GROUP_ALT . ' OR ' . self::PUBLIC_VIS_ALT . ')',
+                $wpdb->lastSql
+            );
+            self::assertStringNotContainsString('mg_pm', $wpdb->lastSql);
+        }
+
+        /**
+         * An over-cap membership list drops the membership alternative. That
+         * costs a member sight of their own groups' members_only posts —
+         * restrictive, not leaky — and keeps the IN list bounded.
+         */
+        public function testOverCapMembershipListDropsTheMembershipAlternative(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            $tooManyGroups = range(1, PeepSoActivityRepository::RESTRICTED_GROUP_IDS_MAX + 1);
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [7],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, $tooManyGroups
+            );
+
+            self::assertStringNotContainsString('mg_pm', $wpdb->lastSql);
+            self::assertStringContainsString(self::PUBLIC_VIS_ALT, $wpdb->lastSql);
+        }
+
+        /**
+         * Absent visibility meta must NOT qualify — absent means
+         * members_only. Pinned by requiring EXISTS (not a LEFT JOIN with a
+         * NULL passthrough) on the visibility alternative.
+         */
+        public function testAbsentVisibilityMetaDoesNotQualifyAsPublic(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [7],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
+            );
+
+            self::assertStringContainsString('OR EXISTS (SELECT 1 FROM wp_postmeta nmv_pm', $wpdb->lastSql);
+            self::assertStringNotContainsString('nmv_pm.meta_value IS NULL', $wpdb->lastSql);
+            self::assertStringNotContainsString('LEFT JOIN wp_postmeta nmv_pm', $wpdb->lastSql);
+        }
+
+        // ── Ordering / no-op guarantees ──────────────────────────────────
+
+        /**
+         * On the group-scoped path the global gate never applied, so the mode
+         * must change NOTHING. Compared directly: a containment assertion
+         * would pass whether or not the mode were honoured.
+         */
+        public function testModeChangesNothingOnTheGroupScopedPath(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                null, null, null, null, 10, null, null, 42, null, null, null, null, null, [7], null
+            );
+            $withoutMode = trim($wpdb->lastSql);
+
+            PeepSoActivityRepository::getActivities(
+                null, null, null, null, 10, null, null, 42, null, null, null, null, null, [7],
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED
+            );
+            $withMode = trim($wpdb->lastSql);
+
+            self::assertSame($withoutMode, $withMode);
+            self::assertStringContainsString("gm_pm.meta_value = '42'", $withMode);
+        }
+
+        /**
+         * JOIN params render before WHERE params. Every new predicate binds
+         * as a WHERE param precisely so it cannot shift that order; bound
+         * into a JOIN slot instead, a group id would land in the group scope
+         * and the read would serve the wrong group's rows with no error.
+         */
+        public function testNewPredicatesBindAsWhereParamsBehindTheJoinParams(): void
         {
             $wpdb = $this->installWpdb();
 
@@ -406,6 +531,28 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             self::assertStringContainsString('a.act_id NOT IN (13)', $wpdb->lastSql);
             self::assertStringContainsString(self::DENY_7_9, $wpdb->lastSql);
             self::assertStringEndsWith('LIMIT 21', trim($wpdb->lastSql));
+        }
+
+        /**
+         * The parity clause binds member ids BEFORE the visibility values,
+         * in the order the alternatives appear. Swapped, a group id would
+         * render into the visibility IN list and vice versa, which the
+         * rendering double catches as a mismatch.
+         */
+        public function testParityClauseBindsMemberIdsBeforeVisibilityValues(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [7],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, [3, 4]
+            );
+
+            self::assertStringContainsString("mg_pm.meta_value IN ('3','4')", $wpdb->lastSql);
+            self::assertStringContainsString(
+                "nmv_pm.meta_value IN ('public_group','public_all')",
+                $wpdb->lastSql
+            );
         }
     }
 }

@@ -860,8 +860,22 @@ final class PeepSoGroupRepository
         /** @var list<numeric-string>|null $rows */
         $rows = $wpdb->get_col($wpdb->prepare($sql, ...$params));
 
+        // ⚠ A FAILED QUERY MUST NOT BE CACHED. get_col returns null on
+        // error, which the loop below would flatten into [] — and caching
+        // that for NONOPEN_CACHE_TTL (10 min) would hold "no group is
+        // non-open" for every caller for ten minutes after one transient
+        // DB error. For a caller that uses this list as an exclusion, an
+        // empty list means "exclude nothing", so the cached failure reads
+        // as permission. Return the empty list for this request (callers
+        // already treat [] as "no exclusions", which is the pre-existing
+        // behaviour on the failure path) but leave the cache cold so the
+        // next request re-asks. Nothing changes on the success path.
+        if ($rows === null) {
+            return [];
+        }
+
         $ids = [];
-        foreach ($rows ?: [] as $raw) {
+        foreach ($rows as $raw) {
             $id = (int) $raw;
             if ($id > 0) {
                 $ids[] = $id;
@@ -869,6 +883,107 @@ final class PeepSoGroupRepository
         }
 
         wp_cache_set($genKey, $ids, self::NONOPEN_CACHE_GROUP, self::NONOPEN_CACHE_TTL);
+        return $ids;
+    }
+
+    /**
+     * Same set as {@see getNonOpenGroupIds}, but it tells you when it
+     * does not know.
+     *
+     * {@see getNonOpenGroupIds} is lossy by design — it answers with a
+     * list and nothing else, so "no group is non-open", "the query
+     * failed" and "there are more than the limit, here are the newest"
+     * all arrive as a plain array. That is fine for the feed, which uses
+     * the list as one filter among several, and NOT fine for a caller
+     * that uses it as its ONLY group gate: for that caller a short list
+     * is not a degraded answer, it is a disclosure. Each missing id is a
+     * group whose posts get shown.
+     *
+     * So this variant returns NULL for both failure modes:
+     *
+     *   - the query errored (`get_col` → null). Distinct from empty, and
+     *     not cached, so one bad query cannot hold the answer for the
+     *     cache TTL.
+     *   - more rows exist than the caller asked for. Detected by asking
+     *     for `$limit + 1` and seeing the extra row come back, rather
+     *     than by guessing from a full-looking page. The underlying
+     *     query orders by `p.ID DESC`, so truncation silently drops the
+     *     OLDEST non-open groups — the ones most likely to be
+     *     established private communities.
+     *
+     * An empty return is therefore trustworthy: it means the query ran
+     * and no group is non-open.
+     *
+     * @return list<int>|null null = cannot answer; caller must fail closed
+     */
+    public static function getNonOpenGroupIdsStrict(int $limit = self::NONOPEN_DEFAULT_LIMIT): ?array
+    {
+        if ($limit <= 0) {
+            return null;
+        }
+        if ($limit > self::NONOPEN_DEFAULT_LIMIT) {
+            $limit = self::NONOPEN_DEFAULT_LIMIT;
+        }
+
+        // Own cache key — a strict answer and a lenient one are not
+        // interchangeable, and only a PROVEN-complete list is ever stored.
+        $genKey = self::nonOpenCacheKey($limit) . ':strict';
+        $cached = wp_cache_get($genKey, self::NONOPEN_CACHE_GROUP);
+        if (is_array($cached)) {
+            /** @var list<int> $cached */
+            return $cached;
+        }
+
+        global $wpdb;
+
+        $placeholders = implode(',', array_fill(0, count(self::NON_OPEN_PRIVACY_VALUES), '%s'));
+
+        $params = [
+            'peepso_group_privacy',
+            self::POST_TYPE,
+            self::POST_STATUS,
+        ];
+        foreach (self::NON_OPEN_PRIVACY_VALUES as $val) {
+            $params[] = $val;
+        }
+        // limit + 1: the extra row is the truncation detector.
+        $params[] = $limit + 1;
+
+        $sql = "SELECT p.ID
+                  FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm
+                       ON pm.post_id  = p.ID
+                      AND pm.meta_key = %s
+                 WHERE p.post_type   = %s
+                   AND p.post_status = %s
+                   AND pm.meta_value IN ({$placeholders})
+                 ORDER BY p.ID DESC
+                 LIMIT %d";
+
+        /** @var list<numeric-string>|null $rows */
+        $rows = $wpdb->get_col($wpdb->prepare($sql, ...$params));
+
+        // Failure: not empty, not cached.
+        if ($rows === null) {
+            return null;
+        }
+
+        // The detector row came back, so rows were dropped. Refuse, and
+        // cache nothing — an incomplete list must never be served again.
+        if (count($rows) > $limit) {
+            return null;
+        }
+
+        $ids = [];
+        foreach ($rows as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        wp_cache_set($genKey, $ids, self::NONOPEN_CACHE_GROUP, self::NONOPEN_CACHE_TTL);
+
         return $ids;
     }
 
