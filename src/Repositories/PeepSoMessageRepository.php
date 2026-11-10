@@ -180,6 +180,16 @@ final class PeepSoMessageRepository
      * Bounded by INBOX_BATCH_MAX (100) which already exceeds the inbox
      * `per_page` ceiling (50).
      *
+     * ⚠ #122: unread messages whose AUTHOR the viewer has blocked do
+     * not count. The exclusion is a correlated `NOT EXISTS`, never a
+     * join onto `wp_posts`: a join would silently drop any recipient
+     * row whose post is missing, changing the count for every viewer
+     * including those who block nobody. With `NOT EXISTS` a missing
+     * post makes the subquery empty, the predicate true, and the row
+     * still counts - so the only behaviour that changes is the one
+     * this issue asks for. The predicate is one-directional: "the
+     * viewer blocks the author", never the reverse.
+     *
      * @param list<int> $rootMsgIds
      * @return array<int, int> root_msg_id => unread count
      */
@@ -204,18 +214,29 @@ final class PeepSoMessageRepository
         global $wpdb;
         $placeholders = implode(',', array_fill(0, count($ids), '%d'));
 
+        // #122: the viewer id is bound twice - once for their own
+        // recipient rows, once for the blocked-sender exclusion.
         $args = $ids;
         array_unshift($args, $userId);
+        $args[] = $userId;
 
         /** @var list<array{mrec_parent_id: string, c: string}> $rows */
         $rows = $wpdb->get_results(
             $wpdb->prepare(
                 "SELECT mrec_parent_id, COUNT(*) AS c
-                 FROM {$wpdb->prefix}peepso_message_recipients
+                 FROM {$wpdb->prefix}peepso_message_recipients r
                  WHERE mrec_user_id = %d
                    AND mrec_viewed = 0
                    AND mrec_deleted = 0
                    AND mrec_parent_id IN ({$placeholders})
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM {$wpdb->posts} p
+                         JOIN {$wpdb->prefix}peepso_blocks b
+                           ON b.blk_blocked_id = p.post_author
+                        WHERE p.ID = r.mrec_msg_id
+                          AND b.blk_user_id = %d
+                   )
                  GROUP BY mrec_parent_id",
                 ...$args
             ),
@@ -230,10 +251,35 @@ final class PeepSoMessageRepository
     }
 
     /**
-     * Total unread DMs across all of the viewer's conversations — for
-     * the global header badge. Wraps PeepSoMessageRecipients's existing
-     * helper so we honor the same "exclude muted" + "exclude deleted-
-     * user" filters PeepSo's notification surface uses.
+     * Number of the viewer's CONVERSATIONS that hold at least one
+     * unread message — for the global header badge.
+     *
+     * ⚠⚠ #122 replaced the `PeepSoMessageRecipients::get_unread_messages_count`
+     * wrap with BCC-owned SQL, because that helper exposes no filter
+     * and the blocked-sender exclusion cannot be applied from outside
+     * it. The two PeepSo exclusions it provided are reproduced here
+     * DELIBERATELY VERBATIM in shape — muted conversations, and
+     * conversations carrying a participant row for a user who no
+     * longer exists — because `docs/api-contract-v1.md` documents both
+     * as contract for `GET /me/messages/unread-count`.
+     *
+     * ⚠ That includes reproducing a latent PeepSo defect rather than
+     * quietly fixing it: the deleted-participant clause is a `NOT IN`
+     * over a subquery, so a NULL `mpart_msg_id` would make the whole
+     * predicate UNKNOWN and the badge read 0. Fixing it here would
+     * change the badge for reasons unrelated to #122, so it is left
+     * exactly as PeepSo has it and recorded as a separate concern.
+     *
+     * ⚠ The count is CONVERSATION-level, which is why the blocked
+     * exclusion filters ROWS before `GROUP BY`: a conversation holding
+     * one unread message from a blocked sender and one from anybody
+     * else must still count 1. Subtracting blocked messages from a
+     * conversation count would get that case wrong.
+     *
+     * ⚠ The `class_exists` guard and its degradation metric are kept
+     * even though the SQL no longer needs PeepSo's class: the method's
+     * "PeepSo absent => 0" contract and the `peepso_absence` signal are
+     * pre-existing behaviour, and #122 is not the place to change them.
      */
     public static function getUnreadConversationCountForUser(int $userId): int
     {
@@ -249,8 +295,40 @@ final class PeepSoMessageRepository
             }
             return 0;
         }
-        $recipients = new \PeepSoMessageRecipients();
-        return (int) $recipients->get_unread_messages_count($userId);
+
+        global $wpdb;
+        $recipients   = $wpdb->prefix . 'peepso_message_recipients';
+        $participants = $wpdb->prefix . 'peepso_message_participants';
+        $blocks       = $wpdb->prefix . 'peepso_blocks';
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM (
+                 SELECT r.mrec_parent_id
+                   FROM {$recipients} r
+                  WHERE r.mrec_user_id = %d
+                    AND r.mrec_viewed = 0
+                    AND r.mrec_deleted = 0
+                    AND r.mrec_parent_id NOT IN (
+                        SELECT mpart_msg_id FROM {$participants}
+                         WHERE mpart_user_id NOT IN (SELECT ID FROM {$wpdb->users})
+                    )
+                    AND r.mrec_parent_id NOT IN (
+                        SELECT mpart_msg_id FROM {$participants}
+                         WHERE mpart_muted = 1 AND mpart_user_id = %d
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM {$wpdb->posts} p
+                          JOIN {$blocks} b ON b.blk_blocked_id = p.post_author
+                         WHERE p.ID = r.mrec_msg_id
+                           AND b.blk_user_id = %d
+                    )
+                  GROUP BY r.mrec_parent_id
+             ) g",
+            $userId,
+            $userId,
+            $userId
+        ));
     }
 
     /**
