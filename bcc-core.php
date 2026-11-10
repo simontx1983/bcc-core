@@ -811,6 +811,35 @@ add_filter('bcc_system_health', function (array $health): array {
             'lease_reaped',
             'delivery_context_unsupported',
         ],
+        // collection_persist — CollectionPersistBatch::persist(), the single
+        // writer behind wallet seeding, the chain-refresh cron and the gallery
+        // refresh. A lost collection write is the exact class of silent
+        // partial failure this surface exists to expose: bcc-trust #219 made
+        // the losses COUNTABLE and logged them, but a log line is not a health
+        // signal — nothing aggregates it, so Golden Paths stayed green while
+        // writes were being dropped.
+        //   - write_failed: any `failed > 0` in a batch. The other rows in
+        //     that batch did land, so this is partial loss, not a dead path.
+        //   - batch_total_failure: `failed === total` with `total > 0` — the
+        //     wallet made NO progress at all. Distinguished from write_failed
+        //     because "some rows lost" and "nothing written" need different
+        //     responses: the second usually means the table or connection is
+        //     the problem rather than the data.
+        //   - watermark_withheld: the gallery refresh declined to advance
+        //     `markHoldingsRefreshed()` after a failed batch, deliberately
+        //     leaving the wallet eligible for retry. ⚠ This one is the
+        //     SAFEGUARD WORKING, not a fault — it is recorded so a wallet
+        //     that never stops retrying is visible, because the retry is
+        //     silent by design.
+        // ⚠ BAKE BEFORE ALERTING. Expected steady state is zero, but zero has
+        // never been OBSERVED over a real window here, and this codebase has
+        // been burned by thresholds set on a metric whose normal range nobody
+        // measured. Record first; attach a threshold later.
+        'collection_persist'   => [
+            'write_failed',
+            'batch_total_failure',
+            'watermark_withheld',
+        ],
     ]);
 
     return $health;
