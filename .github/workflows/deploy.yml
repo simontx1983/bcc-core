@@ -228,3 +228,56 @@ jobs:
           probe "/wp-json/bcc/v1/ranks"
           probe "/wp-json/bcc/v1/search/groups?q=ping"
           probe "/wp-json/bcc/v1/cards?per_page=1"
+
+      # ── STRANDED .git / .github IN THE DEPLOY TARGET (bcc-trust #286/#365) ─
+      # `--exclude` without a leading slash matches at ANY depth, and rsync
+      # never deletes what it was told to exclude. So anything named .git or
+      # .github already sitting in the target is permanently stranded: not
+      # transferred, not deleted, and invisible to every manifest check that
+      # applies the same excludes.
+      #
+      # Measured 2026-11-10, before this guard existed: production AND staging
+      # each carried 522 stranded files under this plugin — a 519-file .git
+      # frozen at 2f4492ec (2026-04-29) plus three
+      # vendor/php-stubs/wordpress-stubs/.github workflow files — against 135
+      # shipped paths, so 657 files on disk. Both were backed up and removed by
+      # hand that day. bcc-trust and bcc-search were already clean. This step
+      # is what stops it coming back unnoticed.
+      #
+      # ⛔ This step deliberately does NOT touch the excludes. Un-excluding
+      # .git would be far worse than the orphan: at this point in the job the
+      # runner's .git/config still holds the credential actions/checkout wrote
+      # (http.https://github.com/.extraheader = AUTHORIZATION: basic ***).
+      # That is only unset by the post-checkout step, which runs AFTER the
+      # rsync — so un-excluding .git would publish a live token into a
+      # web-served directory.
+      #
+      # It runs LAST, after the health probe, on purpose. A stranded path is
+      # inert: it is not served as code and does not change the shipped bytes.
+      # So the steps that DO speak to whether the release is sound must run
+      # first and be seen. Sitting before them, this guard would skip
+      # `Confirm deployed version` and the health probe on code that has
+      # ALREADY shipped — hiding a real outage behind a housekeeping failure,
+      # and leaving the operator with a red run and no idea whether the deploy
+      # itself worked.
+      - name: Refuse a target that still holds .git or .github
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${{ secrets.DEPLOY_PORT }}" \
+            -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash -s <<REMOTE
+          T="${{ secrets.DEPLOY_BASE }}/${{ steps.t.outputs.subpath }}"
+          # ⚠ ANTI-VACUITY. A guard that finds nothing because it looked in the
+          # wrong place reads exactly like a clean target, and this project has
+          # shipped that failure before. Prove we are inside the deployed
+          # plugin before a zero is allowed to mean anything.
+          test -d "\$T" || { echo "::error::deploy guard: \$T is not a directory"; exit 1; }
+          test -f "\$T/$PLUGIN.php" || { echo "::error::deploy guard: \$T holds no $PLUGIN.php - wrong path, refusing to report it clean"; exit 1; }
+          FOUND=\$(find "\$T" \( -name .git -o -name .github \) -print | LC_ALL=C sort)
+          if [ -n "\$FOUND" ]; then
+            printf '%s\n' "\$FOUND" | sed 's|^|  stranded: |'
+            N=\$(printf '%s\n' "\$FOUND" | wc -l)
+            echo "::error::deploy guard: \$N stranded path(s) in the deploy target. rsync cannot clear these - it excludes them, and --delete skips what it excludes. Remove each listed path once by hand on the server. Do NOT un-exclude .git."
+            exit 1
+          fi
+          echo "deploy guard: no stranded .git/.github under \$T"
+          REMOTE
