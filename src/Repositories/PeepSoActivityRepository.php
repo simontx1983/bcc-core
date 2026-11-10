@@ -134,7 +134,8 @@ final class PeepSoActivityRepository
      * @param ?string $hallFeed Ranked-Hall channel selector for the GROUP-SCOPED path only (Rank Phase 7, §21.3). Only applies when `$onlyForGroupId !== null`; ignored (no-op) on every global path. 'ranked' → INNER JOIN on `_bcc_ranked_feed = '1'` post-meta so ONLY ranked-channel posts surface. 'main' → LEFT JOIN + IS NULL anti-join so ranked-channel posts are EXCLUDED from the group's main feed. null = no channel filter (legacy callers unchanged). bcc-trust's FeedRankingService passes 'ranked'/'main' for /groups/{id}/feed; the write-side gate (Journeyman+ AND Neutral+ AND Hall member) lives in bcc-trust — bcc-core stays unaware of the policy, same coupling-avoidance pattern as the exclusion channels above.
      * @param int|null $onlyForPageId           null = no page filter; positive int = only activities whose backing wp_post carries {@see self::PAGE_TARGET_META} post-meta matching this page; non-positive = no posts (returns []). Used by /bcc/v1/pages/{id}/feed. INNER JOIN on the marker alone: the author's current standing is deliberately not consulted here. Pure narrowing — the global-feed visibility gate below still applies, since this path leaves `$onlyForGroupId` null.
      * @param list<int>|null $restrictedGroupIds ENFORCED group exclusion — drops any activity whose backing wp_post is in one of these PeepSo groups. null = no list supplied; [] = supplied and empty ("restricted from nothing"); the two are NOT interchangeable, see `$groupGateMode`. ⚠ Deliberately NOT the same thing as `$excludedGroupIds` above, which is INERT: that one is a no-op kept for caller compatibility, so an exclusion passed there filters NOTHING. Use THIS param when a read must actually hide group content — the profile Blog tab (`/users/{handle}/blog`) passes the viewer's restricted-group list so a blog written inside a group the viewer may not see cannot surface on a public profile. Enforced as a per-post `NOT EXISTS` subquery, NOT a join: a post carrying two `peepso_group_id` rows (one restricted, one allowed) is DROPPED, where a join plus `NOT IN` would have let the allowed row satisfy the predicate and `SELECT DISTINCT` would have collapsed it back in. A post in no group always survives. Ids are de-duplicated and integer-cast before binding. Capped at {@see self::RESTRICTED_GROUP_IDS_MAX} — a longer list is REFUSED and the global gate kept, never silently truncated. bcc-core stays unaware of WHY a group is restricted — bcc-trust computes the list, same coupling-avoidance pattern as `$excludedAuthorIds`.
-     * @param string|null $groupGateMode Which group-visibility rule this read wants, in place of the global-feed `public_all` gate. null (DEFAULT, every pre-existing caller) = unchanged: a group-tagged post reaches a non-group-scoped read only when it carries `_bcc_post_visibility = 'public_all'`. {@see self::GROUP_GATE_VIEWER_ACCESS} = "can the viewer see the group", for reading SOMEONE ELSE's profile Blog tab — HONOURED ONLY when `$restrictedGroupIds` is non-null and within the cap, so a caller whose lookup degraded and passed nothing keeps the stricter gate instead of leaking; it also applies the members_only parity clause, which needs `$viewerMemberGroupIds`. {@see self::GROUP_GATE_AUTHOR_SCOPED} = the author reading their OWN rows, where no deny list is required or consulted because every row the query can return is already theirs (and stays visible to them after they leave the group). ⚠ An unrecognised value relaxes NOTHING — this is deliberately not a boolean, because a boolean allowed `[]` to drop the gate and `[]` is also what a failed membership lookup produces. Ignored when `$onlyForGroupId !== null`, which has its own gate.
+     * @param string|null $groupGateMode Which group-visibility rule this read wants, in place of the global-feed `public_all` gate. null (DEFAULT, every pre-existing caller) = unchanged: a group-tagged post reaches a non-group-scoped read only when it carries `_bcc_post_visibility = 'public_all'`. {@see self::GROUP_GATE_VIEWER_ACCESS} = "can the viewer see the group", for reading SOMEONE ELSE's profile Blog tab — HONOURED ONLY when `$restrictedGroupIds` is non-null and within the cap, so a caller whose lookup degraded and passed nothing keeps the stricter gate instead of leaking; it also applies the members_only parity clause, which needs `$viewerMemberGroupIds`. {@see self::GROUP_GATE_AUTHOR_SCOPED} = the author reading their OWN rows, where no deny list is required or consulted because every row the query can return is already theirs (and stays visible to them after they leave the group). ⚠ AUTHOR_SCOPED is PROVEN, not trusted: it is honoured only when `$authorIds` is exactly one id and it equals `$viewerId`, so passing the mode on a site-wide read relaxes nothing. ⚠ An unrecognised value relaxes NOTHING — this is deliberately not a boolean, because a boolean allowed `[]` to drop the gate and `[]` is also what a failed membership lookup produces. Ignored when `$onlyForGroupId !== null`, which has its own gate.
+     * @param int $viewerId The viewer this read is for. Required to make {@see self::GROUP_GATE_AUTHOR_SCOPED} stick: that mode is honoured ONLY when `$authorIds` is exactly one id AND it equals this viewer, so the repository proves the read really is confined to the viewer's own rows instead of trusting a mode string. 0 (default) means "no viewer asserted", which makes AUTHOR_SCOPED a no-op. Not used by any other mode.
      * @param list<int>|null $viewerMemberGroupIds The groups the viewer BELONGS to. Only read on the {@see self::GROUP_GATE_VIEWER_ACCESS} path, where it carries the members_only parity rule: a post in one of these groups is visible at ANY visibility, while a post in a group the viewer merely can SEE (an open group they have not joined) is visible only at `public_group` / `public_all` — matching what the group feed already does for a non-member. Absent visibility meta counts as members_only and is therefore hidden from a non-member. null/[] = treat the viewer as a member of nothing, which is correct for an anonymous reader. Bounded by {@see self::RESTRICTED_GROUP_IDS_MAX}; over the bound the membership clause is dropped, which costs a member sight of their own groups' members_only posts and leaks nothing.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
@@ -155,7 +156,8 @@ final class PeepSoActivityRepository
         ?int $onlyForPageId = null,
         ?array $restrictedGroupIds = null,
         ?string $groupGateMode = null,
-        ?array $viewerMemberGroupIds = null
+        ?array $viewerMemberGroupIds = null,
+        int $viewerId = 0
     ): array {
         global $wpdb;
 
@@ -426,11 +428,28 @@ final class PeepSoActivityRepository
         $denyListUsable = $restrictedGroupIdsClean !== null
             && count($restrictedGroupIdsClean) <= self::RESTRICTED_GROUP_IDS_MAX;
 
-        $gateRelaxed = match ($groupGateMode) {
-            self::GROUP_GATE_AUTHOR_SCOPED => true,
-            self::GROUP_GATE_VIEWER_ACCESS => $denyListUsable,
-            // null, or anything unrecognised, relaxes nothing.
-            default => false,
+        // AUTHOR_SCOPED must PROVE it is author-scoped.
+        //
+        // The mode is just a string, so on its own it would let any caller
+        // drop the gate on a site-wide read with no deny list and no parity
+        // clause — the widest possible hole, opened by one argument. The
+        // claim is only honoured when the query really is confined to the
+        // viewer's own rows: exactly one author id, and that id is the
+        // viewer. A mismatched, absent or multi-author read relaxes
+        // nothing, so the repository verifies the premise instead of
+        // trusting the label.
+        $authorScopedProven = $groupGateMode === self::GROUP_GATE_AUTHOR_SCOPED
+            && $viewerId > 0
+            && is_array($authorIds)
+            && count($authorIds) === 1
+            && (int) reset($authorIds) === $viewerId;
+
+        $gateRelaxed = match (true) {
+            $authorScopedProven                              => true,
+            $groupGateMode === self::GROUP_GATE_VIEWER_ACCESS => $denyListUsable,
+            // null, an unproven author scope, or anything unrecognised
+            // relaxes nothing.
+            default                                          => false,
         };
 
         // ⚠ Group-scoped path with a SUPPLIED-but-unusable deny list: there
@@ -519,7 +538,14 @@ final class PeepSoActivityRepository
         // NOT applied for GROUP_GATE_AUTHOR_SCOPED — the author's own rows
         // are theirs to see whatever the visibility, and after they leave
         // the group.
-        if ($gateRelaxed && $groupGateMode === self::GROUP_GATE_VIEWER_ACCESS) {
+        // Global path only, matching the docblock. On the group-scoped path
+        // the caller already passes `$groupVisibilityIn` for a non-member,
+        // so this clause would only duplicate it — and a predicate that
+        // merely narrows is still a predicate the docblock did not promise.
+        if ($gateRelaxed
+            && $groupGateMode === self::GROUP_GATE_VIEWER_ACCESS
+            && $onlyForGroupId === null
+        ) {
             $memberGroupsClean = [];
             if ($viewerMemberGroupIds !== null) {
                 $memberGroupsClean = array_values(array_unique(array_map('intval', $viewerMemberGroupIds)));
@@ -545,17 +571,31 @@ final class PeepSoActivityRepository
                     . ' AND mg_pm.meta_value IN (' . $mgPlaceholders . '))';
             }
 
+            // PER-POST, not "any row qualifies". A post with duplicate
+            // visibility rows {members_only, public_group} would satisfy a
+            // bare EXISTS on the public values and be shown — the same
+            // per-row mistake the deny list had. So the post must have a
+            // public row AND no non-public row. WP writes one row per key,
+            // but nothing enforces it, and this is a visibility gate.
             $visPlaceholdersNm = implode(',', array_fill(0, count(self::NON_MEMBER_VISIBILITY), '%s'));
-            $alternatives[]    = 'EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' nmv_pm'
+            $alternatives[]    = '(EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' nmv_pm'
                 . ' WHERE nmv_pm.post_id = p.ID'
                 . ' AND nmv_pm.meta_key = \'_bcc_post_visibility\''
-                . ' AND nmv_pm.meta_value IN (' . $visPlaceholdersNm . '))';
+                . ' AND nmv_pm.meta_value IN (' . $visPlaceholdersNm . '))'
+                . ' AND NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' nmv_neg'
+                . ' WHERE nmv_neg.post_id = p.ID'
+                . ' AND nmv_neg.meta_key = \'_bcc_post_visibility\''
+                . ' AND nmv_neg.meta_value NOT IN (' . $visPlaceholdersNm . ')))';
 
             $where[] = '(' . implode(' OR ', $alternatives) . ')';
 
-            // Params in clause order: member ids, then visibility values.
+            // Params in clause order: member ids, then the visibility values
+            // twice — once for the positive EXISTS, once for the negative.
             foreach ($memberGroupsClean as $mgid) {
                 $params[] = (string) $mgid;
+            }
+            foreach (self::NON_MEMBER_VISIBILITY as $vis) {
+                $params[] = $vis;
             }
             foreach (self::NON_MEMBER_VISIBILITY as $vis) {
                 $params[] = $vis;

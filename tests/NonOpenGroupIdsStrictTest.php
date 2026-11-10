@@ -11,9 +11,27 @@ use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 
 /**
- * `$wpdb` double for the non-open-groups lookup. `get_col` returns
- * whatever the test queues, INCLUDING null — which is what WPDB returns
- * when a query ERRORS, and the distinction this whole suite is about.
+ * `$wpdb` double that models REAL WPDB failure behaviour.
+ *
+ * ⚠ The previous version of this double declared `get_col(): ?array` and
+ * returned null to mean "the query failed". Real WPDB never does that, and
+ * the double's lie is what let a broken `=== null` failure check pass its
+ * own tests. wp-includes/class-wpdb.php:3114-3121 builds
+ * `$new_array = array()`, fills it only `if ($this->last_result)`, and
+ * returns it unconditionally — so an errored query yields `[]`, identical
+ * to a legitimately empty result.
+ *
+ * This double therefore reproduces what WPDB actually does on error:
+ *
+ *   - `query()` returns FALSE (documented `int|bool`, "false on error");
+ *     on success it returns the row count, which is 0 for an empty result
+ *     and must NOT be mistaken for failure.
+ *   - `last_error` is set to a non-empty string, and `query()` clears it
+ *     first (real WPDB clears it in flush()).
+ *   - `get_col()` returns an ARRAY, always — `[]` after a failure.
+ *
+ * Any failure detection that works against this double works against
+ * WordPress.
  */
 final class ColWpdb
 {
@@ -21,10 +39,18 @@ final class ColWpdb
     public string $postmeta = 'wp_postmeta';
     public string $prefix   = 'wp_';
 
+    public string $last_error = '';
+
     public int $queryCount = 0;
 
-    /** @var list<string>|null */
-    public ?array $next = [];
+    /** Rows the next successful query yields. */
+    public array $next = [];
+
+    /** When true, the next query ERRORS the way WPDB errors. */
+    public bool $fail = false;
+
+    /** @var list<string> */
+    private array $lastResult = [];
 
     /** @param mixed ...$args */
     public function prepare(string $query, ...$args): string
@@ -45,13 +71,41 @@ final class ColWpdb
 
     /**
      * @param string $sql
-     * @return list<string>|null
+     * @return int|false row count, or false on error — exactly as WPDB
      */
-    public function get_col($sql): ?array
+    public function query($sql)
     {
         ++$this->queryCount;
 
-        return $this->next;
+        // flush(): last_error and last_result are cleared first.
+        $this->last_error = '';
+        $this->lastResult = [];
+
+        if ($this->fail) {
+            $this->last_error = 'WordPress database error: simulated failure';
+
+            return false;
+        }
+
+        $this->lastResult = array_values($this->next);
+
+        return count($this->lastResult);
+    }
+
+    /**
+     * ALWAYS an array, like the real thing. With a null $sql it reads the
+     * already-fetched last_result without re-querying.
+     *
+     * @param string|null $sql
+     * @return list<string>
+     */
+    public function get_col($sql = null): array
+    {
+        if ($sql !== null && $sql !== '') {
+            $this->query($sql);
+        }
+
+        return $this->lastResult;
     }
 }
 
@@ -84,10 +138,12 @@ final class NonOpenGroupIdsStrictTest extends TestCase
         \BccTestPersistentCache::reset();
     }
 
-    private function installWpdb(?array $next): ColWpdb
+    /** @param list<string> $next */
+    private function installWpdb(array $next, bool $fail = false): ColWpdb
     {
         $wpdb            = new ColWpdb();
         $wpdb->next      = $next;
+        $wpdb->fail      = $fail;
         $GLOBALS['wpdb'] = $wpdb;
 
         return $wpdb;
@@ -104,12 +160,13 @@ final class NonOpenGroupIdsStrictTest extends TestCase
      */
     public function testAFailedLookupIsNotCachedAndTheNextCallReQueries(): void
     {
-        $wpdb = $this->installWpdb(null); // query error
+        $wpdb = $this->installWpdb([], true); // query ERRORS like WPDB does
 
         self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIds(500));
         self::assertSame(1, $wpdb->queryCount);
 
         // Same process, same cache: the recovered query must be consulted.
+        $wpdb->fail = false;
         $wpdb->next = ['7', '9'];
 
         self::assertSame([7, 9], PeepSoGroupRepository::getNonOpenGroupIds(500));
@@ -137,7 +194,7 @@ final class NonOpenGroupIdsStrictTest extends TestCase
 
     public function testStrictReturnsNullOnAFailedQuery(): void
     {
-        $this->installWpdb(null);
+        $this->installWpdb([], true);
 
         self::assertNull(PeepSoGroupRepository::getNonOpenGroupIdsStrict(500));
     }
@@ -180,11 +237,12 @@ final class NonOpenGroupIdsStrictTest extends TestCase
 
     public function testStrictDoesNotCacheAFailure(): void
     {
-        $wpdb = $this->installWpdb(null);
+        $wpdb = $this->installWpdb([], true);
 
         self::assertNull(PeepSoGroupRepository::getNonOpenGroupIdsStrict(500));
         self::assertSame(1, $wpdb->queryCount);
 
+        $wpdb->fail = false;
         $wpdb->next = ['7'];
 
         self::assertSame([7], PeepSoGroupRepository::getNonOpenGroupIdsStrict(500));

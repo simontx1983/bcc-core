@@ -45,9 +45,13 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
         private const MEMBER_ALT = "EXISTS (SELECT 1 FROM wp_postmeta mg_pm WHERE mg_pm.post_id = p.ID"
             . " AND mg_pm.meta_key = 'peepso_group_id' AND mg_pm.meta_value IN ('3','4'))";
 
-        private const PUBLIC_VIS_ALT = "EXISTS (SELECT 1 FROM wp_postmeta nmv_pm WHERE nmv_pm.post_id = p.ID"
+        // Per-post: a public row must exist AND no non-public row may.
+        private const PUBLIC_VIS_ALT = "(EXISTS (SELECT 1 FROM wp_postmeta nmv_pm WHERE nmv_pm.post_id = p.ID"
             . " AND nmv_pm.meta_key = '_bcc_post_visibility'"
-            . " AND nmv_pm.meta_value IN ('public_group','public_all'))";
+            . " AND nmv_pm.meta_value IN ('public_group','public_all'))"
+            . " AND NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_neg WHERE nmv_neg.post_id = p.ID"
+            . " AND nmv_neg.meta_key = '_bcc_post_visibility'"
+            . " AND nmv_neg.meta_value NOT IN ('public_group','public_all')))";
 
         private const SELECT_PREFIX = 'SELECT DISTINCT a.act_id, p.post_author AS act_user_id, a.act_owner_id,'
             . ' a.act_module_id, a.act_external_id, p.post_date_gmt AS act_time, a.act_access,'
@@ -375,7 +379,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
             PeepSoActivityRepository::getActivities(
                 [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [],
-                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null, 42
             );
 
             self::assertStringNotContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
@@ -464,7 +468,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
                 PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
             );
 
-            self::assertStringContainsString('OR EXISTS (SELECT 1 FROM wp_postmeta nmv_pm', $wpdb->lastSql);
+            self::assertStringContainsString('OR (EXISTS (SELECT 1 FROM wp_postmeta nmv_pm', $wpdb->lastSql);
             self::assertStringNotContainsString('nmv_pm.meta_value IS NULL', $wpdb->lastSql);
             self::assertStringNotContainsString('LEFT JOIN wp_postmeta nmv_pm', $wpdb->lastSql);
         }
@@ -539,6 +543,125 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
          * render into the visibility IN list and vice versa, which the
          * rendering double catches as a mismatch.
          */
+
+        // ── AUTHOR_SCOPED must PROVE itself ─────────────────────────────
+
+        /**
+         * FAILS IF THE PROOF IS DROPPED. The mode is only a string, so on
+         * its own it would let any caller drop the gate on a site-wide read
+         * with no deny list and no parity clause — the widest hole in the
+         * whole surface, opened by one argument. These four pin that the
+         * repository checks the premise instead of trusting the label.
+         */
+        public function testAuthorScopedRelaxesNothingWithoutAViewer(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, null,
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null, 0
+            );
+
+            self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
+        }
+
+        public function testAuthorScopedRelaxesNothingWhenTheViewerIsNotTheAuthor(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, null,
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null, 7
+            );
+
+            self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
+        }
+
+        public function testAuthorScopedRelaxesNothingOnAMultiAuthorRead(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42, 43], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, null,
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null, 42
+            );
+
+            self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
+        }
+
+        /**
+         * A site-wide read ($authorIds null) claiming author scope is the
+         * dangerous shape: it would expose every group post on the site.
+         */
+        public function testAuthorScopedRelaxesNothingOnASiteWideRead(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                null, null, null, null, 10, null, null, null, null, null, null, null, null, null,
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null, 42
+            );
+
+            self::assertStringContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
+        }
+
+        public function testAuthorScopedIsHonouredWhenTheViewerIsProvenToBeTheAuthor(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, null,
+                PeepSoActivityRepository::GROUP_GATE_AUTHOR_SCOPED, null, 42
+            );
+
+            self::assertStringNotContainsString(self::PUBLIC_ALL_GATE, $wpdb->lastSql);
+            self::assertStringContainsString('p.post_author IN (42)', $wpdb->lastSql);
+        }
+
+        // ── The two LOWs ────────────────────────────────────────────────
+
+        /**
+         * The visibility test must be PER POST. A post with duplicate
+         * visibility rows {members_only, public_group} would satisfy a bare
+         * EXISTS on the public values and be shown — the same per-row
+         * mistake the deny list had. Pinned by requiring the negative
+         * subquery alongside the positive one.
+         */
+        public function testVisibilityAlternativeIsPerPostNotAnyRow(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                [42], ['blog'], null, null, 11, null, null, null, null, null, null, null, null, [7],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
+            );
+
+            self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_neg', $wpdb->lastSql);
+            self::assertStringContainsString(
+                "nmv_neg.meta_value NOT IN ('public_group','public_all')",
+                $wpdb->lastSql
+            );
+        }
+
+        /**
+         * The parity clause is documented as global-path only, and the
+         * group-scoped path already receives $groupVisibilityIn from its
+         * caller. Code and docblock must agree.
+         */
+        public function testParityClauseIsNotAddedOnTheGroupScopedPath(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities(
+                null, null, null, null, 10, null, null, 42, null, null, null, null, null, [7],
+                PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, [3, 4]
+            );
+
+            self::assertStringNotContainsString('nmv_pm', $wpdb->lastSql);
+            self::assertStringNotContainsString('mg_abs', $wpdb->lastSql);
+            self::assertStringContainsString("gm_pm.meta_value = '42'", $wpdb->lastSql);
+        }
+
         public function testParityClauseBindsMemberIdsBeforeVisibilityValues(): void
         {
             $wpdb = $this->installWpdb();

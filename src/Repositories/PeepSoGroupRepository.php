@@ -857,22 +857,40 @@ final class PeepSoGroupRepository
                  ORDER BY p.ID DESC
                  LIMIT %d";
 
-        /** @var list<numeric-string>|null $rows */
-        $rows = $wpdb->get_col($wpdb->prepare($sql, ...$params));
-
-        // ⚠ A FAILED QUERY MUST NOT BE CACHED. get_col returns null on
-        // error, which the loop below would flatten into [] — and caching
-        // that for NONOPEN_CACHE_TTL (10 min) would hold "no group is
-        // non-open" for every caller for ten minutes after one transient
-        // DB error. For a caller that uses this list as an exclusion, an
-        // empty list means "exclude nothing", so the cached failure reads
-        // as permission. Return the empty list for this request (callers
-        // already treat [] as "no exclusions", which is the pre-existing
-        // behaviour on the failure path) but leave the cache cold so the
-        // next request re-asks. Nothing changes on the success path.
-        if ($rows === null) {
+        // ⚠ A FAILED QUERY MUST NOT BE CACHED, and a failed query does NOT
+        // look like null.
+        //
+        // `get_col()` ALWAYS returns an array — wp-includes/class-wpdb.php
+        // builds `$new_array = array()`, fills it only `if
+        // ($this->last_result)`, and returns it unconditionally. On an
+        // error `query()` returns false and `flush()` has already emptied
+        // `last_result`, so get_col hands back `[]`. A `=== null` check for
+        // failure is DEAD CODE, and the `@var ...|null` annotation that
+        // used to sit here was simply wrong.
+        //
+        // That matters because caching the `[]` would hold "no group is
+        // non-open" for NONOPEN_CACHE_TTL (10 min), and for a caller using
+        // this list as an exclusion an empty list means "exclude nothing" —
+        // one transient DB error would read as permission for ten minutes.
+        //
+        // `query()` is the documented signal: `int|bool`, "false on error".
+        // It is checked instead of `last_error` alone because query() can
+        // return false from `!$this->ready` or an empty query BEFORE it
+        // calls flush(), leaving a stale (or empty) last_error behind.
+        // last_error is still consulted as a second signal.
+        $prepared = $wpdb->prepare($sql, ...$params);
+        $queryOk  = $wpdb->query($prepared);
+        if ($queryOk === false || (string) $wpdb->last_error !== '') {
+            // Return the empty list for THIS request — callers already
+            // treat [] as "no exclusions", the pre-existing failure-path
+            // behaviour — but leave the cache cold so the next request
+            // re-asks. Nothing changes on the success path.
             return [];
         }
+
+        // Reads the already-fetched last_result without re-querying.
+        /** @var list<numeric-string> $rows */
+        $rows = $wpdb->get_col(null);
 
         $ids = [];
         foreach ($rows as $raw) {
@@ -960,13 +978,20 @@ final class PeepSoGroupRepository
                  ORDER BY p.ID DESC
                  LIMIT %d";
 
-        /** @var list<numeric-string>|null $rows */
-        $rows = $wpdb->get_col($wpdb->prepare($sql, ...$params));
-
-        // Failure: not empty, not cached.
-        if ($rows === null) {
+        // Failure detection, and the reason it is NOT a null check: see the
+        // note in getNonOpenGroupIds. `get_col()` always returns an array,
+        // so an errored query arrives here as `[]` — which this method
+        // documents as "the query ran and nothing is non-open". Trusting
+        // that would be the worst case of all: an empty deny list that a
+        // caller has been told to believe, relaxing its gate.
+        $prepared = $wpdb->prepare($sql, ...$params);
+        $queryOk  = $wpdb->query($prepared);
+        if ($queryOk === false || (string) $wpdb->last_error !== '') {
             return null;
         }
+
+        /** @var list<numeric-string> $rows */
+        $rows = $wpdb->get_col(null);
 
         // The detector row came back, so rows were dropped. Refuse, and
         // cache nothing — an incomplete list must never be served again.
