@@ -65,6 +65,20 @@ final class PeepSoActivityRepository
     public const PAGE_TARGET_META = '_bcc_page_id';
 
     /**
+     * Ceiling on `$restrictedGroupIds`, for §3 bounded queries.
+     *
+     * The deny list is "non-public groups minus the viewer's memberships",
+     * so for an ANONYMOUS viewer it is every non-public group on the site
+     * and has no natural ceiling. Past this bound the list is refused and
+     * the global `public_all` gate is kept instead, which hides strictly
+     * MORE than the deny list would — degrading closed, never open. The
+     * value matches the 1000-row membership lookup the caller's own
+     * restricted-group resolver is already capped at, so a list that
+     * overflows here was built from a truncated membership set anyway.
+     */
+    public const RESTRICTED_GROUP_IDS_MAX = 1000;
+
+    /**
      * Explicit SELECT list — peepso_activities columns plus the three
      * fields synthesized from the wp_posts JOIN. Aliases keep the row
      * shape stable for the rest of the codebase (FeedItemNormalizer,
@@ -94,8 +108,8 @@ final class PeepSoActivityRepository
      * @param ?string $hashtag Optional hashtag filter (tag text WITHOUT the leading '#'). When a non-empty string, restricts the candidate set to activities whose backing wp_post.post_content contains the tag via `p.post_content LIKE '%#<tag>%'`. This mirrors how PeepSo itself associates a post with a hashtag (substring match on the rendered '#tag' token), so the filtered set is consistent with PeepSo's own `ht_count` accounting. null/'' = no hashtag filter. The filter is a pure narrowing predicate — it can never WIDEN the candidate set, so every other visibility / exclusion clause still applies in full.
      * @param ?string $hallFeed Ranked-Hall channel selector for the GROUP-SCOPED path only (Rank Phase 7, §21.3). Only applies when `$onlyForGroupId !== null`; ignored (no-op) on every global path. 'ranked' → INNER JOIN on `_bcc_ranked_feed = '1'` post-meta so ONLY ranked-channel posts surface. 'main' → LEFT JOIN + IS NULL anti-join so ranked-channel posts are EXCLUDED from the group's main feed. null = no channel filter (legacy callers unchanged). bcc-trust's FeedRankingService passes 'ranked'/'main' for /groups/{id}/feed; the write-side gate (Journeyman+ AND Neutral+ AND Hall member) lives in bcc-trust — bcc-core stays unaware of the policy, same coupling-avoidance pattern as the exclusion channels above.
      * @param int|null $onlyForPageId           null = no page filter; positive int = only activities whose backing wp_post carries {@see self::PAGE_TARGET_META} post-meta matching this page; non-positive = no posts (returns []). Used by /bcc/v1/pages/{id}/feed. INNER JOIN on the marker alone: the author's current standing is deliberately not consulted here. Pure narrowing — the global-feed visibility gate below still applies, since this path leaves `$onlyForGroupId` null.
-     * @param list<int>|null $restrictedGroupIds ENFORCED group exclusion — drops activities whose backing wp_post lives in one of these PeepSo groups. null/[] = no exclusion. ⚠ Deliberately NOT the same thing as `$excludedGroupIds` above, which is INERT: that one is a no-op kept for caller compatibility, so an exclusion passed there filters NOTHING. Use THIS param when a read must actually hide group content — the profile Blog tab (`/users/{handle}/blog`) passes the viewer's restricted-group list so a blog written inside a group the viewer may not see cannot surface on a public profile. Enforced in the WHERE clause as a LEFT JOIN + NULL-passthrough `NOT IN`, so a post in NO group is always preserved. bcc-core stays unaware of WHY a group is restricted — bcc-trust computes the list, same coupling-avoidance pattern as `$excludedAuthorIds`.
-     * @param bool $groupGateUsesRestrictedListOnly Replaces the global-feed group gate with the `$restrictedGroupIds` deny list, for the ONE read whose visibility rule is "can the viewer see the group" rather than "did the author syndicate this globally". false (DEFAULT, every pre-existing caller) = unchanged: a group-tagged post reaches a non-group-scoped read only when it carries `_bcc_post_visibility = 'public_all'`. true = that requirement is dropped and group access is decided ENTIRELY by `$restrictedGroupIds`; pass it from the profile Blog tab (`/users/{handle}/blog`), where a `members_only` blog MUST still be visible to the group's own members. ⚠ The two params are a PAIR on this path: true with no deny list means no group filtering at all, which is correct ONLY when the read is already scoped to the viewer's own authorship (the author sees their own group blogs even after leaving the group). Never pass true on a read that serves other people's group content unfiltered. Ignored when `$onlyForGroupId !== null`, which has its own gate.
+     * @param list<int>|null $restrictedGroupIds ENFORCED group exclusion — drops any activity whose backing wp_post is in one of these PeepSo groups. null = no list supplied; [] = supplied and empty ("restricted from nothing"); the two are NOT interchangeable, see `$groupGateUsesRestrictedListOnly`. ⚠ Deliberately NOT the same thing as `$excludedGroupIds` above, which is INERT: that one is a no-op kept for caller compatibility, so an exclusion passed there filters NOTHING. Use THIS param when a read must actually hide group content — the profile Blog tab (`/users/{handle}/blog`) passes the viewer's restricted-group list so a blog written inside a group the viewer may not see cannot surface on a public profile. Enforced as a per-post `NOT EXISTS` subquery, NOT a join: a post carrying two `peepso_group_id` rows (one restricted, one allowed) is DROPPED, where a join plus `NOT IN` would have let the allowed row satisfy the predicate and `SELECT DISTINCT` would have collapsed it back in. A post in no group always survives. Ids are de-duplicated and integer-cast before binding. Capped at {@see self::RESTRICTED_GROUP_IDS_MAX} — a longer list is REFUSED and the global gate kept, never silently truncated. bcc-core stays unaware of WHY a group is restricted — bcc-trust computes the list, same coupling-avoidance pattern as `$excludedAuthorIds`.
+     * @param bool $groupGateUsesRestrictedListOnly Replaces the global-feed group gate with the `$restrictedGroupIds` deny list, for the ONE read whose visibility rule is "can the viewer see the group" rather than "did the author syndicate this globally". false (DEFAULT, every pre-existing caller) = unchanged: a group-tagged post reaches a non-group-scoped read only when it carries `_bcc_post_visibility = 'public_all'`. true = that requirement is dropped and group access is decided ENTIRELY by `$restrictedGroupIds`; pass it from the profile Blog tab, where a `members_only` blog MUST still be visible to the group's own members. ⚠ FAIL-CLOSED: true is HONOURED ONLY when `$restrictedGroupIds` is non-null AND within the cap. Passing true with null, or with an over-long list, keeps the `public_all` gate — so "gate off AND nothing filtering" is unreachable, and a caller whose membership lookup degraded cannot turn this into a leak by passing nothing. An explicit `[]` IS honoured and does mean "no group is restricted for this viewer"; that is correct only on a read already scoped to the viewer's own authorship, which is why the degraded caller must pass null rather than `[]`. Ignored when `$onlyForGroupId !== null`, which has its own gate.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
      */
@@ -351,8 +365,40 @@ final class PeepSoActivityRepository
         // deny list below could never see those rows to judge them. With the
         // flag set, group access is decided entirely by $restrictedGroupIds.
         // Default false, so every pre-existing caller keeps this gate.
+        //
+        // ── Is the deny list fit to REPLACE the gate? ────────────────
+        //
+        // Decided here, before the gate, because dropping the gate is only
+        // safe when a real list takes over. FAIL-CLOSED on two degraded
+        // inputs, so the dangerous combination (gate off AND nothing
+        // filtering) cannot be reached by accident:
+        //
+        //   1. `null` while the flag is set. null means "no list supplied",
+        //      which is indistinguishable from "the caller's membership
+        //      lookup degraded and it passed us nothing". The gate stays.
+        //      ⚠ An EXPLICIT `[]` is deliberately NOT the same: it asserts
+        //      "this viewer is restricted from nothing", which the
+        //      author-scoped read (the author's own Blog tab, where every
+        //      row is already their own) legitimately wants. A caller whose
+        //      lookup failed must therefore pass null — or better, keep the
+        //      flag off — never `[]`.
+        //   2. A list longer than self::RESTRICTED_GROUP_IDS_MAX, which
+        //      would be an unbounded IN list for an anonymous viewer. The
+        //      gate stays, hiding strictly more than the list would.
+        //
+        // In both cases the result is the pre-existing 'public_all' gate:
+        // some rows a member was entitled to see are withheld, and nothing
+        // private is exposed.
+        $restrictedGroupIdsClean = null;
+        if ($restrictedGroupIds !== null) {
+            $restrictedGroupIdsClean = array_values(array_unique(array_map('intval', $restrictedGroupIds)));
+        }
+        $denyListUsable = $restrictedGroupIdsClean !== null
+            && count($restrictedGroupIdsClean) <= self::RESTRICTED_GROUP_IDS_MAX;
+        $gateRelaxed    = $groupGateUsesRestrictedListOnly && $denyListUsable;
+
         $groupVisibilityJoin = '';
-        if ($onlyForGroupId === null && !$groupGateUsesRestrictedListOnly) {
+        if ($onlyForGroupId === null && !$gateRelaxed) {
             $groupVisibilityJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' gx_pm
                                         ON gx_pm.post_id  = p.ID
                                        AND gx_pm.meta_key = \'peepso_group_id\'
@@ -381,20 +427,34 @@ final class PeepSoActivityRepository
         // LIMIT ordering that ActivityPageScopeTest pins. A dedicated alias
         // (`rg_pm`) rather than reusing the global path's `gx_pm`, because
         // that join exists only when `$onlyForGroupId === null` while this
-        // exclusion must hold on every path. `SELECT DISTINCT` below already
-        // guards the duplicate-meta row multiplication this join could add.
+        // exclusion must hold on every path.
         //
-        // Cast through (int) then (string): meta_value is varchar, and an
-        // id arriving as a numeric string must bind identically either way.
-        $restrictedGroupJoin = '';
-        if ($restrictedGroupIds !== null && $restrictedGroupIds !== []) {
-            $restrictedGroupJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' rg_pm
-                                        ON rg_pm.post_id  = p.ID
-                                       AND rg_pm.meta_key = \'peepso_group_id\' ';
-            $rgPlaceholders = implode(',', array_fill(0, count($restrictedGroupIds), '%s'));
-            $where[]        = '(rg_pm.meta_value IS NULL OR rg_pm.meta_value NOT IN (' . $rgPlaceholders . '))';
-            foreach ($restrictedGroupIds as $gid) {
-                $params[] = (string) (int) $gid;
+        // NOT EXISTS, decided PER POST rather than per meta row. WP
+        // convention is one `peepso_group_id` row per post but nothing
+        // enforces it, and a join-plus-NOT-IN would be evaluated per ROW:
+        // a post carrying {restricted, allowed} would have the allowed row
+        // satisfy the predicate, and SELECT DISTINCT would then collapse the
+        // duplicates back into one surviving item. The subquery asks the
+        // question the gate actually means — "is this post in ANY restricted
+        // group" — and needs no join, so nothing here can multiply rows.
+        //
+        //   - post in no group      → subquery matches nothing → kept
+        //   - post in allowed group → no restricted match      → kept
+        //   - post in a restricted group (even alongside an allowed one)
+        //                           → match → NOT EXISTS false → DROPPED
+        //
+        // Bound as WHERE params, so this cannot shift the
+        // joinParams → params → LIMIT ordering ActivityPageScopeTest pins.
+        // Cast through (int) then (string): meta_value is varchar, so an id
+        // arriving as a numeric string must bind identically either way.
+        if ($denyListUsable && $restrictedGroupIdsClean !== []) {
+            $rgPlaceholders = implode(',', array_fill(0, count($restrictedGroupIdsClean), '%s'));
+            $where[]        = 'NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' rg_pm'
+                            . ' WHERE rg_pm.post_id = p.ID'
+                            . ' AND rg_pm.meta_key = \'peepso_group_id\''
+                            . ' AND rg_pm.meta_value IN (' . $rgPlaceholders . '))';
+            foreach ($restrictedGroupIdsClean as $gid) {
+                $params[] = (string) $gid;
             }
         }
 
@@ -417,7 +477,6 @@ final class PeepSoActivityRepository
                   ' . $pageJoin . '
                   ' . $rankedJoin . '
                   ' . $groupVisibilityJoin . '
-                  ' . $restrictedGroupJoin . '
                  WHERE ' . implode(' AND ', $where) . '
                  ORDER BY p.post_date_gmt DESC, a.act_id DESC
                  LIMIT %d';
