@@ -199,32 +199,14 @@ final class PolkadotSignatureVerifier
      */
     private static function routeUrl(): string
     {
-        if (!defined('BCC_FRONTEND_ORIGIN')) {
+        // The first EXACT entry, never a `regex:` preview pattern — those are
+        // Origin-header matching rules, not usable URL bases (posting to
+        // "regex:^https://…/api/internal/…" fails every wallet verification).
+        $first = \BCC\Core\Support\FrontendOriginConfig::canonical();
+        if ($first === null) {
             return '';
         }
-        $raw = (string) constant('BCC_FRONTEND_ORIGIN');
-        if ($raw === '') {
-            return '';
-        }
-        // Take the first EXACT entry, skipping any `regex:` preview
-        // patterns. Those are Origin-header matching rules, not usable
-        // URL bases — posting to "regex:^https://…/api/internal/…" fails
-        // every wallet verification. bcc-trust's FrontendOrigin enforces
-        // the same rule for its consumers; this is bcc-core's own copy
-        // because the dependency runs trust -> core, never the reverse.
-        $first = '';
-        foreach (explode(',', $raw) as $entry) {
-            $entry = trim($entry);
-            if ($entry === '' || str_starts_with($entry, 'regex:')) {
-                continue;
-            }
-            $first = $entry;
-            break;
-        }
-        if ($first === '') {
-            return '';
-        }
-        return rtrim($first, '/') . self::ROUTE_PATH;
+        return $first . self::ROUTE_PATH;
     }
 
     /**

@@ -52,7 +52,7 @@ final class WalletIdentityService
         int $chainId,
         string $walletAddress
     ): array {
-        $challenge = WalletChallenge::generate($chainSlug);
+        $challenge = WalletChallenge::generate($chainSlug, WalletChallenge::PURPOSE_VERIFY);
 
         $payload = [
             'nonce'          => $challenge['nonce'],
@@ -119,14 +119,32 @@ final class WalletIdentityService
 
     // ── Anonymous challenge (wallet-as-credential auth) ─────────────────
 
+    /** Most live anonymous challenges read per address (one per chain). */
+    private const ANON_CANDIDATE_LIMIT = 20;
+
+    /** Seconds generateAnonymousChallenge() waits for its per-key lock. */
+    private const ANON_LOCK_WAIT = 2;
+
     /**
-     * Generate a wallet-signing challenge for an unauthenticated caller.
+     * Generate — or return the still-live — wallet sign-in challenge for an
+     * unauthenticated caller.
      *
      * Used by /auth/wallet-nonce — the entry point for both wallet-login
      * (existing user, wallet already linked) and wallet-signup (new user,
      * wallet about to be linked). No userId is bound to the challenge —
-     * the address itself is the namespace, since only the address-holder
+     * the address (+ chain) is the namespace, since only the address-holder
      * can produce a signature.
+     *
+     * F-25: a LIVE challenge is never overwritten. Anyone may call
+     * /auth/wallet-nonce for any address, so overwriting let a stranger
+     * replace the challenge a wallet owner was about to sign. A second
+     * request for the same (address, chain) now gets the same challenge
+     * back until it expires; that discloses nothing usable, since a
+     * signature from the wallet is still required. Challenges are stored
+     * per (address, chain), so a request for another chain neither
+     * replaces nor pins one: EVM addresses are shared across EVM chains.
+     * The peek-then-store runs under a per-key advisory lock; if the lock
+     * cannot be had the store proceeds (the pre-F-25 behaviour).
      *
      * Storage keyspace is disjoint from the authed challenges
      * (`bcc_wc_anon_*` vs. `bcc_wc_{userId}_*`) so an anonymous challenge
@@ -140,60 +158,109 @@ final class WalletIdentityService
         int $chainId,
         string $walletAddress
     ): array {
-        $challenge = WalletChallenge::generate($chainSlug);
+        $key    = self::anonymousChallengeKey($walletAddress, $chainId);
+        $locked = \BCC\Core\DB\AdvisoryLock::acquire($key, self::ANON_LOCK_WAIT);
 
-        $payload = [
-            'nonce'          => $challenge['nonce'],
-            'message'        => $challenge['message'],
-            'chain_slug'     => $chainSlug,
-            'chain_id'       => $chainId,
-            'wallet_address' => strtolower($walletAddress),
-            'expires_at'     => time() + self::CHALLENGE_TTL,
-        ];
+        try {
+            $live = ChallengeRepository::peek($key);
+            if ($live !== null) {
+                return [
+                    'nonce'          => (string) ($live['nonce'] ?? ''),
+                    'message'        => (string) ($live['message'] ?? ''),
+                    'chain_slug'     => (string) ($live['chain_slug'] ?? ''),
+                    'chain_id'       => (int) ($live['chain_id'] ?? 0),
+                    'wallet_address' => (string) ($live['wallet_address'] ?? ''),
+                    'expires_at'     => (int) ($live['expires_at'] ?? 0),
+                ];
+            }
 
-        $key = self::anonymousChallengeKey($walletAddress);
-        ChallengeRepository::store($key, $payload, self::CHALLENGE_TTL);
+            $challenge = WalletChallenge::generate($chainSlug, WalletChallenge::PURPOSE_SIGN_IN);
 
-        return $payload;
+            $payload = [
+                'nonce'          => $challenge['nonce'],
+                'message'        => $challenge['message'],
+                'chain_slug'     => $chainSlug,
+                'chain_id'       => $chainId,
+                'wallet_address' => strtolower($walletAddress),
+                'expires_at'     => time() + self::CHALLENGE_TTL,
+            ];
+
+            ChallengeRepository::store($key, $payload, self::CHALLENGE_TTL);
+
+            return $payload;
+        } finally {
+            if ($locked) {
+                \BCC\Core\DB\AdvisoryLock::release($key);
+            }
+        }
+    }
+
+    /**
+     * Every live anonymous challenge for an address — at most one per chain
+     * — in key order. Non-destructive.
+     *
+     * F-25: sign-in callers verify the signature against these BEFORE
+     * consuming anything, then consume only the challenge it verified
+     * against (consumeAnonymousChallenge with its chain id). So a junk
+     * request can no longer burn a wallet owner's pending challenge.
+     *
+     * Also returns a challenge stored under the pre-F-25 address-only key
+     * (it is a prefix of the per-chain keys), so challenges issued just
+     * before a deploy still work for their 5-minute life.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function peekAnonymousChallenges(string $walletAddress): array
+    {
+        return array_values(ChallengeRepository::peekByPrefix(
+            self::anonymousChallengePrefix($walletAddress),
+            self::ANON_CANDIDATE_LIMIT
+        ));
     }
 
     /**
      * Atomically retrieve and consume an anonymous challenge.
      *
-     * Mirrors consumeChallenge() but reads the anon keyspace. Returns
-     * null when the challenge doesn't exist, has expired, or was already
-     * consumed by a concurrent caller.
+     * With $chainId: consumes that chain's challenge — the one the caller
+     * verified a signature against. Without it (pre-F-25 callers): consumes
+     * the first live challenge for the address, whatever its chain.
+     *
+     * Returns null when no matching challenge exists, it has expired, or a
+     * concurrent caller consumed it first.
      *
      * @return array<string, mixed>|null
      */
-    public static function consumeAnonymousChallenge(string $walletAddress): ?array
+    public static function consumeAnonymousChallenge(string $walletAddress, ?int $chainId = null): ?array
     {
-        $key = self::anonymousChallengeKey($walletAddress);
+        $candidates = ChallengeRepository::peekByPrefix(
+            self::anonymousChallengePrefix($walletAddress),
+            self::ANON_CANDIDATE_LIMIT
+        );
 
-        $challenge = ChallengeRepository::consume($key);
-        if ($challenge === null) {
-            return null;
+        foreach ($candidates as $key => $payload) {
+            if ($chainId !== null && (int) ($payload['chain_id'] ?? 0) !== $chainId) {
+                continue;
+            }
+
+            $challenge = ChallengeRepository::consume($key);
+            if ($challenge === null || time() > (int) ($challenge['expires_at'] ?? 0)) {
+                return null;
+            }
+            return $challenge;
         }
 
-        if (time() > (int) ($challenge['expires_at'] ?? 0)) {
-            return null;
-        }
-
-        return $challenge;
+        return null;
     }
 
     /**
-     * Non-destructive view of an anonymous challenge — used by handlers
-     * that need to resolve chain metadata before handing off to the
-     * verify path that performs the atomic consume.
+     * Non-destructive view of an anonymous challenge (pre-F-25 callers):
+     * the first live one for the address, whatever its chain.
      *
      * @return array<string, mixed>|null
      */
     public static function peekAnonymousChallenge(string $walletAddress): ?array
     {
-        // Direct-DB peek so an object-cache drop-in cannot shadow the
-        // direct-write store(); pairs with consumeAnonymousChallenge().
-        return ChallengeRepository::peek(self::anonymousChallengeKey($walletAddress));
+        return self::peekAnonymousChallenges($walletAddress)[0] ?? null;
     }
 
     // ── Verification ────────────────────────────────────────────────────
@@ -376,14 +443,24 @@ final class WalletIdentityService
     /**
      * Build the transient key for an anonymous wallet challenge.
      *
-     * Format: bcc_wc_anon_{addressHash}
+     * Format: bcc_wc_anon_{addressHash}_{chainId} (F-25; before it, the key
+     * had no chain suffix — still readable via anonymousChallengePrefix()).
      * Disjoint from challengeKey() (which prefixes a userId) so an anon
      * challenge can never be replayed against the authed wallet-link
-     * path, and vice-versa. The address itself is the only namespace —
+     * path, and vice-versa. The address (+ chain) is the only namespace —
      * since only the address-holder can produce a valid signature, this
      * is sufficient.
      */
-    private static function anonymousChallengeKey(string $address): string
+    private static function anonymousChallengeKey(string $address, int $chainId): string
+    {
+        return self::anonymousChallengePrefix($address) . '_' . $chainId;
+    }
+
+    /**
+     * Key prefix shared by every anonymous challenge for an address — and
+     * the whole pre-F-25 key, which carried no chain.
+     */
+    private static function anonymousChallengePrefix(string $address): string
     {
         return 'bcc_wc_anon_' . md5(strtolower($address));
     }

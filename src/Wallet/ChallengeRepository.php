@@ -125,6 +125,41 @@ final class ChallengeRepository
     }
 
     /**
+     * Every LIVE challenge whose key starts with $keyPrefix, keyed by its
+     * transient key (without the `_transient_` prefix), in key order.
+     *
+     * Same direct-DB read as peek(), and the same filtering: corrupt and
+     * expired rows are skipped, never deleted here. Bounded by $limit.
+     * The prefix is LIKE-escaped (`_` in the key prefixes is a wildcard).
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    public static function peekByPrefix(string $keyPrefix, int $limit = 20): array
+    {
+        global $wpdb;
+
+        /** @var list<array{option_name: string, option_value: string}>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT option_name, option_value FROM {$wpdb->options}
+             WHERE option_name LIKE %s
+             ORDER BY option_name
+             LIMIT %d",
+            $wpdb->esc_like('_transient_' . $keyPrefix) . '%',
+            max(1, $limit)
+        ), ARRAY_A);
+
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $challenge = maybe_unserialize((string) ($row['option_value'] ?? ''));
+            if (!is_array($challenge) || time() > (int) ($challenge['expires_at'] ?? 0)) {
+                continue;
+            }
+            $out[substr((string) $row['option_name'], strlen('_transient_'))] = $challenge;
+        }
+        return $out;
+    }
+
+    /**
      * Atomically retrieve and delete a challenge.
      *
      * Always uses the DB-backed strategy: SELECT … FOR UPDATE + DELETE
