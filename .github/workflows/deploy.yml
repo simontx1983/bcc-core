@@ -167,8 +167,23 @@ jobs:
           # sweep. Collapses the mixed-tree window from the full transfer
           # duration to a sub-second rename pass — the window that produced
           # cross-plugin fatals mid-deploy (2026-08-05 incident).
+          # F-36: dev-only files are HIDDEN from the transfer (rsync `H`), not
+          # excluded. A plain --exclude also PROTECTS the path on the server, so
+          # copies already deployed would be stranded forever (exactly how .git
+          # was). `H` hides on the sender only, so --delete removes the existing
+          # server copies in this same run. Root-anchored (leading /) on purpose:
+          # an unanchored 'tests' would also drop vendor/*/tests/.
           rsync -az --delete --delete-delay --delay-updates \
             --exclude='.git' --exclude='.github' \
+            --filter='H /tests/' \
+            --filter='H /composer.json' \
+            --filter='H /composer.lock' \
+            --filter='H /phpstan.neon' \
+            --filter='H /phpstan-bootstrap.php' \
+            --filter='H /phpunit.xml.dist' \
+            --filter='H /phpunit-integration.xml.dist' \
+            --filter='H /.gitignore' \
+            --filter='H /.gitattributes' \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes" \
             ./ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:$TARGET/"
 
@@ -274,4 +289,15 @@ jobs:
             exit 1
           fi
           echo "deploy guard: no stranded .git/.github under \$T"
+          # F-36: the hidden dev-only paths must be gone from the target too —
+          # proves the first deploy with the new filters actually removed them.
+          LEFT=""
+          for p in tests composer.json composer.lock phpunit.xml.dist phpstan.neon; do
+            [ -e "\$T/\$p" ] && LEFT="\$LEFT \$p"
+          done
+          if [ -n "\$LEFT" ]; then
+            echo "::error::deploy guard: dev-only path(s) still in the deploy target:\$LEFT - the rsync H filters should have removed them."
+            exit 1
+          fi
+          echo "deploy guard: no dev-only paths under \$T"
           REMOTE
