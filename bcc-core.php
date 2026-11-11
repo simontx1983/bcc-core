@@ -238,109 +238,60 @@ add_action('added_user_meta',   $bccBustPeepSoMediaCache, 10, 3);
 add_action('updated_user_meta', $bccBustPeepSoMediaCache, 10, 3);
 add_action('deleted_user_meta', $bccBustPeepSoMediaCache, 10, 3);
 
-// ── Legacy option cleanup (post-consolidation one-shot) ─────────
-// bcc-disputes and bcc-onchain-signals were merged into bcc-trust.
-// Their option rows in wp_options (settings, counters, transients)
-// no longer have a consumer, so they bloat the table and risk
-// stale-cache collisions if any code path ever reads them again.
-// Gated on a version-scoped option sentinel so the sweep runs at
-// most once per install and is skipped for free out of the autoload
-// blob on every subsequent boot.
-add_action('init', function (): void {
-    $sentinel = 'bcc_core_legacy_cleanup_v1';
-
-    // Steady state: the sentinel lives in the autoload blob, which WP
-    // core loads once per request anyway → zero extra queries. (Written
-    // autoload=false originally, which cost one options query on every
-    // request on hosts without a persistent object cache.)
-    $alloptions = function_exists('wp_load_alloptions') ? wp_load_alloptions() : [];
-    if (isset($alloptions[$sentinel])) {
-        return;
-    }
-
-    if (get_option($sentinel)) {
-        // Sweep finished before the autoload fix — flip the existing row
-        // into the autoload blob once (WP 6.4+; on older cores we simply
-        // keep the status-quo one-query cost). Every subsequent request
-        // takes the free isset() path above.
-        if (function_exists('wp_set_option_autoload')) {
-            wp_set_option_autoload($sentinel, true);
-        }
-        return;
-    }
-
-    // Serialize across PHP workers — without the lock, two concurrent
-    // requests on a fresh deploy would both enter the DELETE path
-    // before either writes the sentinel.
-    if (!\BCC\Core\DB\AdvisoryLock::acquire($sentinel, 0)) {
-        return;
-    }
-
-    try {
-        // Re-check under lock in case another worker completed the
-        // sweep between our initial get_option() and acquire().
-        if (get_option($sentinel)) {
-            return;
-        }
-
-        // Only prefixes that were owned by the DELETED plugins are
-        // listed here. bcc_core_* and bcc_trust_* are still live.
-        // Transient twins (_transient_<key>, _transient_timeout_<key>)
-        // are included so expired transient metadata is also swept.
-        $legacyPrefixes = [
-            'bcc_disputes_',
-            'bcc_onchain_',
-            'bcc_signals_',
-            '_transient_bcc_disputes_',
-            '_transient_bcc_onchain_',
-            '_transient_bcc_signals_',
-            '_transient_timeout_bcc_disputes_',
-            '_transient_timeout_bcc_onchain_',
-            '_transient_timeout_bcc_signals_',
-        ];
-
-        $totalDeleted = 0;
-        $errors       = [];
-        foreach ($legacyPrefixes as $prefix) {
-            $deleted = \BCC\Core\Repositories\OptionCleanupRepository::deleteByPrefix($prefix);
-            if ($deleted === null) {
-                $errors[] = [
-                    'prefix' => $prefix,
-                    'error'  => \BCC\Core\Repositories\OptionCleanupRepository::lastError(),
-                ];
-                continue;
-            }
-            $totalDeleted += $deleted;
-        }
-
-        // Write the sentinel regardless of per-prefix errors — we don't
-        // want a single transient DB hiccup to loop this on every init.
-        // Errors are logged so operators can re-run manually if needed.
-        // Autoloaded: the sentinel is read on every request, it belongs
-        // in the autoload blob (value is small — three keys, errors
-        // bounded by the prefix list).
-        update_option($sentinel, [
-            'completed_at'  => gmdate('c'),
-            'total_deleted' => $totalDeleted,
-            'errors'        => $errors,
-        ], true);
-
-        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-            if (!empty($errors)) {
-                \BCC\Core\Log\Logger::warning('[bcc-core] legacy option cleanup completed with errors', [
-                    'total_deleted' => $totalDeleted,
-                    'errors'        => $errors,
-                ]);
-            } elseif ($totalDeleted > 0) {
-                \BCC\Core\Log\Logger::info('[bcc-core] legacy option cleanup', [
-                    'total_deleted' => $totalDeleted,
-                ]);
-            }
-        }
-    } finally {
-        \BCC\Core\DB\AdvisoryLock::release($sentinel);
-    }
-}, 5);
+// ┌─ LEGACY OPTION SWEEP — REMOVED 2026-11-11, DO NOT REINTRODUCE ──────┐
+// │ An `init` hook used to delete every wp_options row whose name began
+// │ with `bcc_disputes_`, `bcc_onchain_` or `bcc_signals_` (plus their
+// │ `_transient_` and `_transient_timeout_` twins), gated on the one-shot
+// │ sentinel `bcc_core_legacy_cleanup_v1`. Its stated premise was:
+// │
+// │     "Only prefixes that were owned by the DELETED plugins are
+// │      listed here."
+// │
+// │ ⚠⚠ THAT WAS FALSE FOR ALL THREE PREFIXES. bcc-disputes and
+// │ bcc-onchain-signals were MERGED INTO bcc-trust, not deleted, and the
+// │ merged code KEPT THE OLD OPTION AND TRANSIENT PREFIXES. They never
+// │ became dead; they changed owner. Measured against bcc-trust:
+// │
+// │   bcc_disputes_   7 live keys — auto_resolve_last_{run,success,
+// │                   failure}, reconcile_last_{run,success},
+// │                   constraint_missing, admin_notified_missing
+// │   bcc_onchain_    OnchainCircuitBreaker writes
+// │                   `bcc_onchain_last_success_<chainId>`, SignalFetcher
+// │                   reads it; plus indexer_stats, enrichment_stats,
+// │                   refresh_offset
+// │   bcc_signals_    SignalRepository's per-user transient
+// │                   `bcc_signals_u<userId>`
+// │
+// │ So the sweep would have deleted cron health timestamps, the breaker's
+// │ per-chain success markers, a schema-integrity warning flag together
+// │ with its already-notified guard, the refresh cursor, and every user's
+// │ signal cache.
+// │
+// │ ⚠ IT ESCAPED BY TIMING, NOT BY DESIGN. A read-only check of the
+// │ recorded sentinel confirmed the sweep had already run once and
+// │ removed nothing, so nothing needed restoring — it ran before any of
+// │ those keys existed and then made itself inert. The keys exist now. A
+// │ fresh install, or anything clearing the sentinel, would have hit all
+// │ of them. "It removed nothing, so it was harmless" is the wrong lesson:
+// │ the outcome was a property of WHEN it ran, not of the code.
+// │
+// │ ⚠ `OptionCleanupRepository::deleteByPrefix()` is NOT at fault and is
+// │ kept. It is a correct range delete (`>= prefix` to `< prefix.'~'`,
+// │ and `~` sorts above every letter, digit and `_`), so it would have
+// │ matched every key above. It did what it was told; the prefix list was
+// │ the defect.
+// │
+// │ ⭐ THE RULE, enforced by OptionSweepGuardTest: a sweep of anything
+// │ under `bcc_` must name EXACT KEYS, never a prefix. A prefix cannot
+// │ express "dead" here, because two of the three families are generated
+// │ per chain and per user — no literal keep-list could enumerate them,
+// │ and a new key would be swept again by a guard that looked like it
+// │ prevented exactly this.
+// │
+// │ The sentinel option is deliberately LEFT IN PLACE on existing
+// │ installs: with this code gone it is inert, and deleting it would be a
+// │ write for no benefit.
+// └─────────────────────────────────────────────────────────────┘
 
 // ── Rate-limit row cleanup ──────────────────────────────────────
 // Throttle's DB fallback and RateLimiter write rows to wp_options

@@ -67,6 +67,18 @@ final class OptionCleanupRepository
      */
     public static function deleteByPrefix(string $prefix, int $batchSize = 1000): ?int
     {
+        // ⚠⚠ READ THIS BEFORE PASSING A `bcc_` PREFIX. An `init` sweep used
+        // to delete `bcc_disputes_`, `bcc_onchain_` and `bcc_signals_` here
+        // on the grounds that those plugins had been removed. They were
+        // MERGED INTO bcc-trust, and the merged code kept the old option and
+        // transient prefixes — so all three are LIVE, and two of them are
+        // generated per chain and per user, which no literal keep-list can
+        // enumerate. See the removal tombstone in `bcc-core.php` and the
+        // rule in `OptionSweepGuardTest`: anything under `bcc_` must be
+        // swept by EXACT KEY, never by prefix.
+        //
+        // This method is correct and is not what went wrong; the prefix list
+        // was.
         global $wpdb;
 
         if ($prefix === '') {
