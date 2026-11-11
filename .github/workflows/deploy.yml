@@ -138,27 +138,21 @@ jobs:
           echo "Approved commit confirmed: $ACTUAL"
 
       - name: Set up SSH
+        env:
+          HK: ${{ secrets.DEPLOY_HOST_KEY }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # Prefer a PINNED host key (secret DEPLOY_HOST_KEY, captured once via
+          # PINNED host key only (secret DEPLOY_HOST_KEY, captured once via
           # `ssh-keyscan -p PORT HOST`): zero network, zero flake, and real
-          # MITM protection — re-scanning on every run made
-          # StrictHostKeyChecking=yes theater. Fallback: retried keyscan (the
-          # single un-retried scan failed ~50% of dispatches on this host;
-          # stderr was also discarded, which is why it never self-explained).
-          HK="${{ secrets.DEPLOY_HOST_KEY }}"
-          if [ -n "$HK" ]; then
-            printf '%s\n' "$HK" > ~/.ssh/known_hosts
-          else
-            for i in 1 2 3 4 5; do
-              ssh-keyscan -T 10 -p "${{ secrets.DEPLOY_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" > ~/.ssh/known_hosts && [ -s ~/.ssh/known_hosts ] && break
-              echo "keyscan attempt $i failed" >&2
-              sleep 2
-            done
-            [ -s ~/.ssh/known_hosts ] || { echo "::error::ssh-keyscan produced no host key after 5 attempts"; exit 1; }
-          fi
+          # MITM protection. F-43: the keyscan FALLBACK is gone — scanning on
+          # every run is trust-on-first-use, which makes the later
+          # StrictHostKeyChecking=yes theater, and it only ever ran when the
+          # secret was missing. A missing key now fails the deploy instead of
+          # silently trusting whatever answers on that IP.
+          [ -n "$HK" ] || { echo "::error::DEPLOY_HOST_KEY secret is not set - refusing to keyscan (trust-on-first-use). Capture it once with ssh-keyscan and store it as the secret."; exit 1; }
+          printf '%s\n' "$HK" > ~/.ssh/known_hosts
 
       - name: Deploy (plugin-scoped rsync, delayed delete + updates)
         run: |
