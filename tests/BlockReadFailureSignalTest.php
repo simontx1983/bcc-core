@@ -116,6 +116,86 @@ final class BlockReadFailureSignalTest extends TestCase
         );
     }
 
+    // ── ⚠⚠ query() FAILS WITHOUT last_error — the non-exhaustive case ─
+
+    /**
+     * ⚠⚠ `last_error` IS NOT AN EXHAUSTIVE FAILURE SIGNAL, which is why
+     * the probe checks `query()`'s own return value too.
+     *
+     * `wpdb::query()` has two paths that return FALSE WITHOUT setting
+     * `last_error`: the `! $this->ready` guard (a failed reconnect) and
+     * an empty result from the `query` filter. `get_var()`/`get_col()`
+     * call `query()` internally and DISCARD its return, so a probe
+     * relying on `last_error` alone would answer "not blocked" / `[]`
+     * on both — the exact fail-open this whole change exists to close,
+     * surviving in two places.
+     *
+     * ⚠ AND IT IS WORSE THAN A MISSING NULL. Both of those returns
+     * happen BEFORE `flush()`, so `last_result` is not cleared either
+     * and still holds the PREVIOUS query's rows. A probe that trusted
+     * `get_var()` there could read a stale value from an unrelated
+     * SELECT and answer a confident "BLOCKED". The double models that
+     * faithfully: a false return leaves its rows alone rather than
+     * helpfully emptying them.
+     *
+     * @param string $method
+     */
+    #[DataProvider('probeProvider')]
+    public function testAQueryFailureWithNoLastErrorIsStillUnknown(string $method): void
+    {
+        $this->wpdb->queryReturn  = false;   // query() failed
+        $this->wpdb->errorOnQuery = '';      // and set NO last_error
+        // Stale rows an earlier SELECT left behind, which the unflushed
+        // failure path would expose:
+        $this->wpdb->varToReturn  = 1;
+        $this->wpdb->colToReturn  = ['9'];
+
+        $out = PeepSoBlockRepository::$method(7, $method === 'getBlockedSetOrUnknown' ? [9] : 9);
+
+        $this->assertNull(
+            $out,
+            'query() returning false must be detected even with last_error empty, or the stale '
+            . 'rows above would be read as a confident answer.'
+        );
+    }
+
+    /**
+     * ⚠⚠ THE `=== false` vs `!$ok` TRAP, and it fails CLOSED, which
+     * makes it expensive. For a SELECT `query()` returns the ROW COUNT,
+     * so a legitimate "no such row" returns **0**. A probe written
+     * `if (!$ok)` would treat every genuine "not blocked" as a failed
+     * read — and with fail-closed callers that means withholding every
+     * message preview and refusing every send, permanently, for
+     * everyone who has blocked nobody. Which is almost everyone.
+     */
+    public function testZeroRowsIsNotAFailure(): void
+    {
+        $this->wpdb->queryReturn  = 0;     // SELECT matched nothing
+        $this->wpdb->errorOnQuery = '';
+        $this->wpdb->varToReturn  = null;  // ... and so no value
+        $this->wpdb->colToReturn  = [];
+
+        $this->assertFalse(
+            PeepSoBlockRepository::isBlockingOrUnknown(7, 9),
+            'Zero rows is a definite "not blocked", not a failed read.'
+        );
+        $this->assertFalse(PeepSoBlockRepository::isMutuallyBlockedOrUnknown(7, 9));
+        $this->assertSame([], PeepSoBlockRepository::getBlockedSetOrUnknown(7, [9]));
+    }
+
+    /**
+     * ⚠ The probe must issue the SQL through `query()` — not through
+     * `get_var($sql)`, whose discarded return is the whole defect. Pinned
+     * so nobody "simplifies" it back.
+     */
+    public function testTheProbeGoesThroughQueryNotThroughGetVar(): void
+    {
+        PeepSoBlockRepository::isBlockingOrUnknown(7, 9);
+
+        $this->assertCount(1, $this->wpdb->queried, 'The SQL must be run via query().');
+        $this->assertStringContainsString('blk_blocked_id = %d', $this->wpdb->queried[0]);
+    }
+
     // ── ⚠⚠ THE STALE-ERROR CONTROL, the one that matters most ───────
 
     /**

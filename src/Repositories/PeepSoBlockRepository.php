@@ -71,6 +71,47 @@ final class PeepSoBlockRepository
     }
 
     /**
+     * Run a SELECT and report whether its result can be TRUSTED.
+     *
+     * Returns true when the rows are this query's and may be read with
+     * `get_var(null)` / `get_col(null)`; false when the read failed and
+     * the caller must answer "unknown".
+     *
+     * ⚠⚠ WHY `query()` IS CALLED EXPLICITLY RATHER THAN LETTING
+     * `get_var($sql)` DO IT. `get_var()` and `get_col()` call `query()`
+     * internally and then DISCARD its return value — and
+     * `wpdb::query()` has failure paths that return false WITHOUT
+     * setting `last_error`, so `last_error` alone is NOT an exhaustive
+     * failure signal. In `class-wpdb.php` those are the `! $this->ready`
+     * guard (a failed reconnect) and an empty result from the `query`
+     * filter.
+     *
+     * ⚠⚠ AND BOTH OF THOSE RETURN **BEFORE** `flush()`, which is what
+     * makes it worse than a missing null: `last_result` is not cleared
+     * either, so it still holds the PREVIOUS query's rows. A probe that
+     * trusted `get_var()` there could read a stale value from an
+     * unrelated SELECT and answer a confident "blocked" — not merely
+     * "not blocked". Checking `query()`'s own return is the only way to
+     * see it.
+     *
+     * ⚠ THE COMPARISON MUST BE `=== false`, NOT `!$ok`. For a SELECT,
+     * `query()` returns the ROW COUNT, so a legitimate "no such row"
+     * returns 0 — and `!0` is true. Using a falsy test would report
+     * every genuine "not blocked" as a failed read, which under
+     * fail-closed callers means withholding every message and refusing
+     * every send. There is a test for exactly that.
+     */
+    private static function runProbe(string $sql): bool
+    {
+        global $wpdb;
+
+        self::clearLastError();
+        $ok = $wpdb->query($sql);
+
+        return $ok !== false && !self::lastReadFailed();
+    }
+
+    /**
      * Is $blockerId currently blocking $blockedId?
      *
      * One-way check — symmetric blocks are two rows. Use
@@ -128,27 +169,23 @@ final class PeepSoBlockRepository
         global $wpdb;
         $table = self::table();
 
-        self::clearLastError();
-
         // Existence probe, not COUNT(*): COUNT scans every matching row
         // (its LIMIT binds to the one aggregate row), SELECT 1 stops at
         // the first hit.
-        $found = $wpdb->get_var($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT 1 FROM {$table}
               WHERE blk_user_id = %d
                 AND blk_blocked_id = %d
               LIMIT 1",
             $blockerId,
             $blockedId
-        ));
+        );
 
-        // A null with an error is a FAILED read; a null without one is a
-        // genuine "no such row". That distinction is the whole point.
-        if ($found === null && self::lastReadFailed()) {
+        if (!self::runProbe($sql)) {
             return null;
         }
 
-        return $found !== null;
+        return $wpdb->get_var(null) !== null;
     }
 
     /**
@@ -184,23 +221,21 @@ final class PeepSoBlockRepository
         global $wpdb;
         $table = self::table();
 
-        self::clearLastError();
-
         // Existence probe — see isBlocking().
-        $found = $wpdb->get_var($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT 1 FROM {$table}
               WHERE (blk_user_id = %d AND blk_blocked_id = %d)
                  OR (blk_user_id = %d AND blk_blocked_id = %d)
               LIMIT 1",
             $userA, $userB,
             $userB, $userA
-        ));
+        );
 
-        if ($found === null && self::lastReadFailed()) {
+        if (!self::runProbe($sql)) {
             return null;
         }
 
-        return $found !== null;
+        return $wpdb->get_var(null) !== null;
     }
 
     /**
@@ -305,10 +340,13 @@ final class PeepSoBlockRepository
      * "withhold everything" degrades to placeholders on a DB error, which
      * is ugly, safe and self-correcting.
      *
-     * ⚠ `get_col()` never returns null in real `wpdb` (it builds and
-     * returns an array unconditionally), so unlike the `get_var()` probes
-     * above there is no null to inspect: `last_error` is the ONLY signal
-     * available, which is why it is cleared first and checked after.
+     * ⚠ `get_col()` never returns null in real `wpdb` — it builds and
+     * returns an array unconditionally — so there is no null to inspect
+     * here at all, and an empty array is indistinguishable from "no
+     * candidate is blocked". The failure signal therefore comes entirely
+     * from `runProbe()`, which checks `query()`'s OWN return value as
+     * well as `last_error`; see its docblock for why `last_error` alone
+     * is not exhaustive.
      *
      * ⚠ The early returns still answer `[]`, not null — no candidates
      * means a definite empty set, with no query issued and nothing to
@@ -347,19 +385,19 @@ final class PeepSoBlockRepository
         $table = self::table();
         $ph    = implode(',', array_fill(0, count($ids), '%d'));
 
-        self::clearLastError();
-
-        /** @var list<string>|null $rows */
-        $rows = $wpdb->get_col($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT blk_blocked_id FROM {$table}
               WHERE blk_user_id = %d
                 AND blk_blocked_id IN ({$ph})",
             ...array_merge([$blockerId], $ids)
-        ));
+        );
 
-        if (self::lastReadFailed()) {
+        if (!self::runProbe($sql)) {
             return null;
         }
+
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col(null);
 
         $out = [];
         foreach (($rows ?: []) as $raw) {

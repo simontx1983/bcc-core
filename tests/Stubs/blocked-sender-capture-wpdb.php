@@ -96,6 +96,53 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
             }
         }
 
+        /**
+         * What `query()` returns: the ROW COUNT for a SELECT, or FALSE
+         * for a failure.
+         *
+         * ⚠⚠ IT DEFAULTS TO 1, NOT TRUE, BECAUSE THE DISTINCTION IS THE
+         * BUG. Real `wpdb::query()` returns the row count for a SELECT,
+         * so a legitimate "no such row" returns **0** — and a caller
+         * testing `!$ok` instead of `$ok === false` would read every
+         * genuine "not blocked" as a failed read. The double can produce
+         * 0 so that trap is testable.
+         *
+         * @var int|bool
+         */
+        public $queryReturn = 1;
+
+        /** Every SQL string passed to `query()`. @var list<string> */
+        public array $queried = [];
+
+        /**
+         * Run a query, as `wpdb::query()` does.
+         *
+         * ⚠⚠ THE POINT OF THIS METHOD: real `wpdb::query()` has failure
+         * paths that return FALSE WITHOUT SETTING `last_error` — the
+         * `! $this->ready` guard and an empty result from the `query`
+         * filter — and BOTH return before `flush()`, so `last_result` is
+         * not cleared either and still holds the PREVIOUS query's rows.
+         * That is why `last_error` is not an exhaustive failure signal,
+         * and why the repository checks this return value. Setting
+         * `queryReturn = false` with `errorOnQuery = ''` reproduces
+         * exactly that case.
+         *
+         * @return int|bool
+         */
+        public function query(string $sql)
+        {
+            $this->queried[] = $sql;
+            $this->enterQuery();
+            if ($this->errorOnQuery !== '') {
+                return false;
+            }
+            // ⚠ A false return models the pre-flush bail, so the rows
+            // are deliberately left ALONE rather than cleared — a double
+            // that helpfully emptied them would hide the stale-read
+            // hazard this exists to expose.
+            return $this->queryReturn;
+        }
+
         /** @param mixed ...$args */
         public function prepare(string $query, ...$args): string
         {
@@ -104,10 +151,11 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
         }
 
         /**
-         * @param string $sql
+         * @param string|null $sql null reads the rows the last query
+         *                            left behind, as real wpdb does.
          * @return list<string>
          */
-        public function get_col($sql): array
+        public function get_col($sql = null): array
         {
             $this->enterQuery();
             // ⚠ Real `get_col()` returns an EMPTY ARRAY on failure, never
@@ -130,10 +178,11 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
         }
 
         /**
-         * @param string $sql
+         * @param string|null $sql null reads the rows the last query
+         *                            left behind, as real wpdb does.
          * @return int|string|null
          */
-        public function get_var($sql)
+        public function get_var($sql = null)
         {
             $this->enterQuery();
             // ⚠ NULL on failure, which is the same value a genuine "no
