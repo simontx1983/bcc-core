@@ -120,6 +120,9 @@ register_activation_hook(__FILE__, function () {
 // Developer group from the menu (pages stay reachable by URL).
 \BCC\Core\Admin\AdminTheme::register();
 \BCC\Core\Admin\AdminMenu::register();
+// Other plugins' notices (upsells, update nags) are dropped on BCC screens
+// only; BCC's own notices stay, every other wp-admin screen is untouched.
+\BCC\Core\Admin\ForeignNoticeFilter::register();
 
 // ── System Health admin page (Operator OS v1 Phase 2) ──────────
 // wp-admin renderer for /bcc/v1/system/health so operators don't

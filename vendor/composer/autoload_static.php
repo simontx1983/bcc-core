@@ -28,6 +28,7 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\Admin\\CronPage' => __DIR__ . '/../..' . '/src/Admin/CronPage.php',
         'BCC\\Core\\Admin\\DeveloperPage' => __DIR__ . '/../..' . '/src/Admin/DeveloperPage.php',
         'BCC\\Core\\Admin\\EnvBanner' => __DIR__ . '/../..' . '/src/Admin/EnvBanner.php',
+        'BCC\\Core\\Admin\\ForeignNoticeFilter' => __DIR__ . '/../..' . '/src/Admin/ForeignNoticeFilter.php',
         'BCC\\Core\\Admin\\HideWpDefaults' => __DIR__ . '/../..' . '/src/Admin/HideWpDefaults.php',
         'BCC\\Core\\Admin\\SystemHealthPage' => __DIR__ . '/../..' . '/src/Admin/SystemHealthPage.php',
         'BCC\\Core\\Contracts\\ChainReadInterface' => __DIR__ . '/../..' . '/src/Contracts/ChainReadInterface.php',
