@@ -948,6 +948,28 @@ final class PeepSoGroupRepository
      * An empty return is therefore trustworthy: it means the query ran
      * and no group is non-open.
      *
+     * ⚠ It also IGNORES `post_status`, unlike the lenient lookup: a
+     * trashed or draft secret group is still secret, and omitting it made
+     * the deny list under-inclusive, which is the leaking direction.
+     *
+     * ⚠⚠ CONSEQUENCE FOR THE CAP: trashed and draft non-open groups now
+     * count toward `$limit`. A site that has accumulated many trashed
+     * non-open groups therefore reaches truncation — and so a `null`
+     * answer — sooner than its live group count suggests. That degrades
+     * CLOSED (the caller keeps its stricter gate), so it is a
+     * reduced-visibility risk rather than a disclosure one, but it is a
+     * real change in when the bound bites. The live counts are worth
+     * knowing before this ships widely:
+     *
+     *     SELECT p.post_status, COUNT(*) AS groups
+     *       FROM wp_posts p
+     *       INNER JOIN wp_postmeta pm
+     *               ON pm.post_id = p.ID
+     *              AND pm.meta_key = 'peepso_group_privacy'
+     *      WHERE p.post_type = 'peepso-group'
+     *        AND pm.meta_value IN ('1','2')
+     *      GROUP BY p.post_status;
+     *
      * @return list<int>|null null = cannot answer; caller must fail closed
      */
     public static function getNonOpenGroupIdsStrict(int $limit = self::NONOPEN_DEFAULT_LIMIT): ?array
@@ -972,10 +994,25 @@ final class PeepSoGroupRepository
 
         $placeholders = implode(',', array_fill(0, count(self::NON_OPEN_PRIVACY_VALUES), '%s'));
 
+        // ⚠ NO post_status FILTER HERE, unlike the lenient lookup.
+        //
+        // A deny list must be OVER-inclusive to be safe, and filtering to
+        // `publish` made it under-inclusive: a TRASHED or draft secret
+        // group dropped out of the set, so its posts stopped being
+        // excluded. A trashed secret group is still secret — nothing about
+        // moving the group row to the trash makes its content public — and
+        // a caller that replaces its visibility gate with this list would
+        // then show those posts to anyone. Under-inclusion is the LEAKING
+        // direction, so this query asks only "is this group non-open",
+        // whatever state the group row is in.
+        //
+        // The lenient `getNonOpenGroupIds()` keeps its `publish` filter:
+        // the feed uses it as one filter among several, its callers are
+        // unchanged, and widening it there would alter feed behaviour for
+        // no safety gain.
         $params = [
             'peepso_group_privacy',
             self::POST_TYPE,
-            self::POST_STATUS,
         ];
         foreach (self::NON_OPEN_PRIVACY_VALUES as $val) {
             $params[] = $val;
@@ -989,7 +1026,6 @@ final class PeepSoGroupRepository
                        ON pm.post_id  = p.ID
                       AND pm.meta_key = %s
                  WHERE p.post_type   = %s
-                   AND p.post_status = %s
                    AND pm.meta_value IN ({$placeholders})
                  ORDER BY p.ID DESC
                  LIMIT %d";
