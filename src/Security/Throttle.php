@@ -613,8 +613,8 @@ final class Throttle
         if (defined('BCC_TRUSTED_PROXY_IPS') && BCC_TRUSTED_PROXY_IPS !== '') {
             $trusted = array_map('trim', explode(',', BCC_TRUSTED_PROXY_IPS));
 
-            if (in_array($remoteAddr, $trusted, true)) {
-                $ip = self::extractProxyClientIp();
+            if (self::isTrustedProxy($remoteAddr, $trusted)) {
+                $ip = self::extractProxyClientIp($trusted);
                 if ($ip !== null) {
                     return $ip;
                 }
@@ -637,8 +637,8 @@ final class Throttle
             )));
 
             if (!empty($trusted)) {
-                if (in_array($remoteAddr, $trusted, true)) {
-                    $ip = self::extractProxyClientIp();
+                if (self::isTrustedProxy($remoteAddr, $trusted)) {
+                    $ip = self::extractProxyClientIp($trusted);
                     if ($ip !== null) {
                         return $ip;
                     }
@@ -804,23 +804,52 @@ final class Throttle
      * allowlisted here (Modes 1/2) and that proxy fails to strip
      * CF-Connecting-IP, an attacker can spoof it through the proxy and
      * poison any IP's bucket. By restricting this extractor to standard
-     * forwarding headers (XFF, X-Real-IP), the explicit allowlist remains
+     * forwarding header (X-Forwarded-For), the explicit allowlist remains
      * safe even against proxies with sloppy header policies. Operators on
      * Cloudflare with an explicit BCC_TRUSTED_PROXY_IPS allowlist can rely
-     * on X-Forwarded-For (which CF also sends).
+     * on X-Forwarded-For (which CF also sends). X-Real-IP is not consulted
+     * (F-54): a client can send its own.
+     *
+     * @param list<string> $trusted the operator's trusted-proxy allowlist
      */
-    private static function extractProxyClientIp(): ?string
+    private static function extractProxyClientIp(array $trusted): ?string
     {
-        $headers = ['HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP'];
-        foreach ($headers as $header) {
-            if (!empty($_SERVER[$header])) {
-                $ip = trim(explode(',', $_SERVER[$header])[0]);
-                if (filter_var($ip, FILTER_VALIDATE_IP)) {
-                    return $ip;
+        // X-Forwarded-For is walked from the RIGHT (F-54). Each proxy APPENDS
+        // the peer it saw, so the leftmost entries are whatever the client
+        // chose to send; taking entry [0] let any client behind a trusted
+        // proxy pick its own bucket IP. Only TRUSTED hops are skipped: the
+        // first untrusted hop IS the client as our edge saw it — returned if
+        // it is a valid IP, otherwise null (caller falls back to REMOTE_ADDR).
+        // The walk never continues left past a malformed hop, because
+        // everything left of it is client-controlled.
+        //
+        // No X-Real-IP fallback: a client can send its own, and whether a
+        // given proxy overwrites it is configuration we cannot see. When XFF
+        // is missing or names only trusted proxies, the caller uses
+        // REMOTE_ADDR.
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $hops = array_reverse(array_map('trim', explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR'])));
+            foreach ($hops as $hop) {
+                if (self::isTrustedProxy($hop, $trusted)) {
+                    continue;
                 }
+                return filter_var($hop, FILTER_VALIDATE_IP) ? $hop : null;
             }
         }
         return null;
+    }
+
+    /**
+     * Is $ip one of the operator-declared trusted proxies? The ONE membership
+     * test for both REMOTE_ADDR (Modes 1/2) and the X-Forwarded-For walk.
+     * Exact-literal match for now; widen it here (e.g. CIDR) and both uses
+     * follow.
+     *
+     * @param list<string> $trusted
+     */
+    private static function isTrustedProxy(string $ip, array $trusted): bool
+    {
+        return in_array($ip, $trusted, true);
     }
 
     /**
