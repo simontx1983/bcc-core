@@ -113,6 +113,14 @@ register_activation_hook(__FILE__, function () {
 // wp-config.php.
 \BCC\Core\Admin\EnvBanner::register();
 
+// ── Shared admin look + menu layout ─────────────────────────────
+// AdminTheme: one light "paper" stylesheet + body.bcc-admin on every
+// ?page=bcc-* screen. AdminMenu: three top-level menus (Moderation /
+// On-Chain / System) and the BCC_DEV_TOOLS gate that hides the
+// Developer group from the menu (pages stay reachable by URL).
+\BCC\Core\Admin\AdminTheme::register();
+\BCC\Core\Admin\AdminMenu::register();
+
 // ── System Health admin page (Operator OS v1 Phase 2) ──────────
 // wp-admin renderer for /bcc/v1/system/health so operators don't
 // have to curl the JSON. Top-level menu "BCC System" → "Health".

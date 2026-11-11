@@ -40,7 +40,7 @@ final class SystemHealthPage
             self::PAGE_SLUG,
             [self::class, 'render'],
             'dashicons-performance',
-            25
+            AdminMenu::SYSTEM_POSITION
         );
 
         // Explicit submenu so the menu title doesn't double up.
@@ -50,7 +50,8 @@ final class SystemHealthPage
             'Health',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render']
+            [self::class, 'render'],
+            AdminMenu::ORDER_HEALTH
         );
     }
 
@@ -121,18 +122,18 @@ final class SystemHealthPage
         $ts     = (string) ($data['timestamp'] ?? '');
 
         $isOk      = $status === 'ok';
-        $bg        = $isOk ? '#46b450' : '#dc3232';
+        $tone      = $isOk ? 'ok' : 'bad';
         $statusUp  = strtoupper($status);
 
         $refreshUrl = esc_url(admin_url('admin.php?page=' . self::PAGE_SLUG));
 
         printf(
-            '<div style="display:flex;align-items:center;gap:16px;margin:16px 0;padding:14px 20px;background:%1$s;color:#fff;border-radius:4px;">'
+            '<div class="bcc-status-banner bcc-status-banner--%1$s">'
             . '<strong style="font-size:18px;letter-spacing:1px;">%2$s</strong>'
-            . '<span style="opacity:0.85;">timestamp: <code style="background:rgba(255,255,255,0.18);color:#fff;padding:2px 6px;border-radius:3px;">%3$s</code></span>'
+            . '<span class="bcc-muted">timestamp: <code>%3$s</code></span>'
             . '<a href="%4$s" class="button" style="margin-left:auto;">Refresh</a>'
             . '</div>',
-            esc_attr($bg),
+            esc_attr($tone),
             esc_html($statusUp),
             esc_html($ts),
             $refreshUrl
@@ -179,13 +180,13 @@ final class SystemHealthPage
         $source  = (string) ($rc['source'] ?? 'unavailable');
 
         $pendingDisplay = $pending === null
-            ? '<span style="color:#dc3232;font-weight:bold;">unknown</span>'
+            ? '<span style="color:var(--bcc-danger);font-weight:bold;">unknown</span>'
             : self::badgeNum((int) $pending, 100, 1000);
 
         $sourceBadge = match ($source) {
-            'trust_engine' => self::badgeText($source, '#46b450'),
-            'error'        => self::badgeText($source, '#dc3232'),
-            default        => self::badgeText($source, '#dba617'),
+            'trust_engine' => AdminUi::badge($source, AdminUi::OK),
+            'error'        => AdminUi::badge($source, AdminUi::BAD),
+            default        => AdminUi::badge($source, AdminUi::WARN),
         };
 
         $rows = [
@@ -243,8 +244,8 @@ final class SystemHealthPage
 
         $rows = [
             'wp-cron disabled' => $disabled
-                ? self::badgeText('YES (external trigger expected)', '#46b450')
-                : self::badgeText('NO (internal cron active)', '#dba617'),
+                ? AdminUi::badge('YES (external trigger expected)', AdminUi::OK)
+                : AdminUi::badge('NO (internal cron active)', AdminUi::WARN),
         ];
         self::renderKeyValueTable('wp-cron', $rows);
     }
@@ -270,7 +271,7 @@ final class SystemHealthPage
         // contributor (NftIndexerHealthSnapshot, bcc-search, etc.).
         foreach ($plugins as $key => $value) {
             printf('<h3 style="margin-top:24px;">%s</h3>', esc_html((string) $key));
-            echo '<pre style="background:#f6f7f7;padding:12px;max-height:280px;overflow:auto;border-left:4px solid #c3c4c7;">';
+            echo '<pre style="background:var(--bcc-bg-raised);padding:12px;max-height:280px;overflow:auto;border-left:4px solid var(--bcc-border-strong);">';
             echo esc_html((string) wp_json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
             echo '</pre>';
         }
@@ -326,7 +327,7 @@ final class SystemHealthPage
 
         $anyActive = (bool) ($deg['any_active'] ?? false);
         if (!$anyActive) {
-            echo '<p style="color:#46b450;">All subsystems quiet across both hourly buckets.</p>';
+            echo '<p style="color:var(--bcc-success);">All subsystems quiet across both hourly buckets.</p>';
         }
 
         $rows = self::degradationRows($deg);
@@ -350,7 +351,7 @@ final class SystemHealthPage
                 $prev = $row['previous'];
                 $hot  = ($cur + $prev) > 0;
 
-                $rowStyle = $hot ? 'background:#fcf0f1;' : '';
+                $rowStyle = $hot ? 'background:var(--bcc-danger-bg);' : '';
                 echo '<tr style="' . esc_attr($rowStyle) . '">';
 
                 if ($isFirst) {
@@ -362,8 +363,8 @@ final class SystemHealthPage
                     $isFirst = false;
                 }
                 echo '<td><code>' . esc_html($row['event']) . '</code></td>';
-                echo '<td style="text-align:right;' . ($cur > 0 ? 'color:#dc3232;font-weight:bold;' : 'color:#888;') . '">' . esc_html((string) $cur) . '</td>';
-                echo '<td style="text-align:right;' . ($prev > 0 ? 'color:#dba617;font-weight:bold;' : 'color:#888;') . '">' . esc_html((string) $prev) . '</td>';
+                echo '<td style="text-align:right;' . ($cur > 0 ? 'color:var(--bcc-danger);font-weight:bold;' : 'color:var(--bcc-text-muted);') . '">' . esc_html((string) $cur) . '</td>';
+                echo '<td style="text-align:right;' . ($prev > 0 ? 'color:var(--bcc-warning);font-weight:bold;' : 'color:var(--bcc-text-muted);') . '">' . esc_html((string) $prev) . '</td>';
                 echo '</tr>';
             }
         }
@@ -386,8 +387,8 @@ final class SystemHealthPage
         $rows = [];
         foreach ($versions as $plugin => $v) {
             $rows[(string) $plugin] = $v === null
-                ? self::badgeText('not active', '#dba617')
-                : self::badgeText((string) $v, '#2271b1');
+                ? AdminUi::badge('not active', AdminUi::WARN)
+                : AdminUi::badge((string) $v, AdminUi::INFO);
         }
         self::renderKeyValueTable('Build versions', $rows);
     }
@@ -398,7 +399,7 @@ final class SystemHealthPage
         $json = (string) wp_json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         echo '<details style="margin-top:32px;">';
         echo '<summary style="cursor:pointer;font-weight:bold;">Raw JSON</summary>';
-        echo '<pre style="background:#1d2327;color:#c5d3df;padding:14px;max-height:520px;overflow:auto;border-radius:4px;margin-top:8px;">';
+        echo '<pre style="padding:14px;max-height:520px;overflow:auto;margin-top:8px;">';
         echo esc_html($json);
         echo '</pre>';
         echo '</details>';
@@ -424,30 +425,22 @@ final class SystemHealthPage
 
     private static function badgeBool(bool $ok, string $okLabel = 'OK', string $errLabel = 'FAIL'): string
     {
-        return self::badgeText(
+        return AdminUi::badge(
             $ok ? $okLabel : $errLabel,
-            $ok ? '#46b450' : '#dc3232'
+            $ok ? AdminUi::OK : AdminUi::BAD
         );
     }
 
     /** Numeric badge that turns yellow above $warnAt and red above $errAt. */
     private static function badgeNum(int $value, int $warnAt, int $errAt): string
     {
-        $color = '#46b450';
+        $tone = AdminUi::OK;
         if ($value >= $errAt) {
-            $color = '#dc3232';
+            $tone = AdminUi::BAD;
         } elseif ($value >= $warnAt) {
-            $color = '#dba617';
+            $tone = AdminUi::WARN;
         }
-        return self::badgeText((string) $value, $color);
+        return AdminUi::badge((string) $value, $tone);
     }
 
-    private static function badgeText(string $text, string $color): string
-    {
-        return sprintf(
-            '<span style="display:inline-block;padding:2px 10px;background:%1$s;color:#fff;border-radius:3px;font-weight:bold;font-size:12px;letter-spacing:0.5px;">%2$s</span>',
-            esc_attr($color),
-            esc_html($text)
-        );
-    }
 }

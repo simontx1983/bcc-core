@@ -21,6 +21,9 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
     );
 
     public static $classMap = array (
+        'BCC\\Core\\Admin\\AdminMenu' => __DIR__ . '/../..' . '/src/Admin/AdminMenu.php',
+        'BCC\\Core\\Admin\\AdminTheme' => __DIR__ . '/../..' . '/src/Admin/AdminTheme.php',
+        'BCC\\Core\\Admin\\AdminUi' => __DIR__ . '/../..' . '/src/Admin/AdminUi.php',
         'BCC\\Core\\Admin\\ApiKeysPage' => __DIR__ . '/../..' . '/src/Admin/ApiKeysPage.php',
         'BCC\\Core\\Admin\\CronPage' => __DIR__ . '/../..' . '/src/Admin/CronPage.php',
         'BCC\\Core\\Admin\\DeveloperPage' => __DIR__ . '/../..' . '/src/Admin/DeveloperPage.php',
