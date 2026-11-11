@@ -117,12 +117,14 @@ body.bcc-admin #wpbody-content .wrap h3 {
     color: var(--bcc-text-strong);
 }
 
-body.bcc-admin #wpbody-content a {
+/* Plain text links only: a link that carries a class (buttons, tabs, other
+   plugins' notice CTAs) keeps its own colours. */
+body.bcc-admin #wpbody-content a:not([class]) {
     color: var(--bcc-accent);
 }
 
-body.bcc-admin #wpbody-content a:hover,
-body.bcc-admin #wpbody-content a:focus {
+body.bcc-admin #wpbody-content a:not([class]):hover,
+body.bcc-admin #wpbody-content a:not([class]):focus {
     color: var(--bcc-accent-hover);
 }
 
