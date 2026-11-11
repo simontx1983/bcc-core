@@ -36,19 +36,129 @@ final class PeepSoFollowerRepository
      *
      * @return list<int>
      */
-    public static function getFollowing(int $userId, int $limit = 200, int $offset = 0): array
-    {
+    /**
+     * Cap on `$viewerFriendIds`, mirroring
+     * {@see PeepSoActivityRepository::VIEWER_FRIEND_IDS_MAX}.
+     *
+     * ⚠ Over the cap the list is treated as EMPTY, which DENIES every
+     * level-30 row rather than admitting the first N. Truncating would
+     * make who appears in a follower list depend on array order.
+     */
+    public const VIEWER_FRIEND_IDS_MAX = 500;
+
+    /**
+     * The §F-02 profile-visibility predicate for a follow row, applied to
+     * whichever column holds the LISTED user.
+     *
+     * ⚠⚠ THE POINT IS THAT THE LIST AND THE COUNT SHARE THIS. A follower
+     * list filtered in PHP after a LIMIT/OFFSET query under-fills its page
+     * AND leaves `total` counting rows the viewer cannot see. A count that
+     * disagrees with its list announces "there are N hidden followers" —
+     * a smaller leak, but still one, and the kind of inconsistency that
+     * gets filed as a bug anyway. Both the id query and the COUNT call
+     * this, so they cannot drift apart.
+     *
+     * Unlike the per-post gate there is no second level to combine: a
+     * follow row has no `act_access`, so the listed user's
+     * `usr_profile_acc` IS the effective level.
+     *
+     * No join to the optional peepso-friends table — the viewer's friend
+     * ids are passed in, for the same reason as the per-post gate: that
+     * table belongs to an add-on which may not be installed, and a
+     * missing table would turn these reads into SQL errors.
+     *
+     * @param list<int> $friendIds already cleaned and capped by the caller
+     * @return array{0: string, 1: string, 2: list<int>} [join, where, params]
+     */
+    private static function visibilityClause(
+        string $listedCol,
+        int $viewerId,
+        array $friendIds
+    ): array {
         global $wpdb;
+
+        $join = ' LEFT JOIN ' . $wpdb->prefix . 'peepso_users pu ON pu.usr_id = ' . $listedCol;
+
+        $friendBranch = '0';
+        $params       = [$viewerId, $viewerId, $viewerId];
+        if ($viewerId > 0 && $friendIds !== []) {
+            $friendBranch = 'IF(' . $listedCol . ' IN ('
+                . implode(',', array_fill(0, count($friendIds), '%d'))
+                . '), 1, 0)';
+            foreach ($friendIds as $fid) {
+                $params[] = $fid;
+            }
+        }
+
+        // The viewer always sees THEMSELVES, and that must be in the SQL
+        // because a page carries many users. An unrecognised level DENIES:
+        // there is deliberately no admitting catch-all, the same posture
+        // as the per-post ladder.
+        $where = ' AND (CASE WHEN %d > 0 AND ' . $listedCol . ' = %d THEN 1'
+            . ' ELSE CASE IF(pu.usr_profile_acc IS NULL OR pu.usr_profile_acc <= 0, 10, pu.usr_profile_acc)'
+            .   ' WHEN 10 THEN 1'
+            .   ' WHEN 20 THEN IF(%d > 0, 1, 0)'
+            .   ' WHEN 30 THEN ' . $friendBranch
+            .   ' ELSE 0'
+            . ' END END) = 1';
+
+        return [$join, $where, $params];
+    }
+
+    /**
+     * Clean and cap a caller-supplied friend list: positive ints only,
+     * de-duplicated, and emptied entirely if it exceeds the cap.
+     *
+     * @param list<int>|null $friendIds
+     * @return list<int>
+     */
+    private static function cleanFriendIds(?array $friendIds): array
+    {
+        $clean = [];
+        foreach ((array) $friendIds as $fid) {
+            $f = (int) $fid;
+            if ($f > 0) {
+                $clean[$f] = true;
+            }
+        }
+        $out = array_keys($clean);
+
+        return count($out) > self::VIEWER_FRIEND_IDS_MAX ? [] : $out;
+    }
+
+    public static function getFollowing(
+        int $userId,
+        int $limit = 200,
+        int $offset = 0,
+        int $viewerId = 0,
+        ?array $viewerFriendIds = null,
+        bool $enforceProfileVisibility = false
+    ): array {
+        global $wpdb;
+
+        $visJoin   = '';
+        $visWhere  = '';
+        $visParams = [];
+        if ($enforceProfileVisibility) {
+            [$visJoin, $visWhere, $visParams] = self::visibilityClause(
+                'uf_passive_user_id',
+                $viewerId,
+                self::cleanFriendIds($viewerFriendIds)
+            );
+        }
+
         $sql = $wpdb->prepare(
             'SELECT uf_passive_user_id
-               FROM ' . self::table() . '
+               FROM ' . self::table() . $visJoin . '
               WHERE uf_active_user_id = %d
-                AND uf_follow = 1
+                AND uf_follow = 1' . $visWhere . '
               ORDER BY uf_id DESC
               LIMIT %d OFFSET %d',
-            $userId,
-            $limit,
-            $offset
+            // Order mirrors placeholder appearance: the owner, then the
+            // visibility clause's own params, then the page bounds.
+            // Built as one array because PHP forbids positional
+            // arguments after an unpack.
+            ...array_merge([$userId], $visParams, [$limit, $offset])
         );
 
         $rows = $wpdb->get_col($sql);
@@ -60,19 +170,35 @@ final class PeepSoFollowerRepository
      *
      * @return list<int>
      */
-    public static function getFollowers(int $userId, int $limit = 200, int $offset = 0): array
-    {
+    public static function getFollowers(
+        int $userId,
+        int $limit = 200,
+        int $offset = 0,
+        int $viewerId = 0,
+        ?array $viewerFriendIds = null,
+        bool $enforceProfileVisibility = false
+    ): array {
         global $wpdb;
+
+        $visJoin   = '';
+        $visWhere  = '';
+        $visParams = [];
+        if ($enforceProfileVisibility) {
+            [$visJoin, $visWhere, $visParams] = self::visibilityClause(
+                'uf_active_user_id',
+                $viewerId,
+                self::cleanFriendIds($viewerFriendIds)
+            );
+        }
+
         $sql = $wpdb->prepare(
             'SELECT uf_active_user_id
-               FROM ' . self::table() . '
+               FROM ' . self::table() . $visJoin . '
               WHERE uf_passive_user_id = %d
-                AND uf_follow = 1
+                AND uf_follow = 1' . $visWhere . '
               ORDER BY uf_id DESC
               LIMIT %d OFFSET %d',
-            $userId,
-            $limit,
-            $offset
+            ...array_merge([$userId], $visParams, [$limit, $offset])
         );
 
         $rows = $wpdb->get_col($sql);
@@ -355,18 +481,42 @@ final class PeepSoFollowerRepository
      *
      * @return array{following: int, followers: int}
      */
-    public static function getCounts(int $userId): array
-    {
+    public static function getCounts(
+        int $userId,
+        int $viewerId = 0,
+        ?array $viewerFriendIds = null,
+        bool $enforceProfileVisibility = false
+    ): array {
         global $wpdb;
         $table = self::table();
 
+        // Each count is gated on the column that holds the LISTED user,
+        // so it matches the list it describes: "following" lists the
+        // passive side, "followers" the active side.
+        //
+        // Both clauses come from the same helper the id queries use. A
+        // count computed by a different rule than its list is how a
+        // filtered follower list ends up advertising rows it will never
+        // show.
+        $friends      = $enforceProfileVisibility ? self::cleanFriendIds($viewerFriendIds) : [];
+        $ingJoin      = '';
+        $ingWhere     = '';
+        $ingParams    = [];
+        $ersJoin      = '';
+        $ersWhere     = '';
+        $ersParams    = [];
+        if ($enforceProfileVisibility) {
+            [$ingJoin, $ingWhere, $ingParams] = self::visibilityClause('uf_passive_user_id', $viewerId, $friends);
+            [$ersJoin, $ersWhere, $ersParams] = self::visibilityClause('uf_active_user_id', $viewerId, $friends);
+        }
+
         $following = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table} WHERE uf_active_user_id = %d AND uf_follow = 1",
-            $userId
+            "SELECT COUNT(*) FROM {$table}{$ingJoin} WHERE uf_active_user_id = %d AND uf_follow = 1{$ingWhere}",
+            ...array_merge([$userId], $ingParams)
         ));
         $followers = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table} WHERE uf_passive_user_id = %d AND uf_follow = 1",
-            $userId
+            "SELECT COUNT(*) FROM {$table}{$ersJoin} WHERE uf_passive_user_id = %d AND uf_follow = 1{$ersWhere}",
+            ...array_merge([$userId], $ersParams)
         ));
 
         return ['following' => $following, 'followers' => $followers];
