@@ -45,12 +45,38 @@ namespace BCC\Core\Http\Tests {
             /** Every host asked about, in order. */
             public static array $lookups = [];
 
+            /**
+             * Virtual "now" the shadowed `time()` reports, or 0 for "use the
+             * real clock" — the default, which keeps that shadow inert.
+             */
+            public static int $now = 0;
+
             public static function reset(): void
             {
                 self::$enabled = false;
                 self::$ipv4    = null;
                 self::$aaaa    = [];
                 self::$lookups = [];
+                self::$now     = 0;
+            }
+
+            /**
+             * Start the virtual clock at a fixed instant.
+             *
+             * A literal rather than `time()`: a test pinning TTL arithmetic
+             * should not depend on when it ran.
+             */
+            public static function startClock(int $at = 1700000000): void
+            {
+                self::$now = $at;
+            }
+
+            /** Move the virtual clock forward. */
+            public static function advance(int $seconds): void
+            {
+                if (self::$now > 0) {
+                    self::$now += $seconds;
+                }
             }
 
             /** Resolve to nothing public — the failure this suite is about. */
@@ -107,6 +133,29 @@ namespace BCC\Core\Http {
                 return is_array($real) ? $real : [];
             }
             return DnsStub::$aaaa;
+        }
+    }
+
+    /**
+     * Shadows `time()` for this namespace — the same namespace-fallback
+     * mechanism as the two resolver shadows above.
+     *
+     * ⚠⚠ INERT UNLESS A TEST STARTS THE CLOCK. With `DnsStub::$now` at 0
+     * this delegates to the real global `time()`, so the sibling suites that
+     * load this file see real time and are untouched. That matters more here
+     * than for the resolver shadows: `SafeHttpClient` calls `time()` on every
+     * DNS cache read and write, so a clock that defaulted to a fixed instant
+     * would silently freeze both cache TTLs for every test in the process.
+     *
+     * ⚠ A fake clock rather than a slow test. The TTLs are 60s and 10s, so
+     * asserting expiry against the wall clock would mean a test that really
+     * waits a minute — and a test that waits a minute is a test somebody
+     * shortens later.
+     */
+    if (!function_exists(__NAMESPACE__ . '\\time')) {
+        function time(): int
+        {
+            return DnsStub::$now > 0 ? DnsStub::$now : \time();
         }
     }
 }
