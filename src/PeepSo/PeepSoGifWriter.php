@@ -9,7 +9,9 @@
  * (peepso/classes/giphy.php:409) reads `$_POST['type']==='giphy'` +
  * `$_POST['giphy']` from a fresh add_post call and persists the URL to
  * `post_meta peepso_giphy` after validating it contains "giphy.com"
- * (peepso/classes/giphy.php:316).
+ * (peepso/classes/giphy.php:316). That substring check is too weak, so
+ * this writer first requires an https giphy.com / *.giphy.com host
+ * (BCC\Core\Security\GiphyUrl).
  *
  * The flow is functionally identical to PeepSoPhotoWriter — drive
  * PeepSo's hook+filter chain via $_POST superglobals, restore in
@@ -51,22 +53,13 @@ if (!defined('ABSPATH')) {
 final class PeepSoGifWriter
 {
     /**
-     * Mandatory URL substring — mirrors PeepSo's own check at
-     * peepso/classes/giphy.php:316 (`strpos($giphy, 'giphy.com') === false`).
-     * A stricter regex would diverge from PeepSo's own behavior and
-     * potentially reject URLs PeepSo accepts (e.g. media subdomains,
-     * future Giphy CDN paths). Match PeepSo's posture exactly.
-     */
-    private const REQUIRED_URL_SUBSTRING = 'giphy.com';
-
-    /**
      * Create a GIF post on $authorId's own wall.
      *
      * Return shape mirrors PeepSoStatusWriter / PeepSoPhotoWriter:
      *   - ['ok' => true,  'post_id' => int, 'act_id' => int]    success
      *   - ['ok' => false, 'reason' => 'forbidden']         authorId<=0
      *   - ['ok' => false, 'reason' => 'unavailable']       PeepSo deactivated
-     *   - ['ok' => false, 'reason' => 'invalid_url']       URL doesn't contain giphy.com
+     *   - ['ok' => false, 'reason' => 'invalid_url']       not an https giphy.com / *.giphy.com URL (GiphyUrl::isAllowed)
      *   - ['ok' => false, 'reason' => 'persist_failed']    add_post returned 0/false OR resolve query came back empty
      *
      * Group-wall variant: when $groupId > 0 the caller has already
@@ -99,11 +92,15 @@ final class PeepSoGifWriter
             return ['ok' => false, 'reason' => 'unavailable'];
         }
 
-        // ─── URL validation — match PeepSo's own check exactly ─────
-        // peepso/classes/giphy.php:316,343,416 all use `strpos === false`.
-        // A stricter regex would diverge.
+        // ─── URL validation — host check, STRICTER than PeepSo ───────
+        // PeepSo's own check (peepso/classes/giphy.php:316) is a substring
+        // test, which accepts https://evil.example/t.gif?x=giphy.com; the
+        // stored URL is then rendered as an <img> for every viewer. Its
+        // check still runs downstream, but ours must pass first: https,
+        // host giphy.com or *.giphy.com. Shared with bcc-trust's comment
+        // GIFs via GiphyUrl so the two paths cannot drift.
         $urlTrimmed = trim($url);
-        if ($urlTrimmed === '' || strpos($urlTrimmed, self::REQUIRED_URL_SUBSTRING) === false) {
+        if (!\BCC\Core\Security\GiphyUrl::isAllowed($urlTrimmed)) {
             return ['ok' => false, 'reason' => 'invalid_url'];
         }
 

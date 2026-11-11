@@ -81,6 +81,8 @@ return array(
     'BCC\\Core\\Repositories\\PeepSoHashtagRepository' => $baseDir . '/src/Repositories/PeepSoHashtagRepository.php',
     'BCC\\Core\\Repositories\\PeepSoMessageRepository' => $baseDir . '/src/Repositories/PeepSoMessageRepository.php',
     'BCC\\Core\\Repositories\\PeepSoPageRepository' => $baseDir . '/src/Repositories/PeepSoPageRepository.php',
+    'BCC\\Core\\Rest\\IdentityEndpoint' => $baseDir . '/src/Rest/IdentityEndpoint.php',
+    'BCC\\Core\\Security\\GiphyUrl' => $baseDir . '/src/Security/GiphyUrl.php',
     'BCC\\Core\\Security\\Throttle' => $baseDir . '/src/Security/Throttle.php',
     'BCC\\Core\\ServiceLocator' => $baseDir . '/src/ServiceLocator.php',
     'BCC\\Core\\Support\\HeadlessOrigin' => $baseDir . '/src/Support/HeadlessOrigin.php',
