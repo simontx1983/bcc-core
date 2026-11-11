@@ -857,11 +857,43 @@ final class PeepSoGroupRepository
                  ORDER BY p.ID DESC
                  LIMIT %d";
 
-        /** @var list<numeric-string>|null $rows */
-        $rows = $wpdb->get_col($wpdb->prepare($sql, ...$params));
+        // ⚠ A FAILED QUERY MUST NOT BE CACHED, and a failed query does NOT
+        // look like null.
+        //
+        // `get_col()` ALWAYS returns an array — wp-includes/class-wpdb.php
+        // builds `$new_array = array()`, fills it only `if
+        // ($this->last_result)`, and returns it unconditionally. On an
+        // error `query()` returns false and `flush()` has already emptied
+        // `last_result`, so get_col hands back `[]`. A `=== null` check for
+        // failure is DEAD CODE, and the `@var ...|null` annotation that
+        // used to sit here was simply wrong.
+        //
+        // That matters because caching the `[]` would hold "no group is
+        // non-open" for NONOPEN_CACHE_TTL (10 min), and for a caller using
+        // this list as an exclusion an empty list means "exclude nothing" —
+        // one transient DB error would read as permission for ten minutes.
+        //
+        // `query()` is the documented signal: `int|bool`, "false on error".
+        // It is checked instead of `last_error` alone because query() can
+        // return false from `!$this->ready` or an empty query BEFORE it
+        // calls flush(), leaving a stale (or empty) last_error behind.
+        // last_error is still consulted as a second signal.
+        $prepared = $wpdb->prepare($sql, ...$params);
+        $queryOk  = $wpdb->query($prepared);
+        if ($queryOk === false || (string) $wpdb->last_error !== '') {
+            // Return the empty list for THIS request — callers already
+            // treat [] as "no exclusions", the pre-existing failure-path
+            // behaviour — but leave the cache cold so the next request
+            // re-asks. Nothing changes on the success path.
+            return [];
+        }
+
+        // Reads the already-fetched last_result without re-querying.
+        /** @var list<numeric-string> $rows */
+        $rows = $wpdb->get_col(null);
 
         $ids = [];
-        foreach ($rows ?: [] as $raw) {
+        foreach ($rows as $raw) {
             $id = (int) $raw;
             if ($id > 0) {
                 $ids[] = $id;
@@ -869,6 +901,114 @@ final class PeepSoGroupRepository
         }
 
         wp_cache_set($genKey, $ids, self::NONOPEN_CACHE_GROUP, self::NONOPEN_CACHE_TTL);
+        return $ids;
+    }
+
+    /**
+     * Same set as {@see getNonOpenGroupIds}, but it tells you when it
+     * does not know.
+     *
+     * {@see getNonOpenGroupIds} is lossy by design — it answers with a
+     * list and nothing else, so "no group is non-open", "the query
+     * failed" and "there are more than the limit, here are the newest"
+     * all arrive as a plain array. That is fine for the feed, which uses
+     * the list as one filter among several, and NOT fine for a caller
+     * that uses it as its ONLY group gate: for that caller a short list
+     * is not a degraded answer, it is a disclosure. Each missing id is a
+     * group whose posts get shown.
+     *
+     * So this variant returns NULL for both failure modes:
+     *
+     *   - the query errored (`get_col` → null). Distinct from empty, and
+     *     not cached, so one bad query cannot hold the answer for the
+     *     cache TTL.
+     *   - more rows exist than the caller asked for. Detected by asking
+     *     for `$limit + 1` and seeing the extra row come back, rather
+     *     than by guessing from a full-looking page. The underlying
+     *     query orders by `p.ID DESC`, so truncation silently drops the
+     *     OLDEST non-open groups — the ones most likely to be
+     *     established private communities.
+     *
+     * An empty return is therefore trustworthy: it means the query ran
+     * and no group is non-open.
+     *
+     * @return list<int>|null null = cannot answer; caller must fail closed
+     */
+    public static function getNonOpenGroupIdsStrict(int $limit = self::NONOPEN_DEFAULT_LIMIT): ?array
+    {
+        if ($limit <= 0) {
+            return null;
+        }
+        if ($limit > self::NONOPEN_DEFAULT_LIMIT) {
+            $limit = self::NONOPEN_DEFAULT_LIMIT;
+        }
+
+        // Own cache key — a strict answer and a lenient one are not
+        // interchangeable, and only a PROVEN-complete list is ever stored.
+        $genKey = self::nonOpenCacheKey($limit) . ':strict';
+        $cached = wp_cache_get($genKey, self::NONOPEN_CACHE_GROUP);
+        if (is_array($cached)) {
+            /** @var list<int> $cached */
+            return $cached;
+        }
+
+        global $wpdb;
+
+        $placeholders = implode(',', array_fill(0, count(self::NON_OPEN_PRIVACY_VALUES), '%s'));
+
+        $params = [
+            'peepso_group_privacy',
+            self::POST_TYPE,
+            self::POST_STATUS,
+        ];
+        foreach (self::NON_OPEN_PRIVACY_VALUES as $val) {
+            $params[] = $val;
+        }
+        // limit + 1: the extra row is the truncation detector.
+        $params[] = $limit + 1;
+
+        $sql = "SELECT p.ID
+                  FROM {$wpdb->posts} p
+            INNER JOIN {$wpdb->postmeta} pm
+                       ON pm.post_id  = p.ID
+                      AND pm.meta_key = %s
+                 WHERE p.post_type   = %s
+                   AND p.post_status = %s
+                   AND pm.meta_value IN ({$placeholders})
+                 ORDER BY p.ID DESC
+                 LIMIT %d";
+
+        // Failure detection, and the reason it is NOT a null check: see the
+        // note in getNonOpenGroupIds. `get_col()` always returns an array,
+        // so an errored query arrives here as `[]` — which this method
+        // documents as "the query ran and nothing is non-open". Trusting
+        // that would be the worst case of all: an empty deny list that a
+        // caller has been told to believe, relaxing its gate.
+        $prepared = $wpdb->prepare($sql, ...$params);
+        $queryOk  = $wpdb->query($prepared);
+        if ($queryOk === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
+
+        /** @var list<numeric-string> $rows */
+        $rows = $wpdb->get_col(null);
+
+        // The detector row came back, so rows were dropped. Refuse, and
+        // cache nothing — an incomplete list must never be served again.
+        if (count($rows) > $limit) {
+            return null;
+        }
+
+        $ids = [];
+        foreach ($rows as $raw) {
+            $id = (int) $raw;
+            if ($id > 0) {
+                $ids[] = $id;
+            }
+        }
+
+        wp_cache_set($genKey, $ids, self::NONOPEN_CACHE_GROUP, self::NONOPEN_CACHE_TTL);
+
         return $ids;
     }
 

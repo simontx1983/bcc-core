@@ -6,65 +6,15 @@ namespace BCC\Core\Feed\Tests\PageScope {
 
     use BCC\Core\Feed\ActivityFeedService;
     use BCC\Core\Repositories\PeepSoActivityRepository;
+    use BCC\Core\Tests\Stubs\RenderingWpdb;
     use PHPUnit\Framework\Attributes\CoversClass;
     use PHPUnit\Framework\TestCase;
     use ReflectionClass;
 
-    /**
-     * `$wpdb` double that renders each placeholder with its bound argument, so
-     * a test reads the statement MySQL would receive. Asserting on placeholders
-     * and arguments separately cannot see a JOIN param bound to a WHERE slot,
-     * and that misordering is what this scope is most exposed to.
-     */
-    final class RenderingWpdb
-    {
-        public string $posts    = 'wp_posts';
-        public string $postmeta = 'wp_postmeta';
-        public string $prefix   = 'wp_';
-
-        public string $lastSql = '';
-
-        public int $queryCount = 0;
-
-        /** @var list<object> */
-        public array $resultsToReturn = [];
-
-        /** @param mixed ...$args */
-        public function prepare(string $query, ...$args): string
-        {
-            $next = 0;
-            $sql  = preg_replace_callback(
-                '/%[ds]/',
-                static function (array $m) use (&$next, $args): string {
-                    $value = $args[$next++] ?? '<<UNBOUND>>';
-
-                    return $m[0] === '%d' ? (string) (int) $value : "'" . (string) $value . "'";
-                },
-                $query
-            );
-
-            TestCase::assertSame(count($args), $next, 'every bound argument must have a placeholder');
-
-            return (string) preg_replace('/\s+/', ' ', (string) $sql);
-        }
-
-        public function esc_like(string $text): string
-        {
-            return addcslashes($text, '_%\\');
-        }
-
-        /**
-         * @param string $sql
-         * @return list<object>
-         */
-        public function get_results($sql): array
-        {
-            $this->lastSql = $sql;
-            ++$this->queryCount;
-
-            return $this->resultsToReturn;
-        }
-    }
+    // The rendering `$wpdb` double was first written here and now lives in
+    // tests/Stubs so the restricted-group exclusion suite shares it rather
+    // than carrying a second copy (§11). Behaviour is unchanged.
+    require_once __DIR__ . '/Stubs/rendering-wpdb.php';
 
     #[CoversClass(PeepSoActivityRepository::class)]
     #[CoversClass(ActivityFeedService::class)]
