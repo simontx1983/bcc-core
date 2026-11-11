@@ -504,12 +504,25 @@ final class ActivityFeedService
 
         $byId = [];
         foreach ($users as $u) {
-            $id            = (int) $u->ID;
+            $id = (int) $u->ID;
+            // user_login is never public. Same rule as bcc-trust's
+            // PublicIdentity (bcc-core can't depend on bcc-trust): a
+            // missing handle shows 'member-{id}', and a display_name that
+            // is just the login (WordPress's default for wp-admin / WP-CLI
+            // accounts) counts as missing and shows the handle instead.
+            $handle = trim((string) get_user_meta($id, 'bcc_handle', true));
+            if ($handle === '') {
+                $handle = 'member-' . $id;
+            }
+            $name = trim((string) $u->display_name);
+            if ($name === '' || strcasecmp($name, trim((string) $u->user_login)) === 0) {
+                $name = $handle;
+            }
             $byId[$id] = [
                 'kind'                  => 'user',
                 'id'                    => $id,
-                'handle'                => (string) get_user_meta($id, 'bcc_handle', true) ?: $u->user_login,
-                'display_name'          => $u->display_name ?: $u->user_login,
+                'handle'                => $handle,
+                'display_name'          => $name,
                 'avatar_url'            => $avatars[$id] ?? '',
                 // Trust-derived fields are placeholders until Phase 2 wires
                 // bcc-trust read services into this hydration step.
