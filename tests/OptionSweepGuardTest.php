@@ -215,6 +215,81 @@ final class OptionSweepGuardTest extends TestCase
         );
     }
 
+    /**
+     * ⚠⚠ A SHORTER PREFIX IS BROADER, NOT NARROWER, and the first version
+     * of this guard missed every one of these. `deleteByPrefix()` is a RANGE
+     * delete, so `''`, `'b'` and `'bcc'` all cover `bcc_*` — `''` covers the
+     * entire options table. Caught by asking the containment question both
+     * ways round rather than only "does it start with bcc_".
+     */
+    public function testAShorterPrefixIsAlsoReported(): void
+    {
+        foreach (["''", "'b'", "'bc'", "'bcc'", "'bcc_'"] as $literal) {
+            self::assertSame(
+                [$literal],
+                self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix({$literal});\n"),
+                'a prefix this broad reaches bcc rows: ' . $literal
+            );
+        }
+    }
+
+    /**
+     * ⚠ And an empty prefix is reachable THROUGH a wrapper: stripping
+     * `_transient_` leaves nothing, which is the whole options table again.
+     */
+    public function testAWrapperThatStripsToNothingIsReported(): void
+    {
+        foreach (["'_transient_'", "'_transient_timeout_'", "'_site_transient_'"] as $literal) {
+            self::assertSame(
+                [$literal],
+                self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix({$literal});\n"),
+                'strips to empty, so it covers everything: ' . $literal
+            );
+        }
+    }
+
+    /**
+     * ⚠ CASE-INSENSITIVE, because `option_name`'s collation is. A range
+     * delete from `'BCC_'` reaches the same rows as one from `'bcc_'`, so a
+     * case-sensitive guard would pass it.
+     */
+    public function testACaseVariantPrefixIsReported(): void
+    {
+        foreach (["'BCC_'", "'Bcc_Onchain_'", "'_TRANSIENT_bcc_signals_'"] as $literal) {
+            self::assertSame(
+                [$literal],
+                self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix({$literal});\n"),
+                'collation is case-insensitive: ' . $literal
+            );
+        }
+    }
+
+    /**
+     * ⚠⚠ ANTI-VACUITY, and it matters more now than before: broadening the
+     * rule in two directions could easily make it report EVERYTHING, which
+     * would be a guard nobody can satisfy. A prefix that is genuinely not
+     * ours and not broader than ours must still pass — including one that
+     * merely shares a letter with us.
+     */
+    public function testAGenuinelyForeignPrefixStillPasses(): void
+    {
+        foreach (
+            [
+                "'_transient_someoneelse_'",
+                "'wp_'",
+                "'bcd_'",
+                "'bccx_'",
+                "'peepso_'",
+            ] as $literal
+        ) {
+            self::assertSame(
+                [],
+                self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix({$literal});\n"),
+                'not ours and not broader than ours: ' . $literal
+            );
+        }
+    }
+
     // ── the detector ──────────────────────────────────
 
     /**
@@ -321,6 +396,12 @@ final class OptionSweepGuardTest extends TestCase
      */
     private static function isOurPrefix(string $prefix): bool
     {
+        // ⚠ LOWERCASED FIRST. `option_name`'s collation is case-INSENSITIVE,
+        // so `DELETE ... WHERE option_name >= 'BCC_'` reaches the same rows a
+        // lowercase prefix would. A case-sensitive guard would wave that
+        // through.
+        $prefix = strtolower($prefix);
+
         foreach (
             [
                 '_site_transient_timeout_',
@@ -335,7 +416,22 @@ final class OptionSweepGuardTest extends TestCase
             }
         }
 
-        return str_starts_with($prefix, 'bcc_');
+        // ⚠⚠ BOTH DIRECTIONS, because `deleteByPrefix()` is a RANGE DELETE
+        // (`option_name >= $prefix AND option_name < $prefix . '~'`), not a
+        // `LIKE 'bcc_%'`. A prefix SHORTER than ours still covers our rows:
+        //
+        //     ''      covers every option in the table
+        //     'b'     covers bcc_* along with everything else starting b
+        //     'bcc'   covers bcc_* exactly
+        //
+        // and `'_transient_'` strips to `''` above, so the empty case is
+        // reachable through a wrapper too. The first version tested only
+        // `str_starts_with($prefix, 'bcc_')` and so passed all four.
+        //
+        // The second clause is the containment test in reverse: is OUR
+        // namespace inside the given prefix? `str_starts_with('bcc_', '')` is
+        // true, which is what makes the empty prefix fail closed.
+        return str_starts_with($prefix, 'bcc_') || str_starts_with('bcc_', $prefix);
     }
 
     /**
