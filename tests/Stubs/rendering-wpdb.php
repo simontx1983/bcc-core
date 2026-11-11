@@ -64,4 +64,48 @@ final class RenderingWpdb
 
         return $this->resultsToReturn;
     }
+
+    /** @var list<int|string> */
+    public array $colToReturn = [];
+
+    /** @var int|string|null */
+    public $varToReturn = 0;
+
+    /**
+     * Additive, for repositories that read a single column rather than
+     * rows — the follower / following id reads. Records the statement
+     * exactly as `get_results` does, so the same rendering guarantee,
+     * and the placeholder/argument count assertion in `prepare`, cover
+     * those reads too.
+     *
+     * @param string $sql
+     * @return list<int|string>
+     */
+    public function get_col($sql): array
+    {
+        $this->lastSql = $sql;
+        ++$this->queryCount;
+
+        return $this->colToReturn;
+    }
+
+    /**
+     * Additive, for COUNT reads.
+     *
+     * ⚠ `lastSql` holds the LAST statement a method issued. A method
+     * running two counts — `PeepSoFollowerRepository::getCounts()` does —
+     * therefore leaves the SECOND one here, not the first. A test reading
+     * `lastSql` after such a call must say which one it means, or it is
+     * asserting about a statement it did not choose.
+     *
+     * @param string $sql
+     * @return int|string|null
+     */
+    public function get_var($sql)
+    {
+        $this->lastSql = $sql;
+        ++$this->queryCount;
+
+        return $this->varToReturn;
+    }
 }

@@ -83,6 +83,19 @@ final class PeepSoActivityRepository
     public const RESTRICTED_GROUP_IDS_MAX = 500;
 
     /**
+     * Cap on `$viewerFriendIds` for the §F-02 per-post visibility gate.
+     *
+     * ⚠ Over the cap the list is treated as EMPTY, which DENIES every
+     * level-30 post rather than admitting them. Over-strict, never leaky -
+     * the same direction `$viewerMemberGroupIds` takes over its bound, and
+     * for the same reason: a visibility gate that degrades toward "show
+     * more" is not a gate. A viewer with more friends than this loses
+     * sight of friends-only posts until the caller pages the list, which
+     * is a visible, reportable shortfall rather than a silent disclosure.
+     */
+    public const VIEWER_FRIEND_IDS_MAX = 500;
+
+    /**
      * `$groupGateMode` values. Named modes rather than a boolean because a
      * boolean let `[]` — which is also what a degraded lookup yields —
      * stand for "restricted from nothing" and drop the gate. A caller must
@@ -137,6 +150,8 @@ final class PeepSoActivityRepository
      * @param string|null $groupGateMode Which group-visibility rule this read wants, in place of the global-feed `public_all` gate. null (DEFAULT, every pre-existing caller) = unchanged: a group-tagged post reaches a non-group-scoped read only when it carries `_bcc_post_visibility = 'public_all'`. {@see self::GROUP_GATE_VIEWER_ACCESS} = "can the viewer see the group", for reading SOMEONE ELSE's profile Blog tab — HONOURED ONLY when `$restrictedGroupIds` is non-null and within the cap, so a caller whose lookup degraded and passed nothing keeps the stricter gate instead of leaking; it also applies the members_only parity clause, which needs `$viewerMemberGroupIds`. {@see self::GROUP_GATE_AUTHOR_SCOPED} = the author reading their OWN rows, where no deny list is required or consulted because every row the query can return is already theirs (and stays visible to them after they leave the group). ⚠ AUTHOR_SCOPED is PROVEN, not trusted: it is honoured only when `$authorIds` is exactly one id and it equals `$viewerId`, so passing the mode on a site-wide read relaxes nothing. ⚠ An unrecognised value relaxes NOTHING — this is deliberately not a boolean, because a boolean allowed `[]` to drop the gate and `[]` is also what a failed membership lookup produces. Ignored when `$onlyForGroupId !== null`, which has its own gate.
      * @param int $viewerId The viewer this read is for. Required to make {@see self::GROUP_GATE_AUTHOR_SCOPED} stick: that mode is honoured ONLY when `$authorIds` is exactly one id AND it equals this viewer, so the repository proves the read really is confined to the viewer's own rows instead of trusting a mode string. 0 (default) means "no viewer asserted", which makes AUTHOR_SCOPED a no-op. Not used by any other mode.
      * @param list<int>|null $viewerMemberGroupIds The groups the viewer BELONGS to. Only read on the {@see self::GROUP_GATE_VIEWER_ACCESS} path, where it carries the members_only parity rule: a post in one of these groups is visible at ANY visibility, while a post in a group the viewer merely can SEE (an open group they have not joined) is visible only at `public_group` / `public_all` — matching what the group feed already does for a non-member. Absent visibility meta counts as members_only and is therefore hidden from a non-member. null/[] = treat the viewer as a member of nothing, which is correct for an anonymous reader. Bounded by {@see self::RESTRICTED_GROUP_IDS_MAX}; over the bound the membership clause is dropped, which costs a member sight of their own groups' members_only posts and leaks nothing.
+     * @param list<int>|null $viewerFriendIds The authors the VIEWER is a friend of, for the level-30 branch of `$enforcePostVisibility`. ⚠ bcc-core deliberately does NOT discover this itself: friendship lives in `peepso_user_friends`, a table owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed query depend on an add-on that may not be installed - a missing table turns the most important read in the product into a SQL error. bcc-trust computes the list (it already wraps `PeepSoFriendsModel` behind `PeepSoFriendGate`) and passes it, exactly the coupling-avoidance pattern `$excludedAuthorIds`, `$excludedActIds` and `$restrictedGroupIds` already use - bcc-core stays unaware of what a "friend" is and only applies the rule. null/[] = the viewer is a friend of nobody, which is correct for an anonymous reader and makes every level-30 post invisible except the viewer's own. Ids are de-duplicated and integer-cast. Capped at {@see self::VIEWER_FRIEND_IDS_MAX}, and over the cap treated as EMPTY (deny), never truncated.
+     * @param bool $enforcePostVisibility OPT-IN switch for the §F-02 per-post gate; `false` (the default, and every pre-existing caller) leaves behaviour byte-identical. When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows the posts already written under it. The ladder: 0 and 10 = everyone (0 is what BCC's own writer stores, and PeepSo's `is_accessible_static` also treats 0 as public); 20 = any signed-in viewer; 30 = `$viewerFriendIds`; 40 = nobody. The viewer ALWAYS sees their own posts at any level, which must be in the SQL because a feed page carries many authors. ⚠ An unrecognised level DENIES - the `CASE` has no catch-all that admits. ⚠ ADMINS are NOT exempted here: an admin read is expressed by the caller passing `false`, because encoding a capability check in a repository would put policy in the wrong layer. ⚠ A missing `peepso_users` row counts as 10 (public), matching that column's schema default and what bcc-trust's own reader returns when PeepSo is absent - not a deliberate fail-open, but say so when auditing.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
      */
@@ -157,7 +172,9 @@ final class PeepSoActivityRepository
         ?array $restrictedGroupIds = null,
         ?string $groupGateMode = null,
         ?array $viewerMemberGroupIds = null,
-        int $viewerId = 0
+        int $viewerId = 0,
+        ?array $viewerFriendIds = null,
+        bool $enforcePostVisibility = false
     ): array {
         global $wpdb;
 
@@ -462,6 +479,8 @@ final class PeepSoActivityRepository
             return [];
         }
 
+        $authorAccJoin = '';
+
         $groupVisibilityJoin = '';
         if ($onlyForGroupId === null && !$gateRelaxed) {
             $groupVisibilityJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' gx_pm
@@ -602,6 +621,106 @@ final class PeepSoActivityRepository
             }
         }
 
+        // -- §F-02 per-post effective visibility (OPT-IN) ---------------
+        //
+        // A post is visible at the STRICTER of its own `act_access` and
+        // its AUTHOR's `usr_profile_acc`. That is what makes a profile
+        // setting retroactive: turning a profile to "friends" narrows the
+        // posts already written under it, instead of leaving them public
+        // while the profile page itself is gated.
+        //
+        // ⚠ OFF BY DEFAULT. Every pre-existing caller passes nothing and
+        // gets byte-identical SQL - no join, no clause, no params. The
+        // golden full-statement snapshots in the sibling test file are what
+        // hold that claim.
+        //
+        // ⚠ THE FRIENDS TABLE IS NOT JOINED, DELIBERATELY. Level 30 is
+        // friendship, which lives in `peepso_user_friends` - a table owned
+        // by the OPTIONAL peepso-friends plugin. Joining it would make the
+        // main feed query fail outright wherever that add-on is absent: a
+        // privacy rule that can take down the product's most important
+        // read. bcc-trust passes the ids instead, the same
+        // coupling-avoidance pattern as `$excludedAuthorIds` and
+        // `$restrictedGroupIds`.
+        //
+        // ⚠ `peepso_users` IS joined, and that is a different question:
+        // it belongs to PeepSo CORE, the same plugin that owns
+        // `peepso_activities`, which this whole query already requires. The
+        // join adds no dependency that is not already load-bearing here.
+        // LEFT, not INNER, so an author with no PeepSo row still appears -
+        // their level then COALESCEs to 10, the column's schema default.
+        if ($enforcePostVisibility) {
+            $friendsClean = [];
+            if (is_array($viewerFriendIds)) {
+                foreach ($viewerFriendIds as $fid) {
+                    $f = (int) $fid;
+                    if ($f > 0) {
+                        $friendsClean[$f] = true;
+                    }
+                }
+            }
+            $friendsClean = array_keys($friendsClean);
+
+            // Over the cap: EMPTY, which denies level 30 rather than
+            // admitting it. Truncating would admit the first N friends and
+            // deny the rest with no signal - a gate whose behaviour
+            // depends on array order.
+            if (count($friendsClean) > self::VIEWER_FRIEND_IDS_MAX) {
+                $friendsClean = [];
+            }
+
+            $authorAccJoin = ' LEFT JOIN ' . $wpdb->prefix . 'peepso_users pu'
+                . ' ON pu.usr_id = p.post_author';
+
+            // No friends (or anonymous) => the level-30 branch is a literal
+            // 0. An empty `IN ()` is a SQL syntax error, and spelling the
+            // branch out keeps the CASE total rather than relying on the
+            // catch-all.
+            $friendBranch = '0';
+            $friendParams = [];
+            if ($viewerId > 0 && $friendsClean !== []) {
+                $friendBranch = 'IF(p.post_author IN ('
+                    . implode(',', array_fill(0, count($friendsClean), '%d'))
+                    . '), 1, 0)';
+                $friendParams = $friendsClean;
+            }
+
+            // GREATEST picks the stricter level because the ladder is
+            // ordered: 10 < 20 < 30 < 40. `act_access <= 0` normalises to
+            // 10 - BCC's own writer stores 0, and PeepSo's
+            // `is_accessible_static` also treats 0 as public.
+            //
+            // ⚠ The CASE has NO admitting catch-all: an unrecognised
+            // effective level (a future PeepSo value, a corrupt row) falls
+            // to `ELSE 0` and is hidden. That is the opposite of the
+            // `is_numeric` defect found in the profile gate, where an
+            // unreadable value cast to 0 and 0 meant PUBLIC.
+            $where[] = '('
+                . 'CASE WHEN %d > 0 AND p.post_author = %d THEN 1'
+                . ' ELSE CASE GREATEST('
+                .     'IF(a.act_access IS NULL OR a.act_access <= 0, 10, a.act_access),'
+                .     ' COALESCE(pu.usr_profile_acc, 10)'
+                . ')'
+                .   ' WHEN 10 THEN 1'
+                .   ' WHEN 20 THEN IF(%d > 0, 1, 0)'
+                .   ' WHEN 30 THEN ' . $friendBranch
+                .   ' ELSE 0'
+                . ' END END) = 1';
+
+            // Params in clause order: the own-post guard reads $viewerId
+            // twice, then the members-only branch once, then the friend
+            // ids. ⚠ This list and the placeholders above are matched
+            // POSITIONALLY and a mismatch is silent - it would bind a
+            // viewer id where a friend id belongs and quietly change who
+            // can see what. The sibling test asserts the RENDERED values.
+            $params[] = $viewerId;
+            $params[] = $viewerId;
+            $params[] = $viewerId;
+            foreach ($friendParams as $fid) {
+                $params[] = $fid;
+            }
+        }
+
         // Final argument order mirrors placeholder appearance in $sql:
         // JOIN params (gm_pm, then vis_in_pm, then pg_pm) → WHERE params → LIMIT.
         $allParams = array_merge($joinParams, $params, [$limit]);
@@ -621,6 +740,7 @@ final class PeepSoActivityRepository
                   ' . $pageJoin . '
                   ' . $rankedJoin . '
                   ' . $groupVisibilityJoin . '
+                  ' . $authorAccJoin . '
                  WHERE ' . implode(' AND ', $where) . '
                  ORDER BY p.post_date_gmt DESC, a.act_id DESC
                  LIMIT %d';
