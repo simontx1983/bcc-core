@@ -102,53 +102,48 @@ final class SafeHttpClient
     private const DNS_NEGATIVE_CACHE_TTL = 10;
 
     /**
-     * Pinned DNS entries: host →
-     * `['entry' => "host:port:ip", 'expires' => int]` for CURLOPT_RESOLVE.
+     * Request-arg key carrying this request's OWN `CURLOPT_RESOLVE` entry,
+     * as `"host:port:ip"`.
      *
-     * ⚠⚠ THE EXPIRY EXISTS BECAUSE THIS CACHE HAD NO WAY TO BE RELEASED BY
-     * THE CALLER THE API INVITES. {@see prepareArgs()} is public and its own
-     * docblock names `ApiRetry`'s retry loop as the intended caller, but the
-     * only release, {@see clearPin()}, is private and is called solely from
-     * {@see get()}'s and {@see post()}'s `finally`. So every `prepareArgs()`
-     * caller that dispatches the request itself — `ApiRetry::get()` and
-     * `ApiRetry::post()`, which is nearly every onchain HTTP call — set a
-     * pin that was never cleared. A public acquire with a private release.
+     * ⭐⭐ THE PIN TRAVELS WITH THE REQUEST IT WAS VALIDATED FOR. It used to
+     * live in a static array keyed by host, and that is what made two bugs
+     * possible at once:
      *
-     * ⚠ WHAT THAT ACTUALLY COST, stated accurately. The pin is keyed by
-     * host and {@see applyCurlResolve()} looks it up by the OUTGOING
-     * request's own host, so a stale pin can never misdirect a request to a
-     * different host; and the pinned IP was validated public when it was
-     * set, so it cannot point anywhere private. It is NOT an SSRF bypass.
-     * The cost is FRESHNESS: a later request to the same host was forced
-     * onto a possibly-rotated or dead IP instead of re-resolving.
+     *   1. A LATER request to the same host inherited a pin it never
+     *      earned. `prepareArgs()` is public and its docblock names
+     *      `ApiRetry`'s retry loop as the intended caller, but the only
+     *      release was a PRIVATE `clearPin()` called solely from
+     *      {@see get()}/{@see post()}'s `finally`. A public acquire with a
+     *      private release, so the one named caller could never release.
      *
-     * ⚠ And the scope is one PHP request, not "forever" — static state is
-     * torn down per request under PHP-FPM. That still matters most exactly
-     * where this class is used hardest: WP-Cron and WP-CLI are each a SINGLE
-     * long request, so one pin governed every later call to that host for a
-     * whole cron tick.
+     *   2. Bounding that static with a TTL instead — the first attempt at
+     *      this fix — was WORSE, and the review that caught it was right.
+     *      An expired pin was dropped and the request then went out with NO
+     *      `CURLOPT_RESOLVE` at all, reopening the DNS-rebinding window the
+     *      pin exists to close. And it was reachable: `ApiRetry` calls
+     *      `prepareArgs()` ONCE outside its retry loop, deliberately, so
+     *      with Solana's 30s timeout its attempts begin at 0, 32, 65 and 98
+     *      seconds — the last two past any 60s TTL.
      *
-     * ⭐ The expiry is what closes it for EVERY caller, present and future,
-     * rather than for the two methods we happen to know about — and it needs
-     * no change in the consuming repository, which matters because this
-     * class ships separately from its callers.
+     * ⇒ A TTL was the wrong MECHANISM, not a mistuned one: it approximates
+     * "the dispatch this pin belongs to" with a clock, and no value is both
+     * shorter than the staleness window and longer than a retry sequence.
+     * Carrying the entry in the request's own args answers both bugs at the
+     * root. A request that did not come from `prepareArgs()` carries no pin
+     * and so cannot inherit one; a request that did carries its own and can
+     * never be unpinned, however long its retries run. There is no shared
+     * state and nothing to expire, so there is no branch left to fail open
+     * through.
      *
-     * ⚠ Bounded to {@see DNS_CACHE_TTL} FROM THE MOMENT THE PIN IS SET.
-     * That is a bound, not an alignment: a pin taken from a cache entry
-     * with 5s left still gets a fresh 60s, so it can outlive the resolution
-     * that justified it by up to the TTL. Deriving the pin's expiry from the
-     * cache entry's would be tighter, and is deliberately not done — it
-     * would couple the two and require threading the expiry back out of
-     * `validateAndPinUrl()`, for a distinction that does not matter once the
-     * lifetime is bounded at all. What was wrong was "indefinitely".
+     * ⚠ It cannot reach cURL as a request option. WordPress builds the
+     * transport options from an explicit allow-list
+     * (`class-wp-http.php:341`), so an unknown key is visible to hooks and
+     * filters and nowhere else. Asserted, not assumed.
      *
-     * ⚠ Expired entries are dropped LAZILY, on read, not swept. The set is
-     * bounded by distinct hosts contacted in one request and each entry is
-     * two scalars, so a sweep would cost more than it saves.
-     *
-     * @var array<string, array{entry: string, expires: int}>
+     * ⚠ Underscore-prefixed to match WordPress's own convention for
+     * internal request args (`_redirection`).
      */
-    private static array $pinnedResolves = [];
+    private const PIN_ARG = '_bcc_dns_pin';
 
     /**
      * Per-request DNS resolution cache keyed by host →
@@ -185,15 +180,11 @@ final class SafeHttpClient
             return $secured;
         }
 
-        $host = (string) parse_url($url, PHP_URL_HOST);
-        try {
-            return wp_remote_get($url, $secured);
-        } finally {
-            // Clear any pin we registered for this host so a later exception,
-            // redirect, or retry path cannot leak a stale IP binding into an
-            // unrelated cURL call on the same long-lived PHP-FPM worker.
-            self::clearPin($host);
-        }
+        // No pin teardown to do: the entry is inside `$secured` and dies
+        // with it. That is what removed the asymmetry in which these two
+        // methods could release a pin and every other `prepareArgs()`
+        // caller could not.
+        return wp_remote_get($url, $secured);
     }
 
     /**
@@ -212,12 +203,8 @@ final class SafeHttpClient
             return $secured;
         }
 
-        $host = (string) parse_url($url, PHP_URL_HOST);
-        try {
-            return wp_remote_post($url, $secured);
-        } finally {
-            self::clearPin($host);
-        }
+        // See get(): nothing to release.
+        return wp_remote_post($url, $secured);
     }
 
     /**
@@ -320,7 +307,9 @@ final class SafeHttpClient
         $headers  = self::batchHeaders($args);
         // $pin is null for IP-literal hosts (no DNS to pin); non-null gives the
         // "host:port:ip" CURLOPT_RESOLVE entry to apply to every handle.
-        $resolveEntry = $pin === null ? null : "{$pin['host']}:{$pin['port']}:{$pin['ip']}";
+        $resolveEntry = $pin === null
+            ? null
+            : self::formatResolveEntry($pin['host'], (int) $pin['port'], $pin['ip']);
 
         // Index-aligned pass: any URL that does not match the single validated
         // host is rejected here, BEFORE a socket is opened, so it can never be
@@ -577,17 +566,6 @@ final class SafeHttpClient
     }
 
     /**
-     * Remove a pinned DNS entry for a host after the request completes.
-     * No-op when no pin was registered for the host.
-     */
-    private static function clearPin(string $host): void
-    {
-        if ($host !== '' && isset(self::$pinnedResolves[$host])) {
-            unset(self::$pinnedResolves[$host]);
-        }
-    }
-
-    /**
      * Apply SSRF validation + DNS pinning + safe defaults to a request args
      * array. Returns the modified args on success or a `WP_Error` on block.
      *
@@ -817,13 +795,9 @@ final class SafeHttpClient
      */
     private static function injectCurlResolve(array $args, string $host, int $port, string $ip): array
     {
-        // Re-pinning refreshes the expiry, which is correct: a caller
-        // reaching here has just re-validated the host through
-        // `validateAndPinUrl()`.
-        self::$pinnedResolves[$host] = [
-            'entry'   => "{$host}:{$port}:{$ip}",
-            'expires' => time() + self::DNS_CACHE_TTL,
-        ];
+        // The entry rides along in THIS request's args — see PIN_ARG for why
+        // it is not a shared static any more.
+        $args[self::PIN_ARG] = self::formatResolveEntry($host, $port, $ip);
 
         if (!self::$hookRegistered) {
             add_action('http_api_curl', [self::class, 'applyCurlResolve'], 99, 3);
@@ -831,6 +805,80 @@ final class SafeHttpClient
         }
 
         return $args;
+    }
+
+    /**
+     * The one place a `CURLOPT_RESOLVE` entry is formatted.
+     *
+     * Shared with {@see getBatchSameHost()}, which pins its own wave
+     * directly rather than through the hook. The string was built in two
+     * places before; one is enough.
+     *
+     * ⚠ `$ip` MAY BE IPv6, because {@see resolvePublicIp()} falls back to
+     * an AAAA record — so the address can itself contain colons, and
+     * anything parsing this back must split on the FIRST TWO colons only.
+     * The host never contains one: an IP-literal host returns before
+     * pinning, so a pinned host is always a DNS name.
+     */
+    private static function formatResolveEntry(string $host, int $port, string $ip): string
+    {
+        return "{$host}:{$port}:{$ip}";
+    }
+
+    /**
+     * THE DECISION: which `CURLOPT_RESOLVE` entry, if any, belongs to this
+     * request.
+     *
+     * ⭐ EXTRACTED SO IT CAN BE ASSERTED. There is no `curl_getopt`, so no
+     * test can read `CURLOPT_RESOLVE` back off a handle; a test shaped like
+     * "the handle was configured" would be theatre.
+     * {@see applyCurlResolve()} is therefore a thin wrapper that applies
+     * whatever this returns, and the logic lives here where it can be
+     * checked. What is NOT covered either way is the `curl_setopt()` call
+     * itself, and that is stated rather than implied.
+     *
+     * Returns null when this request carries no pin — which is the correct
+     * answer, not a failure: such a request never went through
+     * {@see prepareArgs()}, was never SSRF-validated, and is not ours to
+     * pin. Inheriting someone else's entry is precisely the bug this
+     * replaced.
+     *
+     * @param array<string, mixed> $parsedArgs
+     */
+    public static function resolveEntryFor(array $parsedArgs, string $url): ?string
+    {
+        $entry = $parsedArgs[self::PIN_ARG] ?? null;
+        if (!is_string($entry) || $entry === '') {
+            return null;
+        }
+
+        // host : port : ip — limit 3 because the ip may be IPv6.
+        $parts = explode(':', $entry, 3);
+        if (count($parts) !== 3 || $parts[0] === '' || $parts[2] === '') {
+            return null;
+        }
+
+        $requestHost = (string) parse_url($url, PHP_URL_HOST);
+        if ($requestHost === '') {
+            return null;
+        }
+
+        // ⚠ CASE-INSENSITIVE, because DNS names are. The old static lookup
+        // compared raw-case array keys and so was case-SENSITIVE; it only
+        // ever worked because the same `$url` string was used to pin and to
+        // look up. Args can be reused across URL spellings, so the compare
+        // has to be the one DNS actually uses.
+        //
+        // ⚠ No IDN normalisation, and that is consistent rather than an
+        // omission: nothing in this class converts Unicode hosts to ASCII,
+        // including the BLOCKED_HOSTS check, so a Unicode host and its
+        // punycode form are different hosts throughout. A Unicode host also
+        // fails to resolve and is refused before reaching here.
+        if (strcasecmp($parts[0], $requestHost) !== 0) {
+            return null;
+        }
+
+        return $entry;
     }
 
     /**
@@ -843,45 +891,18 @@ final class SafeHttpClient
      */
     public static function applyCurlResolve(&$handle, array $parsedArgs, string $url): void
     {
-        if (empty(self::$pinnedResolves)) {
+        $entry = self::resolveEntryFor($parsedArgs, $url);
+        if ($entry === null) {
             return;
         }
 
-        $host = (string) parse_url($url, PHP_URL_HOST);
-
-        if ($host === '' || !isset(self::$pinnedResolves[$host])) {
-            return;
-        }
-
-        // ⚠ EXPIRY CHECKED BEFORE THE `instanceof` GUARD, DELIBERATELY — but
-        // for a narrower reason than "non-cURL requests", so the reason is
-        // stated exactly. This callback is hooked on `http_api_curl`, which
-        // only the cURL transport fires, and `prepareArgs()` REFUSES
-        // outright when cURL is missing and disables the streams transport
-        // besides. So a pinned request is always a cURL request and this
-        // always runs for one.
-        //
-        // What the guard below is actually for is a handle this class does
-        // not control: another `http_api_curl` listener may replace it, and
-        // before PHP 8 a cURL handle was a `resource` rather than a
-        // `CurlHandle`. Checking expiry first keeps "expired means gone"
-        // true on every path that READS the pin, including those — a
-        // lifetime bound that only applies when something else also holds is
-        // not a bound.
-        if (self::$pinnedResolves[$host]['expires'] <= time()) {
-            unset(self::$pinnedResolves[$host]);
-
-            return;
-        }
-
+        // ⚠ The `instanceof` guard is for a handle this class does not
+        // control: another `http_api_curl` listener may replace it, and
+        // before PHP 8 a cURL handle was a `resource`. There is no
+        // fail-open branch behind it any more — a request that carries a
+        // pin always has one to apply.
         if ($handle instanceof \CurlHandle) {
-            curl_setopt($handle, CURLOPT_RESOLVE, [self::$pinnedResolves[$host]['entry']]);
+            curl_setopt($handle, CURLOPT_RESOLVE, [$entry]);
         }
-
-        // Prompt clearing is still owned by get()/post()'s finally block, so
-        // an exception, early return, or redirect on a different host cannot
-        // leave a stale pin resident for the rest of the request. The expiry
-        // above is the BACKSTOP for the callers that cannot clear: it bounds
-        // the damage, it does not replace the clear.
     }
 }
