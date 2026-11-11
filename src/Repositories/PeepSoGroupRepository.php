@@ -487,8 +487,18 @@ final class PeepSoGroupRepository
      * it and format in PHP. `joined_at` stays for back-compat only
      * (bcc-trust switches in a paired PR; deploy order core-first).
      *
+     * ⚠ `user_status` is the MEMBERSHIP ROLE, and it is here because the
+     * `LIKE 'member%'` filter above is BROADER than "may post". It admits
+     * `member_readonly`, which reads but cannot contribute. A caller that
+     * only needs "is this viewer a member" can keep using row PRESENCE and
+     * ignore this field — that is every existing caller. A caller deciding
+     * whether someone may WRITE must read `user_status` and compare it
+     * against the posting-capable set, because presence alone would answer
+     * yes for a read-only member. Returning it here keeps that decision a
+     * single batched query instead of one per group.
+     *
      * @param int[] $groupIds
-     * @return array<int, object{group_id: numeric-string, joined_at: string, gm_joined_utc: numeric-string}>
+     * @return array<int, object{group_id: numeric-string, joined_at: string, gm_joined_utc: numeric-string, user_status: string}>
      */
     public static function findUserMemberships(int $userId, array $groupIds): array
     {
@@ -504,7 +514,8 @@ final class PeepSoGroupRepository
         $sql = $wpdb->prepare(
             "SELECT gm_group_id AS group_id,
                     gm_joined AS joined_at,
-                    UNIX_TIMESTAMP(gm_joined) AS gm_joined_utc
+                    UNIX_TIMESTAMP(gm_joined) AS gm_joined_utc,
+                    gm_user_status AS user_status
                FROM {$members}
               WHERE gm_user_id = %d
                 AND gm_group_id IN ({$placeholders})
@@ -513,7 +524,12 @@ final class PeepSoGroupRepository
             ...$args
         );
 
-        /** @var list<object{group_id: numeric-string, joined_at: string, gm_joined_utc: numeric-string}>|null $rows */
+        // ⚠ `|null` is correct HERE, unlike for get_col: get_results returns
+        // null when the QUERY STRING is empty, and `last_result` (so, []) on
+        // a query error. Either way `?: []` below yields no memberships, so
+        // a failed lookup reads as "not a member" — which is the closed
+        // direction for every caller, including the posting decision.
+        /** @var list<object{group_id: numeric-string, joined_at: string, gm_joined_utc: numeric-string, user_status: string}>|null $rows */
         $rows = $wpdb->get_results($sql);
 
         $map = [];
