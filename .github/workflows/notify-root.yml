@@ -7,7 +7,8 @@ name: Notify cross-repo guards
 #
 # Requires a DISPATCH_TOKEN repo secret: a fine-grained PAT with
 # "Contents: read and write" on simontx1983/Blue-collar-crypto. Without it this
-# workflow warns and no-ops (non-breaking).
+# workflow FAILS (F-43): a silent skip meant the cross-repo guards quietly
+# stopped re-checking this repo's pushes while every run looked green.
 
 on:
   push:
@@ -29,8 +30,8 @@ jobs:
           GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::DISPATCH_TOKEN not set — skipping cross-repo guard trigger. See workflow header."
-            exit 0
+            echo "::error::DISPATCH_TOKEN not set - the cross-repo guards will NOT re-check this push. See workflow header."
+            exit 1
           fi
           gh api --method POST repos/simontx1983/Blue-collar-crypto/dispatches \
             -f event_type=sibling-push \
