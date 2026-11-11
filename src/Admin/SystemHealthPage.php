@@ -50,8 +50,7 @@ final class SystemHealthPage
             'Health',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render'],
-            AdminMenu::ORDER_HEALTH
+            [self::class, 'render']
         );
     }
 

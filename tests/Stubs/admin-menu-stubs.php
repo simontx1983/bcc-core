@@ -1,7 +1,7 @@
 <?php
 /**
  * Global-namespace WP stubs for AdminMenuTest: apply_filters reads
- * $GLOBALS['__filters'], remove_submenu_page edits $GLOBALS['submenu'].
+ * $GLOBALS['__filters'], tests seed $GLOBALS['submenu'] directly.
  *
  * @package BCC\Core\Tests
  */
@@ -16,16 +16,5 @@ if (!function_exists('apply_filters')) {
     function apply_filters(string $hook, $value)
     {
         return $GLOBALS['__filters'][$hook] ?? $value;
-    }
-}
-
-if (!function_exists('remove_submenu_page')) {
-    function remove_submenu_page(string $parent, string $slug): void
-    {
-        foreach ($GLOBALS['submenu'][$parent] ?? [] as $i => $item) {
-            if ($item[2] === $slug) {
-                unset($GLOBALS['submenu'][$parent][$i]);
-            }
-        }
     }
 }

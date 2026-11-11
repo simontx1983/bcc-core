@@ -45,8 +45,7 @@ final class CronPage
             'Cron',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render'],
-            AdminMenu::ORDER_CRON
+            [self::class, 'render']
         );
     }
 

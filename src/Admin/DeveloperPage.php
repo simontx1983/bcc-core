@@ -44,15 +44,15 @@ final class DeveloperPage
 
     public static function registerMenu(): void
     {
-        // Listed only when BCC_DEV_TOOLS === true; see AdminMenu::pruneMenu().
+        // Listed only when BCC_DEV_TOOLS === true; otherwise registered
+        // with no parent (URL still works). See AdminMenu::parentFor().
         add_submenu_page(
-            AdminMenu::SYSTEM,
+            AdminMenu::parentFor(AdminMenu::SYSTEM, self::PAGE_SLUG),
             'Developer',
             'Developer',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render'],
-            AdminMenu::ORDER_DEV
+            [self::class, 'render']
         );
     }
 

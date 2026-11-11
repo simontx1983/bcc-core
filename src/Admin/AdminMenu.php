@@ -13,34 +13,48 @@ namespace BCC\Core\Admin;
  *   - BCC System     (bcc-core,  pos 27) — health, keys, cron, audit log,
  *                                          and the Developer group.
  *
- * Developer pages (engineer diagnostics + destructive repair) are listed
- * only when wp-config defines `BCC_DEV_TOOLS` as exactly `true` — same
- * strict idiom as BCC_REPAIR_ENABLED. Otherwise their menu entries are
- * removed late (priority 999, same pass shape as {@see HideWpDefaults}).
- * remove_submenu_page() drops only the MENU ENTRY: the page stays
- * registered, so a direct URL (and every admin-post redirect back to it)
- * keeps working for manage_options users. This is decluttering, not an
- * access control — each page keeps its own capability / gate checks.
+ * HIDDEN PAGES. A page that should be reachable by URL but not listed —
+ * developer pages while `BCC_DEV_TOOLS` is not exactly `true` (same strict
+ * idiom as BCC_REPAIR_ENABLED), and alias pages kept for old links — is
+ * registered with an EMPTY parent via {@see parentFor()}. That is WP's
+ * supported "page without a menu entry": it stays in $_registered_pages,
+ * so direct URLs and admin-post redirects keep working. (Removing the
+ * entry with remove_submenu_page() instead makes WP refuse the page with
+ * "Sorry, you are not allowed" — that is why this does not do that.)
+ * This is decluttering, not access control: every page keeps its own
+ * capability / gate checks.
  *
- * Plugins contribute slugs through two filters:
- *   - bcc_admin_dev_pages    — hidden unless BCC_DEV_TOOLS === true.
- *   - bcc_admin_hidden_pages — always hidden (alias pages kept for old URLs).
+ * ORDER. add_submenu_page()'s $position applies at insert time, so the
+ * final order would depend on which plugin's admin_menu callback ran
+ * first. {@see sortMenus()} runs last and orders each BCC menu by an
+ * explicit slug list (filter `bcc_admin_menu_order`), also dropping the
+ * duplicate first item WP auto-inserts when a submenu registers before
+ * the landing page.
+ *
+ * Filters:
+ *   - bcc_admin_dev_pages    — slugs hidden unless BCC_DEV_TOOLS === true.
+ *   - bcc_admin_hidden_pages — slugs always hidden (alias pages).
+ *   - bcc_admin_menu_order   — array<parent slug, list<child slug>>.
  */
 final class AdminMenu
 {
     public const SYSTEM          = SystemHealthPage::PAGE_SLUG;
     public const SYSTEM_POSITION = 27;
 
-    /** Submenu ordering inside BCC System. Gaps leave room for contributors. */
-    public const ORDER_HEALTH    = 0;
-    public const ORDER_API_KEYS  = 10;
-    public const ORDER_CRON      = 20;
-    public const ORDER_AUDIT     = 30;
-    public const ORDER_DEV       = 80;
+    /** BCC System order; contributors' slugs slot in by filter. */
+    private const SYSTEM_ORDER = [
+        SystemHealthPage::PAGE_SLUG,
+        ApiKeysPage::PAGE_SLUG,
+        CronPage::PAGE_SLUG,
+        'bcc-sessions',
+        DeveloperPage::PAGE_SLUG,
+        'bcc-trust-debug',
+        'bcc-system-repair',
+    ];
 
     public static function register(): void
     {
-        add_action('admin_menu', [self::class, 'pruneMenu'], 999);
+        add_action('admin_menu', [self::class, 'sortMenus'], 1000);
     }
 
     public static function devToolsEnabled(): bool
@@ -48,29 +62,76 @@ final class AdminMenu
         return defined('BCC_DEV_TOOLS') && BCC_DEV_TOOLS === true;
     }
 
-    public static function pruneMenu(): void
+    /**
+     * Parent slug to register $slug under: $parent normally, '' (listed
+     * nowhere, still reachable by URL) when the page is hidden.
+     */
+    public static function parentFor(string $parent, string $slug): string
+    {
+        return self::isHidden($slug) ? '' : $parent;
+    }
+
+    public static function isHidden(string $slug): bool
+    {
+        if (in_array($slug, self::slugs('bcc_admin_hidden_pages', []), true)) {
+            return true;
+        }
+        return !self::devToolsEnabled()
+            && in_array($slug, self::slugs('bcc_admin_dev_pages', [DeveloperPage::PAGE_SLUG]), true);
+    }
+
+    public static function sortMenus(): void
     {
         global $submenu;
         if (!is_array($submenu)) {
             return;
         }
 
-        $hidden = self::slugs('bcc_admin_hidden_pages', []);
-        if (!self::devToolsEnabled()) {
-            $hidden = array_merge($hidden, self::slugs('bcc_admin_dev_pages', [DeveloperPage::PAGE_SLUG]));
-        }
-        if ($hidden === []) {
+        $orders = apply_filters('bcc_admin_menu_order', [self::SYSTEM => self::SYSTEM_ORDER]);
+        if (!is_array($orders)) {
             return;
         }
 
-        foreach ($submenu as $parent => $items) {
-            foreach ((array) $items as $item) {
-                $slug = isset($item[2]) ? (string) $item[2] : '';
-                if ($slug !== '' && in_array($slug, $hidden, true)) {
-                    remove_submenu_page((string) $parent, $slug);
-                }
+        foreach ($orders as $parent => $order) {
+            $parent = (string) $parent;
+            if (!isset($submenu[$parent]) || !is_array($submenu[$parent]) || !is_array($order)) {
+                continue;
             }
+            $submenu[$parent] = self::ordered($submenu[$parent], array_values(array_map('strval', $order)));
         }
+    }
+
+    /**
+     * Dedupe by slug (the LAST registration wins — WP's auto-inserted
+     * parent copy always comes first), then stable-sort by $order;
+     * slugs not in $order keep their relative order after the listed ones.
+     *
+     * @param array<int|string, mixed> $items
+     * @param list<string>             $order
+     * @return list<mixed>
+     */
+    public static function ordered(array $items, array $order): array
+    {
+        $bySlug = [];
+        foreach ($items as $item) {
+            $slug = is_array($item) && isset($item[2]) ? (string) $item[2] : '';
+            if ($slug === '') {
+                continue;
+            }
+            unset($bySlug[$slug]);           // keep the last, at its own position
+            $bySlug[$slug] = $item;
+        }
+
+        $rank = array_flip($order);
+        $seq  = array_flip(array_keys($bySlug));
+        $keys = array_keys($bySlug);
+        usort($keys, static function (string $a, string $b) use ($rank, $seq): int {
+            $ra = $rank[$a] ?? PHP_INT_MAX;
+            $rb = $rank[$b] ?? PHP_INT_MAX;
+            return $ra === $rb ? $seq[$a] <=> $seq[$b] : $ra <=> $rb;
+        });
+
+        return array_map(static fn (string $k) => $bySlug[$k], $keys);
     }
 
     /**

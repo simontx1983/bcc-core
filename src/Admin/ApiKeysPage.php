@@ -48,8 +48,7 @@ final class ApiKeysPage
             'API Keys',
             'manage_options',
             self::PAGE_SLUG,
-            [self::class, 'render'],
-            AdminMenu::ORDER_API_KEYS
+            [self::class, 'render']
         );
     }
 
