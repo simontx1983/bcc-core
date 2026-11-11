@@ -674,7 +674,7 @@ final class SafeHttpClient
             return null; // IP literal — no DNS to pin.
         }
 
-        $port = (int) ($parsed['port'] ?? ($scheme === 'https' ? 443 : 80));
+        $port = self::portOf($parsed);
 
         // Serve from per-request cache when fresh. A PHP-FPM worker
         // processing a burst of calls to the same host would otherwise
@@ -822,7 +822,47 @@ final class SafeHttpClient
      */
     private static function formatResolveEntry(string $host, int $port, string $ip): string
     {
-        return "{$host}:{$port}:{$ip}";
+        // ⚠ IPv6 IS BRACKETED. `resolvePublicIp()` falls back to an AAAA
+        // record, so `$ip` can itself contain colons, and `host:port:[ip]` is
+        // the form cURL documents for that case.
+        //
+        // ⚠ NOT A LIVE BUG TODAY, and worth being precise about rather than
+        // overstating: the bare form was tested against the deployed libcurl
+        // (8.16.0) and its own verbose output shows the entry accepted and
+        // used — `Added a.invalid:9999:::1 to DNS cache`, then
+        // `Trying [::1]:9999...`. So an AAAA-only host was NOT going out
+        // unpinned.
+        //
+        // ⭐ What justifies the change is the general mechanism the same
+        // probe exposed: an UNPARSEABLE entry is silently SKIPPED —
+        // `Resolve address 'not-an-ip' found illegal` / `Couldn't parse
+        // CURLOPT_RESOLVE entry` — and the request then proceeds with cURL's
+        // own DNS, with no error returned to the caller. A pin that fails to
+        // parse therefore fails OPEN. Emitting the documented form on every
+        // libcurl build, not just the one measured here, is defence against
+        // that class rather than a fix for an observed break.
+        $isIpv6 = str_contains($ip, ':');
+
+        return $isIpv6
+            ? "{$host}:{$port}:[{$ip}]"
+            : "{$host}:{$port}:{$ip}";
+    }
+
+    /**
+     * The effective port of a parsed URL — explicit, or the scheme default.
+     *
+     * ⭐ ONE derivation, used by both the pin writer
+     * ({@see validateAndPinUrl()}) and the pin reader
+     * ({@see resolveEntryFor()}). They compare ports now, so two copies of
+     * this rule could disagree and silently refuse every pin.
+     *
+     * @param array<string, mixed> $parsed output of `parse_url()`
+     */
+    private static function portOf(array $parsed): int
+    {
+        $scheme = is_string($parsed['scheme'] ?? null) ? $parsed['scheme'] : '';
+
+        return (int) ($parsed['port'] ?? ($scheme === 'https' ? 443 : 80));
     }
 
     /**
@@ -858,7 +898,12 @@ final class SafeHttpClient
             return null;
         }
 
-        $requestHost = (string) parse_url($url, PHP_URL_HOST);
+        $parsedUrl = parse_url($url);
+        if (!is_array($parsedUrl)) {
+            return null;
+        }
+
+        $requestHost = is_string($parsedUrl['host'] ?? null) ? $parsedUrl['host'] : '';
         if ($requestHost === '') {
             return null;
         }
@@ -875,6 +920,21 @@ final class SafeHttpClient
         // punycode form are different hosts throughout. A Unicode host also
         // fails to resolve and is refused before reaching here.
         if (strcasecmp($parts[0], $requestHost) !== 0) {
+            return null;
+        }
+
+        // ⚠ THE PORT HAS TO MATCH TOO, and getting this wrong fails OPEN.
+        // A `CURLOPT_RESOLVE` entry only applies to the host AND port it
+        // names, so handing cURL `host:443:ip` for a port-80 connection does
+        // not misdirect anything — it simply does not match, and cURL
+        // resolves the name itself. The request would go out UNPINNED while
+        // this method reported a pin, which is the shape of defect review
+        // caught in the TTL approach.
+        //
+        // Not reachable today, because each `prepareArgs()` call pairs with
+        // one URL. It is latent for exactly the reason the host check is:
+        // args are an ordinary array and nothing stops a caller reusing them.
+        if ((int) $parts[1] !== self::portOf($parsedUrl)) {
             return null;
         }
 
