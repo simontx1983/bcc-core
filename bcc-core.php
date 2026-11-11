@@ -840,6 +840,27 @@ add_filter('bcc_system_health', function (array $health): array {
             'batch_total_failure',
             'watermark_withheld',
         ],
+        // bcc-trust HiddenActivityRepository (F-98 / F-77): the
+        // moderation-hidden act_id list every feed excludes. Reads FAIL
+        // CLOSED, and each of these is a read that would previously have
+        // re-exposed hidden posts:
+        //   - exists_read_failed: a single-row check errored; answered "hidden".
+        //   - list_read_failed: the full-list read errored (never cached).
+        //   - served_last_good: the persisted last-known-good list was
+        //     served instead; the paired error log carries its age.
+        //   - no_last_good: a failed read with no last-good list (the
+        //     request fails rather than showing hidden posts).
+        //   - ceiling_reached: more hidden rows than the 50,000 read
+        //     ceiling; the oldest beyond it are NOT excluded.
+        // ⚠ BAKE BEFORE ALERTING: expected steady state is zero, never yet
+        // observed over a real window. Record first; threshold later.
+        'moderation_hidden_ids' => [
+            'exists_read_failed',
+            'list_read_failed',
+            'served_last_good',
+            'no_last_good',
+            'ceiling_reached',
+        ],
     ]);
 
     return $health;
