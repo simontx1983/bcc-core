@@ -177,6 +177,38 @@ namespace BCC\Core\Feed\Tests\FollowerVisibility {
             self::assertStringContainsString('WHEN 20 THEN IF(0 > 0, 1, 0)', $wpdb->lastSql);
         }
 
+        /**
+         * PRODUCT DECISION (user, 2026-11-11): BCC has no friends UI, so
+         * the frontend hides "Friends only". Level 30 stays valid
+         * server-side and, with an empty friends list, must behave
+         * exactly like "Only me" — the listed user appears to themselves
+         * and to admins, and to nobody else.
+         *
+         * Named explicitly so the decision cannot be quietly relaxed, and
+         * asserted for a degraded read (`null`) as well as a genuinely
+         * empty one (`[]`), because those arrive from different upstream
+         * failure paths and must behave identically.
+         */
+        public function testLevel30WithNoFriendsAdmitsNobodyButTheListedUser(): void
+        {
+            foreach ([null, []] as $friends) {
+                $wpdb = $this->installWpdb();
+                PeepSoFollowerRepository::getFollowers(5, 24, 0, 42, $friends, true);
+
+                self::assertStringContainsString(
+                    'WHEN 30 THEN 0',
+                    $wpdb->lastSql,
+                    'the friends arm admits nobody'
+                );
+                self::assertStringContainsString(
+                    'uf_active_user_id = 42 THEN 1',
+                    $wpdb->lastSql,
+                    'except the viewer themselves, who must not vanish from their own row'
+                );
+                self::assertStringNotContainsString('WHEN 30 THEN 1', $wpdb->lastSql);
+            }
+        }
+
         public function testDuplicateAndNonPositiveFriendIdsAreDropped(): void
         {
             $wpdb = $this->installWpdb();

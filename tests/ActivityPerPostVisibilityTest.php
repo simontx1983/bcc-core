@@ -212,6 +212,55 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             self::assertStringContainsString('p.post_author = 42 THEN 1', $sql);
         }
 
+        /**
+         * PRODUCT DECISION (user, 2026-11-11): BCC has no friends UI, so
+         * the frontend hides "Friends only". Level 30 stays valid
+         * server-side, and with an empty friends list must behave exactly
+         * like "Only me" — owner and admins, nobody else.
+         *
+         * Named explicitly so that decision cannot be quietly relaxed: a
+         * future change that made an empty level-30 list admit signed-in
+         * viewers, or fall through to the public arm, fails here rather
+         * than silently publishing posts the author expected to be
+         * private.
+         *
+         * Admins are not in this assertion because they are not expressed
+         * in SQL — an admin read passes `$enforcePostVisibility = false`,
+         * which the switch-off tests above cover.
+         */
+        public function testLevel30WithNoFriendsAdmitsNobodyButTheOwner(): void
+        {
+            $sql = $this->sqlFor(42, [], true);
+
+            self::assertStringContainsString('WHEN 30 THEN 0', $sql, 'nobody is admitted by the friends arm');
+            self::assertStringContainsString(
+                'CASE WHEN 42 > 0 AND p.post_author = 42 THEN 1',
+                $sql,
+                'except the owner, whose own posts stay visible'
+            );
+            self::assertStringNotContainsString('WHEN 30 THEN 1', $sql, 'the arm never admits unconditionally');
+            self::assertStringNotContainsString('WHEN 40', $sql, 'there is no 40 arm at all — it falls to ELSE 0');
+        }
+
+        /**
+         * A degraded friends read must deny, not open up. bcc-trust owns
+         * that read, and whatever it fails with — `null` or `[]` — arrives
+         * here as "a friend of nobody" and collapses to the same literal
+         * 0. Asserted for both shapes because they come from different
+         * failure paths upstream.
+         */
+        public function testADegradedFriendsReadFailsClosed(): void
+        {
+            foreach ([null, []] as $degraded) {
+                $sql = $this->sqlFor(42, $degraded, true);
+                self::assertStringContainsString(
+                    'WHEN 30 THEN 0',
+                    $sql,
+                    'a failed friends lookup must deny level 30, never admit it'
+                );
+            }
+        }
+
         public function testNonPositiveAndDuplicateFriendIdsAreDropped(): void
         {
             $sql = $this->sqlFor(42, [7, 7, 0, -3, 9], true);
