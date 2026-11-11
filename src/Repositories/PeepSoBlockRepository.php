@@ -30,12 +30,138 @@ final class PeepSoBlockRepository
     }
 
     /**
+     * Clear `$wpdb->last_error` so a FAILURE FROM AN EARLIER QUERY cannot
+     * be mistaken for this one's.
+     *
+     * ⚠⚠ LOAD-BEARING, not tidiness. WordPress leaves `last_error` set
+     * after any failed query anywhere earlier in the request. The callers
+     * below fail CLOSED on a detected error, so without this one
+     * unrelated failure would make every block read for the rest of that
+     * request report "unknown" — withholding every message preview and
+     * refusing every send until the request ended. A false positive here
+     * is expensive, which is why there is a test for exactly this.
+     *
+     * ⚠ It is a named helper rather than an inline assignment for a
+     * reason worth recording: assigning the literal in-line makes PHPStan
+     * narrow the property to `''` and NOT widen it again across the
+     * `get_var()` call, so the error check below was reported as
+     * `notIdentical.alwaysFalse` — i.e. statically provable DEAD CODE.
+     * It is not dead at runtime (real `wpdb::query()` sets `last_error`
+     * on failure), but PHPStan cannot see that side effect, and a check
+     * the analyser believes can never fire is a check nobody should
+     * trust. Factoring both the clear and the read into their own scopes
+     * states the dependency honestly instead of casting or suppressing.
+     */
+    private static function clearLastError(): void
+    {
+        global $wpdb;
+        $wpdb->last_error = '';
+    }
+
+    /**
+     * Did the most recent query report a driver error?
+     *
+     * Paired with `clearLastError()`: cleared before, checked after, so a
+     * non-empty value can only have come from the query in between.
+     */
+    private static function lastReadFailed(): bool
+    {
+        global $wpdb;
+        return (string) $wpdb->last_error !== '';
+    }
+
+    /**
+     * Run a SELECT and report whether its result can be TRUSTED.
+     *
+     * Returns true when the rows are this query's and may be read with
+     * `get_var(null)` / `get_col(null)`; false when the read failed and
+     * the caller must answer "unknown".
+     *
+     * ⚠⚠ WHY `query()` IS CALLED EXPLICITLY RATHER THAN LETTING
+     * `get_var($sql)` DO IT. `get_var()` and `get_col()` call `query()`
+     * internally and then DISCARD its return value — and
+     * `wpdb::query()` has failure paths that return false WITHOUT
+     * setting `last_error`, so `last_error` alone is NOT an exhaustive
+     * failure signal. In `class-wpdb.php` those are the `! $this->ready`
+     * guard (a failed reconnect) and an empty result from the `query`
+     * filter.
+     *
+     * ⚠⚠ AND BOTH OF THOSE RETURN **BEFORE** `flush()`, which is what
+     * makes it worse than a missing null: `last_result` is not cleared
+     * either, so it still holds the PREVIOUS query's rows. A probe that
+     * trusted `get_var()` there could read a stale value from an
+     * unrelated SELECT and answer a confident "blocked" — not merely
+     * "not blocked". Checking `query()`'s own return is the only way to
+     * see it.
+     *
+     * ⚠ THE COMPARISON MUST BE `=== false`, NOT `!$ok`. For a SELECT,
+     * `query()` returns the ROW COUNT, so a legitimate "no such row"
+     * returns 0 — and `!0` is true. Using a falsy test would report
+     * every genuine "not blocked" as a failed read, which under
+     * fail-closed callers means withholding every message and refusing
+     * every send. There is a test for exactly that.
+     */
+    private static function runProbe(string $sql): bool
+    {
+        global $wpdb;
+
+        self::clearLastError();
+        $ok = $wpdb->query($sql);
+
+        return $ok !== false && !self::lastReadFailed();
+    }
+
+    /**
      * Is $blockerId currently blocking $blockedId?
      *
      * One-way check — symmetric blocks are two rows. Use
      * `isMutuallyBlocked` if you need both directions.
+     *
+     * ⚠ FAIL-OPEN BY CONTRACT, and deliberately left that way. A read
+     * failure is reported as `false` ("not blocked"), which for a gate is
+     * the unsafe direction. Callers that must not fail open should use
+     * `isBlockingOrUnknown()` and decide for themselves — the right
+     * direction is NOT the same at every call site, which is why this is
+     * not simply changed here. See that method's docblock.
+     *
+     * Kept so bcc-trust's existing callers keep compiling while they are
+     * migrated one at a time: bcc-trust CI resolves bcc-core's DEFAULT
+     * BRANCH at run time, so widening this signature would turn
+     * bcc-trust `main` red at every caller the moment it landed here.
      */
     public static function isBlocking(int $blockerId, int $blockedId): bool
+    {
+        return self::isBlockingOrUnknown($blockerId, $blockedId) === true;
+    }
+
+    /**
+     * `isBlocking()` that can say "I could not tell".
+     *
+     * Returns true (blocked), false (definitely not blocked), or NULL
+     * when the read itself failed and the answer is unknown.
+     *
+     * ⚠⚠ WHY THIS EXISTS. `$wpdb->get_var()` returns null BOTH for "no
+     * such row" and for a failed query, so the old `$found !== null`
+     * reported a DB error as "not blocked" — opening every gate that
+     * depends on it. The caller cannot fix that without being told, and
+     * the correct direction differs per site: withholding a message
+     * preview is cheap and safe, suppressing a notification is cheap,
+     * but refusing every send or emptying a feed is not. So this reports
+     * the uncertainty and each caller chooses.
+     *
+     * ⚠⚠ `last_error` IS CLEARED FIRST, and that is load-bearing rather
+     * than tidy. WordPress leaves `last_error` set after any failed query
+     * anywhere earlier in the request; without the clear, one unrelated
+     * failure would make every probe for the rest of that request report
+     * "unknown", and under fail-closed semantics that means withholding
+     * every preview and refusing every send. A stale error must not read
+     * as this query's failure, and a test asserts exactly that.
+     *
+     * ⚠ The argument guards still answer FALSE, not null. A
+     * non-positive or self-referential pair is a definite "not blocked",
+     * not an unknown — no query is issued and there is nothing to fail.
+     */
+    public static function isBlockingOrUnknown(int $blockerId, int $blockedId): ?bool
     {
         if ($blockerId <= 0 || $blockedId <= 0 || $blockerId === $blockedId) {
             return false;
@@ -46,22 +172,48 @@ final class PeepSoBlockRepository
         // Existence probe, not COUNT(*): COUNT scans every matching row
         // (its LIMIT binds to the one aggregate row), SELECT 1 stops at
         // the first hit.
-        $found = $wpdb->get_var($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT 1 FROM {$table}
               WHERE blk_user_id = %d
                 AND blk_blocked_id = %d
               LIMIT 1",
             $blockerId,
             $blockedId
-        ));
-        return $found !== null;
+        );
+
+        if (!self::runProbe($sql)) {
+            return null;
+        }
+
+        return $wpdb->get_var(null) !== null;
     }
 
     /**
      * Either-direction check — used for view-model gating ("don't show
      * Alice the post if she blocked Bob OR Bob blocked her").
+     *
+     * ⚠ Fail-open by contract, like `isBlocking()`. Use
+     * `isMutuallyBlockedOrUnknown()` where that matters.
      */
     public static function isMutuallyBlocked(int $userA, int $userB): bool
+    {
+        return self::isMutuallyBlockedOrUnknown($userA, $userB) === true;
+    }
+
+    /**
+     * `isMutuallyBlocked()` that can say "I could not tell".
+     *
+     * ⚠ NOTE WHAT "MUTUALLY" MEANS HERE: despite the name this is an
+     * EITHER-DIRECTION probe — it is true when A blocked B *or* B blocked
+     * A, not only when both did. A caller failing closed on null is
+     * therefore refusing on "either party blocked, or we could not tell",
+     * which is the intended reading for a send gate but is worth knowing
+     * before reusing it anywhere else.
+     *
+     * See `isBlockingOrUnknown()` for why `last_error` is cleared first
+     * and why the argument guards answer false rather than null.
+     */
+    public static function isMutuallyBlockedOrUnknown(int $userA, int $userB): ?bool
     {
         if ($userA <= 0 || $userB <= 0 || $userA === $userB) {
             return false;
@@ -70,15 +222,20 @@ final class PeepSoBlockRepository
         $table = self::table();
 
         // Existence probe — see isBlocking().
-        $found = $wpdb->get_var($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT 1 FROM {$table}
               WHERE (blk_user_id = %d AND blk_blocked_id = %d)
                  OR (blk_user_id = %d AND blk_blocked_id = %d)
               LIMIT 1",
             $userA, $userB,
             $userB, $userA
-        ));
-        return $found !== null;
+        );
+
+        if (!self::runProbe($sql)) {
+            return null;
+        }
+
+        return $wpdb->get_var(null) !== null;
     }
 
     /**
@@ -167,6 +324,48 @@ final class PeepSoBlockRepository
      */
     public static function getBlockedSet(int $blockerId, array $candidateIds): array
     {
+        return self::getBlockedSetOrUnknown($blockerId, $candidateIds) ?? [];
+    }
+
+    /**
+     * `getBlockedSet()` that can say "I could not tell".
+     *
+     * Returns the blocked subset, or NULL when the read failed.
+     *
+     * ⚠⚠ THIS IS THE #122 WITHHOLD PATH, and it is the clearest case
+     * for failing closed. `get_col()` returns an EMPTY ARRAY both for "no
+     * candidate is blocked" and for a failed query, and in this feature an
+     * empty set means SHOW EVERY SENDER'S TEXT — exactly the disclosure
+     * the feature exists to prevent. A caller that treats null as
+     * "withhold everything" degrades to placeholders on a DB error, which
+     * is ugly, safe and self-correcting.
+     *
+     * ⚠ `get_col()` never returns null in real `wpdb` — it builds and
+     * returns an array unconditionally — so there is no null to inspect
+     * here at all, and an empty array is indistinguishable from "no
+     * candidate is blocked". The failure signal therefore comes entirely
+     * from `runProbe()`, which checks `query()`'s OWN return value as
+     * well as `last_error`; see its docblock for why `last_error` alone
+     * is not exhaustive.
+     *
+     * ⚠ The early returns still answer `[]`, not null — no candidates
+     * means a definite empty set, with no query issued and nothing to
+     * fail.
+     *
+     * ⚠ PRE-EXISTING AND NOT FIXED HERE: the candidate list is sliced to
+     * 500. A caller passing more than 500 candidates silently gets the
+     * remainder treated as unblocked — the same silent-incompleteness
+     * class as `getBlockedIds()`'s LIMIT, and a fail-OPEN that no error
+     * detection can catch. Today's callers pass at most ~100 (the #122
+     * inbox and thread batches), so it is latent; recorded rather than
+     * widened, because changing it is a behaviour decision and not this
+     * change's to make.
+     *
+     * @param list<int>|array<int|string, mixed> $candidateIds
+     * @return array<int, true>|null
+     */
+    public static function getBlockedSetOrUnknown(int $blockerId, array $candidateIds): ?array
+    {
         if ($blockerId <= 0 || $candidateIds === []) {
             return [];
         }
@@ -186,13 +385,19 @@ final class PeepSoBlockRepository
         $table = self::table();
         $ph    = implode(',', array_fill(0, count($ids), '%d'));
 
-        /** @var list<string>|null $rows */
-        $rows = $wpdb->get_col($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT blk_blocked_id FROM {$table}
               WHERE blk_user_id = %d
                 AND blk_blocked_id IN ({$ph})",
             ...array_merge([$blockerId], $ids)
-        ));
+        );
+
+        if (!self::runProbe($sql)) {
+            return null;
+        }
+
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col(null);
 
         $out = [];
         foreach (($rows ?: []) as $raw) {
