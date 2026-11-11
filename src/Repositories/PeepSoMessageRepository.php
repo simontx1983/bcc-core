@@ -510,6 +510,68 @@ final class PeepSoMessageRepository
     }
 
     /**
+     * Did this viewer actually RECEIVE this message? i.e. does a
+     * recipient row exist for the pair.
+     *
+     * Added for bcc-trust #122's tap-to-reveal route, which must never
+     * hand over text the viewer was not sent. Participation in the
+     * conversation is NOT sufficient, because a participant can be
+     * missing a recipient row for a message in three ordinary ways:
+     *
+     *   1. ⚠ THE OTHER PARTY BLOCKED THEM. `PeepSoMessageRecipients::add_message`
+     *      builds rows from `get_participants($parentId, $currentUser)`,
+     *      and that overload LEFT JOINs `peepso_blocks` in BOTH
+     *      directions with `AND blk_blocked_id IS NULL`
+     *      (`messageparticipants.php:119-129`). So for a message sent
+     *      after a block, PeepSo deliberately creates no row for the
+     *      blocked side — it was never delivered.
+     *   2. the message predates their joining a group conversation.
+     *   3. they deleted that one message from their own view:
+     *      `delete_from_conversation` HARD-DELETES their row
+     *      (`messagerecipients.php:197-206`) — note its docblock claims
+     *      a "soft delete" and is wrong about its own behaviour.
+     *
+     * ⚠⚠ THE PREDICATE DELIBERATELY MATCHES `findMessagesInConversation`
+     * EXACTLY, including the absence of an `mrec_deleted` filter, because
+     * the invariant it exists to enforce is "a reveal returns no more
+     * than the thread read would have returned for this viewer".
+     *
+     * That asymmetry is intentional and worth understanding before
+     * anyone "tightens" it. `delete_from_inbox` soft-sets
+     * `mrec_deleted = 1` across a whole conversation
+     * (`messagerecipients.php:158-180`), and the thread read does NOT
+     * filter it — so a conversation removed from the inbox is still
+     * readable by id. Adding `AND mrec_deleted = 0` here would make a
+     * reveal STRICTER than the thread, producing a message the viewer
+     * can see in the thread but cannot reveal. The inbox and the unread
+     * counts DO filter it; the per-message read does not.
+     *
+     * Existence probe, not COUNT(*): COUNT scans every matching row
+     * because its LIMIT binds to the one aggregate row, while SELECT 1
+     * stops at the first hit.
+     */
+    public static function viewerReceivedMessage(int $userId, int $messageId): bool
+    {
+        if ($userId <= 0 || $messageId <= 0) {
+            return false;
+        }
+
+        global $wpdb;
+
+        $found = $wpdb->get_var($wpdb->prepare(
+            "SELECT 1
+               FROM {$wpdb->prefix}peepso_message_recipients
+              WHERE mrec_user_id = %d
+                AND mrec_msg_id = %d
+              LIMIT 1",
+            $userId,
+            $messageId
+        ));
+
+        return $found !== null;
+    }
+
+    /**
      * Mark every unread message in `$rootMsgId` as viewed for `$userId`.
      * Wraps PeepSoMessageRecipients::mark_as_viewed (which internally
      * walks the conversation tree via mrec_parent_id).
