@@ -70,6 +70,13 @@ interface TrustReadServiceInterface
      * The NullTrustReadService returns true (suspended) as a fail-closed
      * safety default when bcc-trust is inactive. Admins bypass this
      * via Permissions::is_not_suspended().
+     *
+     * A user with no record is NOT suspended. When the record cannot be
+     * READ (a database fault), implementations throw
+     * SuspensionUnknownException rather than guess either way:
+     * Permissions treats it as UNKNOWN and never caches it.
+     *
+     * @throws SuspensionUnknownException when the suspension state cannot be read
      */
     public function isSuspended(int $userId): bool;
 

@@ -47,12 +47,37 @@ final class Permissions
      *     admins as ordinary users for gating purposes.
      *
      * Result is cached for 60 seconds per user.
+     *
+     * ⚠ An UNKNOWN suspension state (the trust engine could not read it:
+     * SuspensionUnknownException) answers FALSE here, a deny, for this call
+     * only: it is never cached, so the next call re-reads. Callers that would
+     * do something PERSISTENT on a deny (revoke, sign out, suppress, demote)
+     * must use suspensionState() and treat null as "don't act".
      */
     public static function is_not_suspended(?int $user_id = null, bool $allowAdminBypass = true): bool
     {
+        return self::suspensionState($user_id, $allowAdminBypass) === false;
+    }
+
+    /**
+     * Tri-state suspension: TRUE = suspended, FALSE = not suspended,
+     * NULL = UNKNOWN (the trust engine could not read it). Same admin-bypass
+     * and caching rules as is_not_suspended(); an unknown answer is never
+     * cached.
+     *
+     * For paths where a deny would be persistent: a session refresh (a
+     * refused refresh signs the user out), a queue worker (a suppressed row
+     * is terminal), a rank sweep (an unmet rung is saved). They must treat
+     * NULL as "don't act this time", never as suspended.
+     *
+     * A missing or anonymous user is TRUE (suspended), as is_not_suspended()
+     * has always answered false for them.
+     */
+    public static function suspensionState(?int $user_id = null, bool $allowAdminBypass = true): ?bool
+    {
         $user_id = $user_id ?: get_current_user_id();
         if (!$user_id) {
-            return false;
+            return true;
         }
 
         $isAdmin = user_can($user_id, 'manage_options');
@@ -60,7 +85,7 @@ final class Permissions
         // Admin bypass: only when allowed by the caller. Admin UIs keep
         // the bypass; dispute/participation paths opt out.
         if ($allowAdminBypass && $isAdmin) {
-            return true;
+            return false;
         }
 
         // SECURITY: Cache key includes an HMAC so co-installed plugins cannot
@@ -80,19 +105,30 @@ final class Permissions
             if ($isSuspendedCached && $isAdmin && !$allowAdminBypass) {
                 self::logSuspendedAdminBlocked($user_id);
             }
-            return !$isSuspendedCached;
+            return $isSuspendedCached;
         }
 
         // Delegates to the bcc-trust implementation (or NullTrustReadService
         // which returns true — fail-closed) — no concrete coupling required.
-        $isSuspended = ServiceLocator::resolveTrustReadService()->isSuspended($user_id);
+        try {
+            $isSuspended = ServiceLocator::resolveTrustReadService()->isSuspended($user_id);
+        } catch (\BCC\Core\Contracts\SuspensionUnknownException $e) {
+            // ⚠ NOT cached: one failed read must not become a 60s answer.
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[Permissions] suspension state unknown; not cached', [
+                    'user_id' => $user_id,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+            return null;
+        }
         wp_cache_set($cacheKey, $isSuspended, self::CACHE_GROUP, self::CACHE_TTL);
 
         if ($isSuspended && $isAdmin && !$allowAdminBypass) {
             self::logSuspendedAdminBlocked($user_id);
         }
 
-        return !$isSuspended;
+        return $isSuspended;
     }
 
     /**
