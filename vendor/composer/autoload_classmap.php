@@ -6,6 +6,9 @@ $vendorDir = dirname(__DIR__);
 $baseDir = dirname($vendorDir);
 
 return array(
+    'BCC\\Core\\Admin\\AdminMenu' => $baseDir . '/src/Admin/AdminMenu.php',
+    'BCC\\Core\\Admin\\AdminTheme' => $baseDir . '/src/Admin/AdminTheme.php',
+    'BCC\\Core\\Admin\\AdminUi' => $baseDir . '/src/Admin/AdminUi.php',
     'BCC\\Core\\Admin\\ApiKeysPage' => $baseDir . '/src/Admin/ApiKeysPage.php',
     'BCC\\Core\\Admin\\CronPage' => $baseDir . '/src/Admin/CronPage.php',
     'BCC\\Core\\Admin\\DeveloperPage' => $baseDir . '/src/Admin/DeveloperPage.php',

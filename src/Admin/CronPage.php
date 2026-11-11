@@ -40,7 +40,7 @@ final class CronPage
     public static function registerMenu(): void
     {
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenu::SYSTEM,
             'Cron',
             'Cron',
             'manage_options',
@@ -80,8 +80,8 @@ final class CronPage
 
         echo '<tr><th style="width:240px;">wp-cron disabled</th><td>'
             . ($disabled
-                ? self::badge('YES (external trigger expected)', '#46b450')
-                : self::badge('NO (internal cron active)', '#dba617'))
+                ? AdminUi::badge('YES (external trigger expected)', AdminUi::OK)
+                : AdminUi::badge('NO (internal cron active)', AdminUi::WARN))
             . '</td></tr>';
 
         echo '<tr><th>Current UTC</th><td><code>'
@@ -104,7 +104,7 @@ final class CronPage
 
         echo '<h2 style="margin-top:24px;">Canonical hooks ('
             . esc_html((string) count($expected)) . ')</h2>';
-        echo '<p style="color:#666;">Expected by the bcc-* plugins. A "missing" row = drift '
+        echo '<p style="color:var(--bcc-text-secondary);">Expected by the bcc-* plugins. A "missing" row = drift '
             . '(activation-only hook silently not registered on this site). '
             . 'The plugins_loaded self-heal re-registers on next page load; sustained '
             . 'missing rows indicate the self-heal itself is broken.</p>';
@@ -142,17 +142,17 @@ final class CronPage
             $source   = (string) ($meta['source']   ?? '');
             $nextTs   = wp_next_scheduled($hookStr);
 
-            $rowStyle = $nextTs === false ? 'background:#fcf0f1;' : '';
+            $rowStyle = $nextTs === false ? 'background:var(--bcc-danger-bg);' : '';
             echo '<tr style="' . esc_attr($rowStyle) . '">';
             echo '<td><code>' . esc_html($hookStr) . '</code></td>';
             echo '<td><code>' . esc_html($interval) . '</code></td>';
             echo '<td>' . esc_html($source) . '</td>';
             echo '<td>' . ($nextTs === false
-                ? self::badge('MISSING', '#dc3232')
-                : self::badge('✓', '#46b450'))
+                ? AdminUi::badge('MISSING', AdminUi::BAD)
+                : AdminUi::badge('✓', AdminUi::OK))
                 . '</td>';
             echo '<td>' . ($nextTs === false
-                ? '<span style="color:#888;">—</span>'
+                ? '<span style="color:var(--bcc-text-muted);">—</span>'
                 : self::formatNextRun((int) $nextTs))
                 . '</td>';
             echo '</tr>';
@@ -195,7 +195,7 @@ final class CronPage
         usort($rows, fn(array $a, array $b): int => $a['timestamp'] <=> $b['timestamp']);
 
         echo '<h2 style="margin-top:32px;">Currently scheduled (' . esc_html((string) count($rows)) . ')</h2>';
-        echo '<p style="color:#666;">Live read of <code>_get_cron_array()</code>. Includes dynamic hooks '
+        echo '<p style="color:var(--bcc-text-secondary);">Live read of <code>_get_cron_array()</code>. Includes dynamic hooks '
             . '(per-chain <code>bcc_chain_refresh_*</code>, single-event async jobs) that the canonical '
             . 'list above doesn\'t cover.</p>';
 
@@ -218,13 +218,13 @@ final class CronPage
             $hookCol    = '<code>' . esc_html($r['hook']) . '</code>';
             $scheduleHtml = $r['schedule'] !== ''
                 ? '<code>' . esc_html($r['schedule']) . '</code>'
-                : '<span style="color:#888;">single-event</span>';
+                : '<span style="color:var(--bcc-text-muted);">single-event</span>';
 
             $argsHtml = $r['args'] === []
-                ? '<span style="color:#888;">—</span>'
+                ? '<span style="color:var(--bcc-text-muted);">—</span>'
                 : '<code style="font-size:11px;">' . esc_html(self::shortArgs($r['args'])) . '</code>';
 
-            $rowStyle = $isBcc ? '' : 'color:#888;';
+            $rowStyle = $isBcc ? '' : 'color:var(--bcc-text-muted);';
             echo '<tr style="' . esc_attr($rowStyle) . '">';
             echo '<td>' . self::formatNextRun($r['timestamp']) . '</td>';
             echo '<td>' . $hookCol . '</td>';
@@ -257,7 +257,7 @@ final class CronPage
             $display = isset($info['display'])  ? (string) $info['display'] : '';
             $isBcc   = strpos((string) $slug, 'bcc_') === 0;
 
-            $rowStyle = $isBcc ? '' : 'color:#888;';
+            $rowStyle = $isBcc ? '' : 'color:var(--bcc-text-muted);';
             echo '<tr style="' . esc_attr($rowStyle) . '">';
             echo '<td><code>' . esc_html((string) $slug) . '</code></td>';
             echo '<td>' . esc_html(number_format($seconds)) . '</td>';
@@ -277,31 +277,22 @@ final class CronPage
         $now   = time();
         $delta = $ts - $now;
 
-        $color = '#46b450';
+        $tone = AdminUi::OK;
         if ($delta < -300) {
-            $color = '#dc3232';
+            $tone = AdminUi::BAD;
         } elseif ($delta < 0) {
-            $color = '#dba617';
+            $tone = AdminUi::WARN;
         }
 
-        $rel = $delta >= 0
-            ? 'in ' . self::humanInterval($delta)
-            : self::humanInterval(-$delta) . ' ago';
+        $rel = AdminUi::relative($ts, $now);
 
         return sprintf(
             '<code style="font-size:12px;">%s</code> %s',
             esc_html(gmdate('Y-m-d H:i:s', $ts)),
-            self::badge($rel, $color)
+            AdminUi::badge($rel, $tone)
         );
     }
 
-    private static function humanInterval(int $sec): string
-    {
-        if ($sec < 60)    { return $sec . 's'; }
-        if ($sec < 3600)  { return floor($sec / 60) . 'm'; }
-        if ($sec < 86400) { return floor($sec / 3600) . 'h'; }
-        return floor($sec / 86400) . 'd';
-    }
 
     /**
      * @param array<mixed> $args
@@ -312,12 +303,4 @@ final class CronPage
         return strlen($json) > 60 ? substr($json, 0, 57) . '...' : $json;
     }
 
-    private static function badge(string $text, string $color): string
-    {
-        return sprintf(
-            '<span style="display:inline-block;padding:2px 10px;background:%1$s;color:#fff;border-radius:3px;font-weight:bold;font-size:12px;letter-spacing:0.5px;">%2$s</span>',
-            esc_attr($color),
-            esc_html($text)
-        );
-    }
 }

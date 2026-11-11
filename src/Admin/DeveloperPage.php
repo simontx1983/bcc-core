@@ -44,8 +44,10 @@ final class DeveloperPage
 
     public static function registerMenu(): void
     {
+        // Listed only when BCC_DEV_TOOLS === true; otherwise registered
+        // with no parent (URL still works). See AdminMenu::parentFor().
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenu::parentFor(AdminMenu::SYSTEM, self::PAGE_SLUG),
             'Developer',
             'Developer',
             'manage_options',
@@ -77,10 +79,16 @@ final class DeveloperPage
 
         echo '<div class="wrap">';
         echo '<h1>BCC Developer</h1>';
-        echo '<p style="color:#666;">Engineer-grade BCC internals. Saves SSH / WP CLI / mysql round-trips for routine diagnostics.</p>';
+        echo '<p class="bcc-muted">Engineer-grade BCC internals. Saves SSH / WP CLI / mysql round-trips for routine diagnostics.</p>';
 
         if (isset($_GET['rebuilt'])) {
             echo '<div class="notice notice-success is-dismissible"><p>Search FT index rebuild triggered.</p></div>';
+        }
+        if (isset($_GET['pruned'])) {
+            printf(
+                '<div class="notice notice-success is-dismissible"><p>Search-analytics prune removed %s row(s).</p></div>',
+                esc_html((string) absint($_GET['pruned']))
+            );
         }
         if (isset($_GET['rebuild_failed'])) {
             $err = sanitize_text_field((string) $_GET['rebuild_failed']);
@@ -104,7 +112,7 @@ final class DeveloperPage
             }
 
             printf(
-                '<h2 style="margin-top:32px;border-top:1px solid #c3c4c7;padding-top:24px;">%s</h2>',
+                '<h2 class="bcc-section-title">%s</h2>',
                 esc_html($title)
             );
 

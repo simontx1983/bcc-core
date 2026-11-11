@@ -43,7 +43,7 @@ final class ApiKeysPage
     public static function registerMenu(): void
     {
         add_submenu_page(
-            'bcc-system-health',
+            AdminMenu::SYSTEM,
             'API Keys',
             'API Keys',
             'manage_options',
@@ -132,8 +132,8 @@ final class ApiKeysPage
             $missCount = $row['missing'];
 
             $missingHtml = $missCount === 0
-                ? self::badge('0', '#46b450')
-                : self::badge((string) $missCount, $sev === 'critical' ? '#dc3232' : '#dba617');
+                ? AdminUi::badge('0', AdminUi::OK)
+                : AdminUi::badge((string) $missCount, $sev === 'critical' ? AdminUi::BAD : AdminUi::WARN);
 
             printf(
                 '<tr><th style="width:240px;text-transform:uppercase;letter-spacing:1px;">%s</th><td>%s defined &nbsp; • &nbsp; %s missing</td></tr>',
@@ -178,9 +178,9 @@ final class ApiKeysPage
 
             $rowStyle = '';
             if (!$present && $severity === 'critical') {
-                $rowStyle = 'background:#fcf0f1;';
+                $rowStyle = 'background:var(--bcc-danger-bg);';
             } elseif (!$present && $severity === 'important') {
-                $rowStyle = 'background:#fffaeb;';
+                $rowStyle = 'background:var(--bcc-warning-bg);';
             }
 
             echo '<tr style="' . esc_attr($rowStyle) . '">';
@@ -190,9 +190,9 @@ final class ApiKeysPage
             echo '<td>' . self::statusBadge($present, $severity) . '</td>';
             echo '<td>' . ($present
                 ? '<code style="font-size:12px;">' . esc_html(self::mask($rawValue)) . '</code>'
-                : '<span style="color:#888;">—</span>')
+                : '<span style="color:var(--bcc-text-muted);">—</span>')
                 . '</td>';
-            echo '<td style="font-size:13px;color:#444;">' . esc_html($description) . '</td>';
+            echo '<td style="font-size:13px;color:var(--bcc-text-secondary);">' . esc_html($description) . '</td>';
             echo '</tr>';
         }
 
@@ -229,29 +229,21 @@ final class ApiKeysPage
     private static function severityBadge(string $severity): string
     {
         return match ($severity) {
-            'critical'  => self::badge('CRITICAL',  '#dc3232'),
-            'important' => self::badge('important', '#dba617'),
-            'optional'  => self::badge('optional',  '#888'),
-            default     => self::badge($severity,   '#888'),
+            'critical'  => AdminUi::badge('CRITICAL',  AdminUi::BAD),
+            'important' => AdminUi::badge('important', AdminUi::WARN),
+            'optional'  => AdminUi::badge('optional',  AdminUi::MUTED),
+            default     => AdminUi::badge($severity,   AdminUi::MUTED),
         };
     }
 
     private static function statusBadge(bool $present, string $severity): string
     {
         if ($present) {
-            return self::badge('defined', '#46b450');
+            return AdminUi::badge('defined', AdminUi::OK);
         }
         return $severity === 'critical'
-            ? self::badge('MISSING', '#dc3232')
-            : self::badge('not set', '#dba617');
+            ? AdminUi::badge('MISSING', AdminUi::BAD)
+            : AdminUi::badge('not set', AdminUi::WARN);
     }
 
-    private static function badge(string $text, string $color): string
-    {
-        return sprintf(
-            '<span style="display:inline-block;padding:2px 10px;background:%1$s;color:#fff;border-radius:3px;font-weight:bold;font-size:12px;letter-spacing:0.5px;">%2$s</span>',
-            esc_attr($color),
-            esc_html($text)
-        );
-    }
 }

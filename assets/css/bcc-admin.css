@@ -1,0 +1,370 @@
+/**
+ * BCC wp-admin theme — "Paper".
+ *
+ * One light, low-glare palette for every BCC admin page (any ?page=bcc-*),
+ * enqueued by BCC\Core\Admin\AdminTheme, which also adds body.bcc-admin.
+ * Colours come from the frontend tokens (bcc-frontend/src/app/globals.css):
+ * paper / cardstock surfaces, ink text, safety orange + weld gold accents,
+ * verified green, risky red.
+ *
+ * Token NAMES match the bcc-trust Forge sheet (admin-dashboard.css) so its
+ * components pick up this palette. `body.bcc-admin .bcc-admin-wrap` is
+ * listed so these values win over any token block Forge still declares on
+ * .bcc-admin-wrap (higher specificity, independent of load order).
+ *
+ * Page renderers reference these tokens from inline styles
+ * (`style="color:var(--bcc-danger)"`) instead of hex literals.
+ */
+
+/* ── 1. Tokens ─────────────────────────────────────────────────────────── */
+
+body.bcc-admin,
+body.bcc-admin .bcc-admin-wrap {
+    /* Surfaces */
+    --bcc-bg:              #f4eddb;
+    --bcc-bg-raised:       #efe5cf;
+    --bcc-bg-card:         #fffaf2;
+    --bcc-bg-card-hover:   #f9f2e2;
+    --bcc-bg-input:        #fffdf8;
+    --bcc-bg-overlay:      rgba(244, 237, 219, 0.9);
+    --bcc-bg-code:         rgba(15, 13, 9, 0.06);
+
+    /* Borders */
+    --bcc-border:          rgba(107, 99, 85, 0.22);
+    --bcc-border-strong:   rgba(107, 99, 85, 0.42);
+    --bcc-border-focus:    #f05a28;
+
+    /* Text */
+    --bcc-text:            #2a251c;
+    --bcc-text-strong:     #0f0d09;
+    --bcc-text-secondary:  #4f473a;
+    --bcc-text-muted:      #6b6355;
+    --bcc-text-inverse:    #fffaf2;
+
+    /* Accents */
+    --bcc-accent:          #1f5f9e;
+    --bcc-accent-hover:    #0f1e3c;
+    --bcc-action:          #f05a28;
+    --bcc-action-hover:    #d94c1d;
+    --bcc-highlight:       #ffc01e;
+
+    /* Status — text-safe on paper (≥ 4.5:1) + soft tinted backgrounds */
+    --bcc-success:         #20794e;
+    --bcc-success-bg:      rgba(32, 121, 78, 0.10);
+    --bcc-warning:         #8a6200;
+    --bcc-warning-bg:      rgba(255, 192, 30, 0.20);
+    --bcc-danger:          #b23a24;
+    --bcc-danger-bg:       rgba(200, 71, 47, 0.10);
+    --bcc-info:            #1f5f9e;
+    --bcc-info-bg:         rgba(31, 110, 184, 0.10);
+
+    /* Tiers (trust ramp, darkened where needed for text on paper) */
+    --bcc-tier-elite:      #6d43c9;
+    --bcc-tier-trusted:    #247a3f;
+    --bcc-tier-neutral:    #5c5f63;
+    --bcc-tier-caution:    #8a6200;
+    --bcc-tier-risky:      #b23a24;
+
+    /* Fraud severity */
+    --bcc-fraud-critical:  #6d28d9;
+    --bcc-fraud-high:      #b23a24;
+    --bcc-fraud-medium:    #c2410c;
+    --bcc-fraud-low:       #8a6200;
+    --bcc-fraud-minimal:   #247a3f;
+
+    /* Typography — system stack; nothing is downloaded. */
+    --bcc-font:            -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --bcc-font-mono:       'Cascadia Code', Consolas, 'SF Mono', Menlo, monospace;
+    --bcc-font-display:    var(--bcc-font);
+
+    /* Spacing */
+    --bcc-space-xs:        6px;
+    --bcc-space-sm:        10px;
+    --bcc-space-md:        16px;
+    --bcc-space-lg:        24px;
+    --bcc-space-xl:        36px;
+    --bcc-space-2xl:       48px;
+
+    /* Radius */
+    --bcc-radius-sm:       4px;
+    --bcc-radius-md:       8px;
+    --bcc-radius-lg:       12px;
+    --bcc-radius-pill:     999px;
+
+    /* Shadows — warm and faint */
+    --bcc-shadow-sm:       0 1px 2px rgba(42, 37, 28, 0.06);
+    --bcc-shadow-md:       0 2px 8px rgba(42, 37, 28, 0.08);
+    --bcc-shadow-lg:       0 8px 24px rgba(42, 37, 28, 0.10);
+    --bcc-shadow-glow:     0 0 0 3px rgba(240, 90, 40, 0.18);
+
+    /* Motion */
+    --bcc-ease:            cubic-bezier(0.4, 0, 0.2, 1);
+    --bcc-duration:        0.15s;
+}
+
+/* ── 2. Page canvas ────────────────────────────────────────────────────── */
+
+body.bcc-admin,
+body.bcc-admin #wpcontent,
+body.bcc-admin #wpbody-content {
+    background: var(--bcc-bg);
+    color: var(--bcc-text);
+}
+
+body.bcc-admin #wpbody-content .wrap h1,
+body.bcc-admin #wpbody-content .wrap h2,
+body.bcc-admin #wpbody-content .wrap h3 {
+    color: var(--bcc-text-strong);
+}
+
+/* Plain text links only: a link that carries a class (buttons, tabs, other
+   plugins' notice CTAs) keeps its own colours. */
+body.bcc-admin #wpbody-content a:not([class]) {
+    color: var(--bcc-accent);
+}
+
+body.bcc-admin #wpbody-content a:not([class]):hover,
+body.bcc-admin #wpbody-content a:not([class]):focus {
+    color: var(--bcc-accent-hover);
+}
+
+body.bcc-admin #wpbody-content code,
+body.bcc-admin #wpbody-content kbd {
+    background: var(--bcc-bg-code);
+    color: var(--bcc-text-strong);
+    border-radius: var(--bcc-radius-sm);
+}
+
+body.bcc-admin #wpbody-content pre {
+    background: var(--bcc-bg-raised);
+    color: var(--bcc-text);
+    border: 1px solid var(--bcc-border);
+    border-radius: var(--bcc-radius-sm);
+}
+
+body.bcc-admin #wpbody-content hr {
+    border: 0;
+    border-top: 1px solid var(--bcc-border);
+}
+
+body.bcc-admin #wpbody-content .description,
+body.bcc-admin #wpbody-content p.description {
+    color: var(--bcc-text-muted);
+}
+
+/* ── 3. Tables (.widefat, WP_List_Table) ───────────────────────────────── */
+
+body.bcc-admin #wpbody-content .widefat {
+    background: var(--bcc-bg-card);
+    border: 1px solid var(--bcc-border);
+    box-shadow: var(--bcc-shadow-sm);
+    color: var(--bcc-text);
+}
+
+body.bcc-admin #wpbody-content .widefat thead th,
+body.bcc-admin #wpbody-content .widefat thead td,
+body.bcc-admin #wpbody-content .widefat tfoot th,
+body.bcc-admin #wpbody-content .widefat tfoot td {
+    background: var(--bcc-bg-raised);
+    color: var(--bcc-text-strong);
+    border-color: var(--bcc-border);
+}
+
+body.bcc-admin #wpbody-content .widefat td,
+body.bcc-admin #wpbody-content .widefat th {
+    color: var(--bcc-text);
+    border-color: var(--bcc-border);
+}
+
+body.bcc-admin #wpbody-content .striped > tbody > :nth-child(odd),
+body.bcc-admin #wpbody-content ul.striped > :nth-child(odd),
+body.bcc-admin #wpbody-content .alternate {
+    background: rgba(15, 13, 9, 0.025);
+}
+
+body.bcc-admin #wpbody-content .widefat tbody tr:hover {
+    background: var(--bcc-bg-card-hover);
+}
+
+body.bcc-admin #wpbody-content .tablenav,
+body.bcc-admin #wpbody-content .subsubsub {
+    color: var(--bcc-text-muted);
+}
+
+/* ── 4. Cards, boxes, notices ──────────────────────────────────────────── */
+
+body.bcc-admin #wpbody-content .card,
+body.bcc-admin #wpbody-content .postbox,
+body.bcc-admin #wpbody-content .bcc-card {
+    background: var(--bcc-bg-card);
+    border: 1px solid var(--bcc-border);
+    border-radius: var(--bcc-radius-md);
+    box-shadow: var(--bcc-shadow-sm);
+    color: var(--bcc-text);
+    max-width: none;
+}
+
+body.bcc-admin #wpbody-content .notice,
+body.bcc-admin #wpbody-content div.updated,
+body.bcc-admin #wpbody-content div.error {
+    background: var(--bcc-bg-card);
+    color: var(--bcc-text);
+    border: 1px solid var(--bcc-border);
+    border-left-width: 4px;
+    box-shadow: none;
+}
+
+body.bcc-admin #wpbody-content .notice-success,
+body.bcc-admin #wpbody-content div.updated { border-left-color: var(--bcc-success); }
+body.bcc-admin #wpbody-content .notice-warning { border-left-color: var(--bcc-highlight); }
+body.bcc-admin #wpbody-content .notice-error,
+body.bcc-admin #wpbody-content div.error { border-left-color: var(--bcc-danger); }
+body.bcc-admin #wpbody-content .notice-info { border-left-color: var(--bcc-info); }
+
+/* ── 5. Tabs ───────────────────────────────────────────────────────────── */
+
+body.bcc-admin #wpbody-content .nav-tab-wrapper,
+body.bcc-admin #wpbody-content h2.nav-tab-wrapper {
+    border-bottom-color: var(--bcc-border-strong);
+}
+
+body.bcc-admin #wpbody-content .nav-tab {
+    background: var(--bcc-bg-raised);
+    border-color: var(--bcc-border);
+    color: var(--bcc-text-secondary);
+}
+
+body.bcc-admin #wpbody-content .nav-tab:hover,
+body.bcc-admin #wpbody-content .nav-tab:focus {
+    background: var(--bcc-bg-card-hover);
+    color: var(--bcc-text-strong);
+}
+
+body.bcc-admin #wpbody-content .nav-tab-active,
+body.bcc-admin #wpbody-content .nav-tab-active:hover,
+body.bcc-admin #wpbody-content .nav-tab-active:focus {
+    background: var(--bcc-bg);
+    border-bottom-color: var(--bcc-bg);
+    color: var(--bcc-text-strong);
+    box-shadow: inset 0 3px 0 var(--bcc-action);
+}
+
+/* ── 6. Buttons + form controls ────────────────────────────────────────── */
+
+body.bcc-admin #wpbody-content .button,
+body.bcc-admin #wpbody-content .button-secondary {
+    background: var(--bcc-bg-card);
+    border-color: var(--bcc-border-strong);
+    color: var(--bcc-text-strong);
+}
+
+body.bcc-admin #wpbody-content .button:hover,
+body.bcc-admin #wpbody-content .button-secondary:hover {
+    background: var(--bcc-bg-raised);
+    border-color: var(--bcc-text-muted);
+    color: var(--bcc-text-strong);
+}
+
+/* Primary = safety orange with INK text (white on orange fails contrast). */
+body.bcc-admin #wpbody-content .button-primary {
+    background: var(--bcc-action);
+    border-color: var(--bcc-action-hover);
+    color: var(--bcc-text-strong);
+    text-shadow: none;
+}
+
+body.bcc-admin #wpbody-content .button-primary:hover,
+body.bcc-admin #wpbody-content .button-primary:focus {
+    background: var(--bcc-action-hover);
+    border-color: var(--bcc-action-hover);
+    color: var(--bcc-text-strong);
+}
+
+body.bcc-admin #wpbody-content .button:focus,
+body.bcc-admin #wpbody-content input:focus,
+body.bcc-admin #wpbody-content select:focus,
+body.bcc-admin #wpbody-content textarea:focus {
+    border-color: var(--bcc-border-focus);
+    box-shadow: var(--bcc-shadow-glow);
+    outline: none;
+}
+
+body.bcc-admin #wpbody-content .button-link-delete,
+body.bcc-admin #wpbody-content .submitdelete {
+    color: var(--bcc-danger);
+}
+
+body.bcc-admin #wpbody-content input[type="text"],
+body.bcc-admin #wpbody-content input[type="number"],
+body.bcc-admin #wpbody-content input[type="search"],
+body.bcc-admin #wpbody-content input[type="url"],
+body.bcc-admin #wpbody-content input[type="email"],
+body.bcc-admin #wpbody-content input[type="password"],
+body.bcc-admin #wpbody-content select,
+body.bcc-admin #wpbody-content textarea {
+    background-color: var(--bcc-bg-input);
+    border-color: var(--bcc-border-strong);
+    color: var(--bcc-text-strong);
+}
+
+body.bcc-admin #wpbody-content .form-table th {
+    color: var(--bcc-text-strong);
+}
+
+/* ── 7. Shared components ──────────────────────────────────────────────── */
+
+/* Status pill — markup from BCC\Core\Admin\AdminUi::badge(). */
+body.bcc-admin .bcc-badge {
+    display: inline-block;
+    padding: 1px 9px;
+    border: 1px solid transparent;
+    border-radius: var(--bcc-radius-pill);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.6;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+body.bcc-admin .bcc-badge--ok    { background: var(--bcc-success-bg); border-color: rgba(32, 121, 78, 0.35);  color: var(--bcc-success); }
+body.bcc-admin .bcc-badge--warn  { background: var(--bcc-warning-bg); border-color: rgba(138, 98, 0, 0.35);  color: var(--bcc-warning); }
+body.bcc-admin .bcc-badge--bad   { background: var(--bcc-danger-bg);  border-color: rgba(178, 58, 36, 0.35); color: var(--bcc-danger); }
+body.bcc-admin .bcc-badge--info  { background: var(--bcc-info-bg);    border-color: rgba(31, 95, 158, 0.35); color: var(--bcc-info); }
+body.bcc-admin .bcc-badge--muted { background: var(--bcc-bg-code);    border-color: var(--bcc-border);       color: var(--bcc-text-muted); }
+
+/* Row tints for flagged table rows. */
+body.bcc-admin #wpbody-content tr.bcc-row--bad  > td { background: var(--bcc-danger-bg); }
+body.bcc-admin #wpbody-content tr.bcc-row--warn > td { background: var(--bcc-warning-bg); }
+
+/* Big status banner (System Health header). */
+body.bcc-admin .bcc-status-banner {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 16px 0;
+    padding: 14px 20px;
+    border: 1px solid var(--bcc-border);
+    border-left-width: 6px;
+    border-radius: var(--bcc-radius-md);
+    background: var(--bcc-bg-card);
+    color: var(--bcc-text-strong);
+}
+
+body.bcc-admin .bcc-status-banner--ok  { border-left-color: var(--bcc-success); background: var(--bcc-success-bg); }
+body.bcc-admin .bcc-status-banner--bad { border-left-color: var(--bcc-danger);  background: var(--bcc-danger-bg); }
+
+/* Section divider used between Developer panels. */
+body.bcc-admin .bcc-section-title {
+    margin-top: 32px;
+    padding-top: 24px;
+    border-top: 1px solid var(--bcc-border);
+}
+
+body.bcc-admin .bcc-muted { color: var(--bcc-text-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+    body.bcc-admin * {
+        transition: none !important;
+        animation: none !important;
+    }
+}
