@@ -73,6 +73,7 @@ final class BlockReadFailureSignalTest extends TestCase
         );
         $this->assertNull(PeepSoBlockRepository::isMutuallyBlockedOrUnknown(7, 9));
         $this->assertNull(PeepSoBlockRepository::getBlockedSetOrUnknown(7, [9, 10]));
+        $this->assertNull(PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown(7, [9, 10]));
     }
 
     /**
@@ -96,6 +97,7 @@ final class BlockReadFailureSignalTest extends TestCase
         $this->wpdb->errorOnQuery = '';
 
         $this->assertSame([], PeepSoBlockRepository::getBlockedSetOrUnknown(7, [9, 10]));
+        $this->assertSame([], PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown(7, [9, 10]));
     }
 
     public function testASuccessfulProbeStillAnswersTrue(): void
@@ -150,7 +152,7 @@ final class BlockReadFailureSignalTest extends TestCase
         $this->wpdb->varToReturn  = 1;
         $this->wpdb->colToReturn  = ['9'];
 
-        $out = PeepSoBlockRepository::$method(7, $method === 'getBlockedSetOrUnknown' ? [9] : 9);
+        $out = PeepSoBlockRepository::$method(7, str_ends_with($method, 'SetOrUnknown') ? [9] : 9);
 
         $this->assertNull(
             $out,
@@ -223,7 +225,7 @@ final class BlockReadFailureSignalTest extends TestCase
         $this->wpdb->varToReturn  = 1;
         $this->wpdb->colToReturn  = ['9'];
 
-        $out = PeepSoBlockRepository::$method(7, $method === 'getBlockedSetOrUnknown' ? [9] : 9);
+        $out = PeepSoBlockRepository::$method(7, str_ends_with($method, 'SetOrUnknown') ? [9] : 9);
 
         $this->assertNotNull(
             $out,
@@ -245,7 +247,7 @@ final class BlockReadFailureSignalTest extends TestCase
         $this->wpdb->varToReturn = 1;
         $this->wpdb->colToReturn = ['9'];
 
-        PeepSoBlockRepository::$method(7, $method === 'getBlockedSetOrUnknown' ? [9] : 9);
+        PeepSoBlockRepository::$method(7, str_ends_with($method, 'SetOrUnknown') ? [9] : 9);
 
         $this->assertNotSame([], $this->wpdb->errorSeenAtQuery, 'The probe must actually have queried.');
         $this->assertSame(
@@ -262,6 +264,7 @@ final class BlockReadFailureSignalTest extends TestCase
             'isBlockingOrUnknown'        => ['isBlockingOrUnknown'],
             'isMutuallyBlockedOrUnknown' => ['isMutuallyBlockedOrUnknown'],
             'getBlockedSetOrUnknown'     => ['getBlockedSetOrUnknown'],
+            'getMutuallyBlockedSetOrUnknown' => ['getMutuallyBlockedSetOrUnknown'],
         ];
     }
 
@@ -326,6 +329,59 @@ final class BlockReadFailureSignalTest extends TestCase
      * came from a REAL query having been issued, and that the predicate
      * is still the one-directional / either-directional SQL it was.
      */
+    /**
+     * ⚠⚠ THE EITHER-DIRECTION FOLD, and it is the one behaviour unique
+     * to this probe. It selects TWO columns so a row can be folded back
+     * to "the other user" whichever way the block runs — which is why
+     * it cannot use `get_col(null)` like its sibling, and why it reads
+     * `$wpdb->last_result` instead (real `get_results(null)` returns
+     * NULL by contract).
+     */
+    public function testTheMutualSetFoldsBothDirectionsToTheOtherUser(): void
+    {
+        // row 1: the viewer blocks 9.  row 2: 11 blocks the viewer.
+        $this->wpdb->resultsToReturn = [
+            ['blk_user_id' => '7',  'blk_blocked_id' => '9'],
+            ['blk_user_id' => '11', 'blk_blocked_id' => '7'],
+        ];
+
+        $this->assertSame(
+            [9 => true, 11 => true],
+            PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown(7, [9, 10, 11]),
+            'both directions must fold to the OTHER user, never to the viewer'
+        );
+    }
+
+    /**
+     * ⚠ It reads the rows `query()` fetched, so a double that returned
+     * rows only from `get_results($sql)` would make this pass for the
+     * wrong reason. Asserting the row count proves the read came from
+     * `last_result`.
+     */
+    public function testTheMutualSetReadsTheRowsTheQueryAlreadyFetched(): void
+    {
+        $this->wpdb->resultsToReturn = [
+            ['blk_user_id' => '7', 'blk_blocked_id' => '9'],
+        ];
+
+        PeepSoBlockRepository::getMutuallyBlockedSetOrUnknown(7, [9]);
+
+        $this->assertCount(1, $this->wpdb->last_result);
+        $this->assertCount(1, $this->wpdb->queried, 'exactly one query, run through query()');
+    }
+
+    /** The old method keeps its fail-OPEN contract, unchanged. */
+    public function testTheOldMutualSetMethodStillFailsOpen(): void
+    {
+        $this->wpdb->errorOnQuery = 'MySQL server has gone away';
+
+        $this->assertSame(
+            [],
+            PeepSoBlockRepository::getMutuallyBlockedSet(7, [9, 10]),
+            'unchanged fail-open, so existing callers are not silently altered'
+        );
+    }
+
     public function testTheUnknownAnswersStillCameFromRealQueries(): void
     {
         $this->wpdb->errorOnQuery = 'MySQL server has gone away';
