@@ -86,7 +86,10 @@ final class ForeignNoticeFilter
             } else {
                 return null;
             }
-        } catch (\ReflectionException $e) {
+        } catch (\Throwable $e) {
+            // Reflecting 'Class::method' can autoload the class; a throwing
+            // autoloader or a class file that errors must not break the page.
+            // Treat as unattributable → the callback is kept.
             return null;
         }
 
