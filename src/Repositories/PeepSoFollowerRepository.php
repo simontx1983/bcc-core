@@ -126,6 +126,16 @@ final class PeepSoFollowerRepository
         return count($out) > self::VIEWER_FRIEND_IDS_MAX ? [] : $out;
     }
 
+    /**
+     * The users $userId follows, newest first.
+     *
+     * @param list<int>|null $viewerFriendIds The authors the VIEWER is a friend of, for the
+     *                                      level-30 branch. null/[] = a friend of nobody, which
+     *                                      DENIES level 30 to all but the listed user themselves.
+     *                                      Capped at {@see self::VIEWER_FRIEND_IDS_MAX}; over the
+     *                                      cap the list is emptied, never truncated.
+     * @return list<int>
+     */
     public static function getFollowing(
         int $userId,
         int $limit = 200,
@@ -168,6 +178,11 @@ final class PeepSoFollowerRepository
     /**
      * IDs of users that follow $userId.
      *
+     * @param list<int>|null $viewerFriendIds The authors the VIEWER is a friend of, for the
+     *                                      level-30 branch. null/[] = a friend of nobody, which
+     *                                      DENIES level 30 to all but the listed user themselves.
+     *                                      Capped at {@see self::VIEWER_FRIEND_IDS_MAX}; over the
+     *                                      cap the list is emptied, never truncated.
      * @return list<int>
      */
     public static function getFollowers(
@@ -479,6 +494,11 @@ final class PeepSoFollowerRepository
     /**
      * Counts only — used for view-model headlines and badges.
      *
+     * @param list<int>|null $viewerFriendIds The authors the VIEWER is a friend of, for the
+     *                                      level-30 branch. null/[] = a friend of nobody, which
+     *                                      DENIES level 30 to all but the listed user themselves.
+     *                                      Capped at {@see self::VIEWER_FRIEND_IDS_MAX}; over the
+     *                                      cap the list is emptied, never truncated.
      * @return array{following: int, followers: int}
      */
     public static function getCounts(
