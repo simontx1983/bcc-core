@@ -115,6 +115,19 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
         public array $queried = [];
 
         /**
+         * Real `wpdb::$last_result` — the rows the last query fetched.
+         *
+         * ⚠ REAL `wpdb` HOLDS OBJECTS HERE, and that matters rather than
+         * being a detail: `get_results($sql, OBJECT)` hands this property
+         * back directly, and production reads `$row->blk_user_id`. A
+         * double that stored the seeded ARRAYS would make every such
+         * read fail in a way production never does — so `query()` casts.
+         *
+         * @var list<object>
+         */
+        public array $last_result = [];
+
+        /**
          * Run a query, as `wpdb::query()` does.
          *
          * ⚠⚠ THE POINT OF THIS METHOD: real `wpdb::query()` has failure
@@ -134,8 +147,15 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
             $this->queried[] = $sql;
             $this->enterQuery();
             if ($this->errorOnQuery !== '') {
+                // ⚠ Rows deliberately NOT cleared — see the note above on
+                // the pre-flush bail. A stale `last_result` is part of
+                // what the repository has to defend against.
                 return false;
             }
+            $this->last_result = array_map(
+                static fn (array $r): object => (object) $r,
+                $this->resultsToReturn
+            );
             // ⚠ A false return models the pre-flush bail, so the rows
             // are deliberately left ALONE rather than cleared — a double
             // that helpfully emptied them would hide the stale-read

@@ -257,6 +257,44 @@ final class PeepSoBlockRepository
      */
     public static function getMutuallyBlockedSet(int $userId, array $otherIds): array
     {
+        return self::getMutuallyBlockedSetOrUnknown($userId, $otherIds) ?? [];
+    }
+
+    /**
+     * `getMutuallyBlockedSet()` that can say "I could not tell".
+     *
+     * Returns the either-direction blocked subset, or NULL when the read
+     * failed.
+     *
+     * ⚠⚠ WHY IT CANNOT COPY `getBlockedSetOrUnknown()`'s SHAPE, which
+     * is the sibling it otherwise mirrors. That one finishes with
+     * `get_col(null)` — read the rows `query()` already fetched. This
+     * probe needs TWO columns (to fold a row back to "the other user"),
+     * so its natural reader is `get_results()`, and **real
+     * `wpdb::get_results(null)` RETURNS NULL**:
+     * `class-wpdb.php:3150` is `if ($query) { ... } else { return null; }`.
+     * Only `get_var()` and `get_col()` have a null form that reads
+     * `last_result`.
+     *
+     * So it reads `$wpdb->last_result` DIRECTLY — which is exactly what
+     * `get_results($sql, OBJECT)` returns (`:3156` hands back that same
+     * property), minus the failure signal `get_results` discards. The
+     * property is public in core (`:138`) and holds row objects.
+     *
+     * ⚠ The failure detection is NOT re-implemented here: `runProbe()`
+     * owns it, including the check of `query()`'s own return value, which
+     * `last_error` alone does not cover. See its docblock.
+     *
+     * ⚠ Callers that need "unknown" to mean something specific must
+     * decide per site — `canMessageMany`'s batch answers `unavailable`
+     * for every candidate, which is uniform and so leaks nothing about
+     * any individual pair.
+     *
+     * @param list<int>|array<int|string, mixed> $otherIds
+     * @return array<int, true>|null
+     */
+    public static function getMutuallyBlockedSetOrUnknown(int $userId, array $otherIds): ?array
+    {
         if ($userId <= 0 || $otherIds === []) {
             return [];
         }
@@ -279,12 +317,24 @@ final class PeepSoBlockRepository
         // Both directions in one query: rows where the viewer blocks a
         // candidate OR a candidate blocks the viewer. Explicit columns
         // so the direction can be folded back to "the other user".
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT blk_user_id, blk_blocked_id FROM {$table}
               WHERE (blk_user_id = %d AND blk_blocked_id IN ({$ph}))
                  OR (blk_blocked_id = %d AND blk_user_id IN ({$ph}))",
             ...array_merge([$userId], $ids, [$userId], $ids)
-        ));
+        );
+
+        if (!self::runProbe($sql)) {
+            return null;
+        }
+
+        // ⚠ The shape is DECLARED rather than left as bare `object`:
+        // PHPStan rejects property access on an undeclared `object`, and
+        // the original `get_results()` call only type-checked because the
+        // stub hands back a permissive `stdClass`. Naming the two columns
+        // is both PHPStan-clean and a better record of what is read.
+        /** @var list<object{blk_user_id: string, blk_blocked_id: string}> $rows */
+        $rows = $wpdb->last_result;
 
         $out = [];
         foreach (($rows ?: []) as $row) {
