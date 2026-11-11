@@ -291,6 +291,13 @@ add_action('deleted_user_meta', $bccBustPeepSoMediaCache, 10, 3);
 // │ The sentinel option is deliberately LEFT IN PLACE on existing
 // │ installs: with this code gone it is inert, and deleting it would be a
 // │ write for no benefit.
+// │
+// │ ⚠ SCOPE OF THE GUARD: OptionSweepGuardTest scans THIS REPOSITORY only.
+// │ It cannot see a prefix sweep added in bcc-trust or anywhere else that
+// │ calls into this class — which is the same cross-repo blind spot that
+// │ let a bcc-trust test reflect on a private static here and break when
+// │ it was removed. A sweep written on the other side needs its own
+// │ guard there.
 // └─────────────────────────────────────────────────────────────┘
 
 // ── Rate-limit row cleanup ──────────────────────────────────────

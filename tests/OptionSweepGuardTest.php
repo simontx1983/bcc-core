@@ -6,6 +6,7 @@ namespace BCC\Core\Repositories\Tests;
 
 use BCC\Core\Repositories\OptionCleanupRepository;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -44,27 +45,61 @@ use PHPUnit\Framework\TestCase;
 #[CoversClass(OptionCleanupRepository::class)]
 final class OptionSweepGuardTest extends TestCase
 {
-    // ── the rule ────────────────────────────────────────────────────
+    /**
+     * Call sites exempted from the rule, as `path: what`.
+     *
+     * ⚠ Empty on purpose. An entry here is a claim that a dynamic or
+     * bcc-prefixed sweep is safe, and it needs the reason written next to
+     * it — the removed sweep's own comment claimed exactly that and was
+     * wrong about all three prefixes.
+     *
+     * @var list<string>
+     */
+    private const ALLOWED = [];
+
+    // ── the rule ────────────────────────────────────────
 
     /**
-     * ⚠⚠ THE RULE. No call site may hand `deleteByPrefix()` a literal that
-     * starts with `bcc_`. A new sweep has to either name exact keys or edit
-     * this test — and editing it means reading the history above, which is
-     * the entire point.
+     * ⚠⚠ THE RULE. A `deleteByPrefix()` call is reported unless its first
+     * argument is a STRING LITERAL that is provably not ours.
+     *
+     * ⭐ IT IS DENY-BY-DEFAULT, and the first version of this guard was not
+     * — which is why review rejected it. That version only looked at string
+     * literals, so it would have passed a BYTE-FOR-BYTE REVERT of the code
+     * it exists to prevent: the removed sweep called
+     * `deleteByPrefix($prefix)` inside `foreach ($legacyPrefixes as
+     * $prefix)`, and a `T_VARIABLE` argument matched nothing. A guard that
+     * misses the exact shape it was written against is worse than no guard,
+     * because it reads as protection.
+     *
+     * So anything that is not a single plain literal — a variable, a
+     * concatenation, a constant, a function call — is reported on the
+     * grounds that this scan cannot prove what it holds. A legitimate
+     * dynamic caller must add itself to {@see ALLOWED} and say why.
+     *
+     * ⚠ Transient wrappers are stripped before the check. `bcc_signals_u5`
+     * is stored as `_transient_bcc_signals_u5`, so a sweep of
+     * `_transient_bcc_signals_` does not start with `bcc_` and the first
+     * version let it through — the removed code listed exactly those
+     * `_transient_` and `_transient_timeout_` twins.
      */
     public function testNothingSweepsABccPrefix(): void
     {
         $offenders = [];
         foreach (self::sourceFiles() as $rel => $code) {
-            foreach (self::bccPrefixSweeps($code) as $literal) {
-                $offenders[] = $rel . ': ' . $literal;
+            foreach (self::sweepOffenders($code) as $what) {
+                if (in_array($rel . ': ' . $what, self::ALLOWED, true)) {
+                    continue;
+                }
+                $offenders[] = $rel . ': ' . $what;
             }
         }
 
         self::assertSame(
             [],
             $offenders,
-            "a bcc_ prefix must never be swept by prefix — name exact keys instead. Found:\n  "
+            "a bcc_ option must never be swept by prefix — name exact keys, or\n"
+            . "allowlist the call with a reason. Found:\n  "
             . implode("\n  ", $offenders)
         );
     }
@@ -81,40 +116,81 @@ final class OptionSweepGuardTest extends TestCase
         }
     }
 
-    // ── the guard must not be vacuous ───────────────────────────────
+    // ── the guard must not be vacuous ─────────────────────────
 
     /**
-     * ⚠⚠ ANTI-VACUITY FOR THE DETECTOR ITSELF. A scanner that found nothing
-     * would pass the rule above against any source at all, which is the
-     * failure mode that makes an inventory guard worthless. So the detector
-     * is run against synthetic code containing exactly what it must catch.
+     * ⚠⚠ THE FIXTURE THAT MATTERS: the EXACT shape of the removed sweep.
+     * Not a convenient literal — the real `foreach` over a prefix array,
+     * passing a variable. The first version of this guard passed this, and
+     * that is the whole reason this case is written out in full.
      */
-    public function testTheDetectorCatchesAPrefixSweep(): void
+    public function testTheDetectorCatchesTheRemovedSweepsOwnShape(): void
     {
-        $bad = <<<'PHP'
+        $removed = <<<'PHP'
         <?php
-        OptionCleanupRepository::deleteByPrefix('bcc_onchain_');
+        $legacyPrefixes = [
+            'bcc_disputes_',
+            'bcc_onchain_',
+            '_transient_bcc_signals_',
+        ];
+        foreach ($legacyPrefixes as $prefix) {
+            $deleted = \BCC\Core\Repositories\OptionCleanupRepository::deleteByPrefix($prefix);
+        }
         PHP;
 
-        self::assertSame(["'bcc_onchain_'"], self::bccPrefixSweeps($bad));
-    }
-
-    /** ⚠ And it must not fire on a sweep of something that is NOT ours. */
-    public function testTheDetectorIgnoresANonBccPrefix(): void
-    {
-        $fine = <<<'PHP'
-        <?php
-        OptionCleanupRepository::deleteByPrefix('_transient_someoneelse_');
-        PHP;
-
-        self::assertSame([], self::bccPrefixSweeps($fine));
+        self::assertSame(
+            ['deleteByPrefix($prefix) — first argument is not a plain literal'],
+            self::sweepOffenders($removed),
+            'a byte-for-byte revert of the removed sweep must be caught'
+        );
     }
 
     /**
-     * ⚠ And it must not fire on PROSE. The removal tombstone in
-     * `bcc-core.php` names the method and all three prefixes in comments;
-     * if the detector read comments it would report the very explanation
-     * that exists to prevent this.
+     * @return list<array{0: string, 1: string}>
+     */
+    public static function caughtShapes(): array
+    {
+        return [
+            'a bare bcc_ literal'        => ["deleteByPrefix('bcc_onchain_');", "'bcc_onchain_'"],
+            'a transient twin'           => ["deleteByPrefix('_transient_bcc_signals_');", "'_transient_bcc_signals_'"],
+            'a transient timeout twin'   => ["deleteByPrefix('_transient_timeout_bcc_disputes_');", "'_transient_timeout_bcc_disputes_'"],
+            'a site transient twin'      => ["deleteByPrefix('_site_transient_bcc_onchain_');", "'_site_transient_bcc_onchain_'"],
+            'a concatenation'            => ["deleteByPrefix('bcc_' . \$x);", 'deleteByPrefix(...) — first argument is not a plain literal'],
+            'a constant'                 => ["deleteByPrefix(self::SOME_PREFIX);", 'deleteByPrefix(...) — first argument is not a plain literal'],
+            'a function call'            => ["deleteByPrefix(prefixFor(\$x));", 'deleteByPrefix(...) — first argument is not a plain literal'],
+        ];
+    }
+
+    /**
+     * ⚠ Every shape that must be reported, including the ones the first
+     * version missed. The expectation is asserted rather than just
+     * "non-empty", so a detector that reported the wrong thing would fail.
+     */
+    #[DataProvider('caughtShapes')]
+    public function testTheDetectorCatches(string $snippet, string $expected): void
+    {
+        $found = self::sweepOffenders("<?php\n" . $snippet . "\n");
+
+        self::assertCount(1, $found, 'expected exactly one report for: ' . $snippet);
+        self::assertStringContainsString(
+            str_contains($expected, 'not a plain literal') ? 'not a plain literal' : $expected,
+            $found[0]
+        );
+    }
+
+    /** ⚠ And it must NOT fire on a sweep of something that is not ours. */
+    public function testTheDetectorIgnoresANonBccLiteral(): void
+    {
+        self::assertSame(
+            [],
+            self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix('_transient_someoneelse_');\n")
+        );
+    }
+
+    /**
+     * ⚠ Nor on PROSE. The removal tombstone in `bcc-core.php` names the
+     * method and all three prefixes in comments; a detector that read
+     * comments would report the very explanation written to prevent this.
      */
     public function testTheDetectorIgnoresCommentsAndDocblocks(): void
     {
@@ -124,13 +200,12 @@ final class OptionSweepGuardTest extends TestCase
         /** @see OptionCleanupRepository::deleteByPrefix() with 'bcc_disputes_' */
         PHP;
 
-        self::assertSame([], self::bccPrefixSweeps($prose));
+        self::assertSame([], self::sweepOffenders($prose));
     }
 
     /**
-     * ⚠ Anti-vacuity for the method name: if `deleteByPrefix` were renamed,
-     * the scanner would match nothing and the rule would pass for the wrong
-     * reason. Pinned, so a rename has to come here and be re-aimed.
+     * ⚠ Anti-vacuity for the method name: a rename would make the scan
+     * match nothing and the rule pass for the wrong reason.
      */
     public function testTheGuardedMethodStillExistsUnderThatName(): void
     {
@@ -140,53 +215,127 @@ final class OptionSweepGuardTest extends TestCase
         );
     }
 
-    // ── the detector ────────────────────────────────────────────────
+    // ── the detector ──────────────────────────────────
 
     /**
-     * Literals starting with `bcc_` passed to `deleteByPrefix()`.
+     * Call sites of `deleteByPrefix()` that this scan cannot prove are safe.
      *
-     * ⚠ COMMENTS ARE STRIPPED WITH `token_get_all()`, NEVER A REGEX — the
-     * tombstone that explains this rule quotes both the method and the
-     * prefixes, and a regex would report it.
+     * ⚠ DENY BY DEFAULT. A single plain string literal is evaluated; a
+     * literal that is not ours is accepted; EVERYTHING ELSE is reported,
+     * because a variable or a concatenation could hold anything and the
+     * removed sweep is exactly that shape.
+     *
+     * ⚠ Comments are skipped structurally (`token_get_all()`), never by
+     * regex.
      *
      * @return list<string>
      */
-    private static function bccPrefixSweeps(string $code): array
+    private static function sweepOffenders(string $code): array
     {
         $tokens = token_get_all($code);
         $found  = [];
+        $n      = count($tokens);
 
-        foreach ($tokens as $i => $token) {
-            if (!is_array($token) || $token[0] !== T_STRING || $token[1] !== 'deleteByPrefix') {
+        for ($i = 0; $i < $n; $i++) {
+            $t = $tokens[$i];
+            if (!is_array($t) || $t[0] !== T_STRING || $t[1] !== 'deleteByPrefix') {
                 continue;
             }
 
-            // Walk forward to the first string literal of this call, stopping
-            // at the closing paren so a later unrelated literal is not blamed.
-            for ($j = $i + 1, $n = count($tokens); $j < $n; $j++) {
-                $next = $tokens[$j];
+            // ⚠ Skip the DECLARATION. `deleteByPrefix(string $prefix, ...)` is
+            // not a call, and a deny-by-default rule reports its parameter
+            // list as "not a plain literal" otherwise - which is how this
+            // first ran: the guard flagged the very method it guards.
+            $prev = $i - 1;
+            while ($prev >= 0 && is_array($tokens[$prev]) && $tokens[$prev][0] === T_WHITESPACE) {
+                $prev--;
+            }
+            if ($prev >= 0 && is_array($tokens[$prev]) && $tokens[$prev][0] === T_FUNCTION) {
+                continue;
+            }
 
-                if (!is_array($next)) {
-                    if ($next === ')' || $next === ';') {
+            // Find the opening paren of this call.
+            $j = $i + 1;
+            while ($j < $n && is_array($tokens[$j]) && $tokens[$j][0] === T_WHITESPACE) {
+                $j++;
+            }
+            if ($j >= $n || $tokens[$j] !== '(') {
+                continue;
+            }
+
+            // Collect the first argument's significant tokens.
+            $arg   = [];
+            $depth = 0;
+            for ($k = $j; $k < $n; $k++) {
+                $tok = $tokens[$k];
+
+                if (!is_array($tok)) {
+                    if ($tok === '(') {
+                        $depth++;
+                        if ($depth === 1) {
+                            continue;
+                        }
+                    } elseif ($tok === ')') {
+                        $depth--;
+                        if ($depth === 0) {
+                            break;
+                        }
+                    } elseif ($tok === ',' && $depth === 1) {
                         break;
                     }
+                    $arg[] = $tok;
                     continue;
                 }
 
-                if ($next[0] === T_COMMENT || $next[0] === T_DOC_COMMENT || $next[0] === T_WHITESPACE) {
+                if ($tok[0] === T_WHITESPACE || $tok[0] === T_COMMENT || $tok[0] === T_DOC_COMMENT) {
                     continue;
                 }
-
-                if ($next[0] === T_CONSTANT_ENCAPSED_STRING) {
-                    if (str_starts_with(trim($next[1], "'\""), 'bcc_')) {
-                        $found[] = $next[1];
-                    }
-                    break;
-                }
+                $arg[] = $tok;
             }
+
+            if (count($arg) === 1 && is_array($arg[0]) && $arg[0][0] === T_CONSTANT_ENCAPSED_STRING) {
+                $literal = $arg[0][1];
+                if (self::isOurPrefix(trim($literal, "'\""))) {
+                    $found[] = $literal;
+                }
+                continue;
+            }
+
+            $shown   = count($arg) === 1 && is_array($arg[0]) && $arg[0][0] === T_VARIABLE
+                ? $arg[0][1]
+                : '...';
+            $found[] = 'deleteByPrefix(' . $shown . ') — first argument is not a plain literal';
         }
 
         return $found;
+    }
+
+    /**
+     * Does this option-name prefix reach bcc data?
+     *
+     * ⚠ The transient wrappers are stripped first. `bcc_signals_u5` lives in
+     * wp_options as `_transient_bcc_signals_u5`, so a sweep of
+     * `_transient_bcc_signals_` reaches our data without starting with
+     * `bcc_` — the miss that review caught, and exactly what the removed
+     * code listed.
+     */
+    private static function isOurPrefix(string $prefix): bool
+    {
+        foreach (
+            [
+                '_site_transient_timeout_',
+                '_site_transient_',
+                '_transient_timeout_',
+                '_transient_',
+            ] as $wrapper
+        ) {
+            if (str_starts_with($prefix, $wrapper)) {
+                $prefix = substr($prefix, strlen($wrapper));
+                break;
+            }
+        }
+
+        return str_starts_with($prefix, 'bcc_');
     }
 
     /**
