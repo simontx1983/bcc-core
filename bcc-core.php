@@ -856,6 +856,15 @@ add_filter('bcc_system_health', function (array $health): array {
             'no_last_good',
             'ceiling_reached',
         ],
+        // auth_throttle — the route-wide ceilings (300/min) on the two
+        // sign-in routes the frontend calls server-side, bcc-trust
+        // AuthSupport::allowIdentityAttempt() (F-123 / F-131). Their
+        // per-identity buckets replaced per-IP ones; the ceiling bounds total
+        // load. `wallet_login_ceiling` / `oauth_login_ceiling` = the ceiling
+        // tripped, so EVERY identity on that route is refused for the rest of
+        // the minute — a flood, or the ceiling set too low for real traffic.
+        // Expected steady state zero; any activation is worth a look.
+        'auth_throttle' => ['wallet_login_ceiling', 'oauth_login_ceiling'],
     ]);
 
     return $health;
