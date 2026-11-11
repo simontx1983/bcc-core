@@ -804,10 +804,11 @@ final class Throttle
      * allowlisted here (Modes 1/2) and that proxy fails to strip
      * CF-Connecting-IP, an attacker can spoof it through the proxy and
      * poison any IP's bucket. By restricting this extractor to standard
-     * forwarding headers (XFF, X-Real-IP), the explicit allowlist remains
+     * forwarding header (X-Forwarded-For), the explicit allowlist remains
      * safe even against proxies with sloppy header policies. Operators on
      * Cloudflare with an explicit BCC_TRUSTED_PROXY_IPS allowlist can rely
-     * on X-Forwarded-For (which CF also sends).
+     * on X-Forwarded-For (which CF also sends). X-Real-IP is not consulted
+     * (F-54): a client can send its own.
      *
      * @param list<string> $trusted the operator's trusted-proxy allowlist
      */
@@ -816,24 +817,23 @@ final class Throttle
         // X-Forwarded-For is walked from the RIGHT (F-54). Each proxy APPENDS
         // the peer it saw, so the leftmost entries are whatever the client
         // chose to send; taking entry [0] let any client behind a trusted
-        // proxy pick its own bucket IP. The rightmost entry that is not
-        // itself a trusted proxy is the real client as seen by our edge.
+        // proxy pick its own bucket IP. Only TRUSTED hops are skipped: the
+        // first untrusted hop IS the client as our edge saw it — returned if
+        // it is a valid IP, otherwise null (caller falls back to REMOTE_ADDR).
+        // The walk never continues left past a malformed hop, because
+        // everything left of it is client-controlled.
+        //
+        // No X-Real-IP fallback: a client can send its own, and whether a
+        // given proxy overwrites it is configuration we cannot see. When XFF
+        // is missing or names only trusted proxies, the caller uses
+        // REMOTE_ADDR.
         if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
             $hops = array_reverse(array_map('trim', explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR'])));
             foreach ($hops as $hop) {
-                if (!filter_var($hop, FILTER_VALIDATE_IP) || self::isTrustedProxy($hop, $trusted)) {
+                if (self::isTrustedProxy($hop, $trusted)) {
                     continue;
                 }
-                return $hop;
-            }
-        }
-
-        // X-Real-IP: a single value the proxy sets (it overwrites any the
-        // client sent), used only when XFF yields no untrusted hop.
-        if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
-            $ip = trim((string) $_SERVER['HTTP_X_REAL_IP']);
-            if (filter_var($ip, FILTER_VALIDATE_IP)) {
-                return $ip;
+                return filter_var($hop, FILTER_VALIDATE_IP) ? $hop : null;
             }
         }
         return null;

@@ -20,8 +20,10 @@ use PHPUnit\Framework\TestCase;
  * the bcc_trusted_proxy_ips filter):
  *   - a forged leftmost hop is ignored; the hop the proxy appended wins;
  *   - a chain of trusted proxies is skipped;
- *   - invalid entries are skipped;
- *   - nothing untrusted in XFF → X-Real-IP; neither → REMOTE_ADDR;
+ *   - the walk STOPS at the first untrusted hop: a malformed one gives
+ *     REMOTE_ADDR, never an entry further left (client-controlled);
+ *   - nothing untrusted in XFF, or no XFF → REMOTE_ADDR; X-Real-IP is
+ *     never consulted (a client can send its own);
  *   - REMOTE_ADDR not trusted → every header ignored (unchanged).
  *
  * Subprocess-only: BCC_TRUSTED_PROXY_IPS is a constant, defined per test.
@@ -67,14 +69,21 @@ final class ThrottleForwardedForTest extends TestCase
         self::assertSame('203.0.113.9', self::clientIp(self::EDGE, '6.6.6.6, 203.0.113.9, ' . self::INNER));
     }
 
-    public function testInvalidEntriesAreSkipped(): void
+    public function testAMalformedUntrustedHopStopsTheWalk(): void
     {
-        self::assertSame('203.0.113.9', self::clientIp(self::EDGE, '203.0.113.9, not-an-ip, , ' . self::INNER));
+        // Everything left of the malformed hop is client-controlled.
+        self::assertSame(self::EDGE, self::clientIp(self::EDGE, '6.6.6.6, garbage'));
+        self::assertSame(self::EDGE, self::clientIp(self::EDGE, '203.0.113.9, not-an-ip, , ' . self::INNER));
     }
 
-    public function testAllTrustedFallsBackToXRealIp(): void
+    public function testAllTrustedFallsBackToRemoteAddrNotXRealIp(): void
     {
-        self::assertSame('198.51.100.7', self::clientIp(self::EDGE, self::INNER, '198.51.100.7'));
+        self::assertSame(self::EDGE, self::clientIp(self::EDGE, self::INNER, '198.51.100.7'));
+    }
+
+    public function testXRealIpAloneIsNeverTrusted(): void
+    {
+        self::assertSame(self::EDGE, self::clientIp(self::EDGE, null, '198.51.100.7'));
     }
 
     public function testNoUsableHeaderFallsBackToRemoteAddr(): void
