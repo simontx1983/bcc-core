@@ -189,6 +189,116 @@ final class SafeHttpClientDnsPinScopeTest extends TestCase
         );
     }
 
+    // ── the entry's own format ─────────────────────────────
+
+    /**
+     * ⚠ AN IPv6 ADDRESS IS BRACKETED. `resolvePublicIp()` falls back to an
+     * AAAA record, so the address half can contain colons, and
+     * `host:port:[ip]` is the form cURL documents for that.
+     *
+     * ⚠ Stated precisely: this was NOT a live break. The bare form was
+     * tested against the deployed libcurl (8.16.0) and its verbose log shows
+     * the entry accepted and used, so an AAAA-only host was not going out
+     * unpinned. What justifies it is that an UNPARSEABLE entry is silently
+     * SKIPPED and the request falls back to cURL's own DNS with no error to
+     * the caller — a pin that fails to parse fails OPEN. Emitting the
+     * documented form on every libcurl build is defence against that class.
+     */
+    public function testAnIpv6AddressIsBracketedInTheEntry(): void
+    {
+        self::assertSame(
+            'example.test:443:[2001:db8::1]',
+            self::format('example.test', 443, '2001:db8::1')
+        );
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY: IPv4 must NOT be bracketed. A formatter that
+     * bracketed everything would pass the case above and break every
+     * ordinary pin — which is the common path.
+     */
+    public function testAnIpv4AddressIsNotBracketed(): void
+    {
+        self::assertSame(
+            'example.test:443:93.184.216.34',
+            self::format('example.test', 443, '93.184.216.34')
+        );
+    }
+
+    /** And a bracketed entry still reads back through the parse. */
+    public function testABracketedIpv6EntryStillResolves(): void
+    {
+        $entry = 'example.test:443:[2001:db8::1]';
+
+        self::assertSame(
+            $entry,
+            SafeHttpClient::resolveEntryFor([self::pinArgKey() => $entry], 'https://example.test/x')
+        );
+    }
+
+    // ── the port has to match ───────────────────────────
+
+    /**
+     * ⚠⚠ A PORT MISMATCH FAILS OPEN IF UNCHECKED, which is why it is
+     * checked. A `CURLOPT_RESOLVE` entry applies only to the host AND port it
+     * names, so handing cURL `host:443:ip` for a port-80 connection does not
+     * misdirect anything — it simply does not match, cURL resolves the name
+     * itself, and the request goes out UNPINNED while the caller believes it
+     * pinned. Same shape as the defect review caught in the TTL approach.
+     */
+    public function testAPortMismatchGetsNothing(): void
+    {
+        DnsStub::startClock(self::T0);
+        $args = $this->pinnedArgs();
+
+        self::assertNull(
+            SafeHttpClient::resolveEntryFor($args, 'http://' . self::HOST . '/x'),
+            'a pin for :443 must not be offered for a port-80 request'
+        );
+        self::assertNull(
+            SafeHttpClient::resolveEntryFor($args, 'https://' . self::HOST . ':8443/x'),
+            'nor for an explicit non-matching port'
+        );
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY for the check above: the port rule must not refuse
+     * everything. An explicit port that MATCHES is accepted, and the
+     * scheme-default case keeps working — which is the only case in
+     * production today.
+     */
+    public function testAMatchingPortIsAccepted(): void
+    {
+        $key = self::pinArgKey();
+
+        // Scheme default, the ordinary case.
+        self::assertSame(
+            self::HOST . ':443:' . self::IP,
+            SafeHttpClient::resolveEntryFor(
+                [$key => self::HOST . ':443:' . self::IP],
+                'https://' . self::HOST . '/x'
+            )
+        );
+
+        // http default.
+        self::assertSame(
+            self::HOST . ':80:' . self::IP,
+            SafeHttpClient::resolveEntryFor(
+                [$key => self::HOST . ':80:' . self::IP],
+                'http://' . self::HOST . '/x'
+            )
+        );
+
+        // Explicit, matching.
+        self::assertSame(
+            self::HOST . ':8443:' . self::IP,
+            SafeHttpClient::resolveEntryFor(
+                [$key => self::HOST . ':8443:' . self::IP],
+                'https://' . self::HOST . ':8443/x'
+            )
+        );
+    }
+
     // ── the pin must not reach the wire ─────────────────────────────
 
     /**
@@ -257,6 +367,18 @@ final class SafeHttpClientDnsPinScopeTest extends TestCase
 
         $out = SafeHttpClient::prepareArgs('https://' . self::HOST . '/x', ['timeout' => 5]);
         self::assertIsArray($out, 'the host must validate, or this fixture proves nothing');
+
+        return $out;
+    }
+
+    /** The entry `formatResolveEntry()` builds, which is private. */
+    private static function format(string $host, int $port, string $ip): string
+    {
+        $m = (new ReflectionClass(SafeHttpClient::class))->getMethod('formatResolveEntry');
+        $m->setAccessible(true);
+
+        /** @var string $out */
+        $out = $m->invoke(null, $host, $port, $ip);
 
         return $out;
     }
