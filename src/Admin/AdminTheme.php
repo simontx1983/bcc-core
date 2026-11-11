@@ -29,7 +29,8 @@ final class AdminTheme
 
     public static function isBccPage(): bool
     {
-        $page = isset($_GET['page']) ? sanitize_key((string) wp_unslash($_GET['page'])) : '';
+        $raw  = $_GET['page'] ?? '';
+        $page = is_string($raw) ? sanitize_key(wp_unslash($raw)) : '';
         return str_starts_with($page, 'bcc-');
     }
 
