@@ -541,9 +541,8 @@ add_filter('bcc_system_health', function (array $health): array {
         // BCC System → Developer → Search Index.
         'search_ft_index'      => ['title_only_fallback'],
         // search_trust — search was served WITHOUT trust enrichment (the
-        // score-read service is the NullObject, or returned no scores for a
-        // non-empty candidate set): ranking is text-only and the
-        // impersonation guard has nothing to compare. The response is tagged
+        // score-read service is the NullObject — bcc-trust unbound): ranking
+        // is text-only and the impersonation guard has nothing to compare. The response is tagged
         // system_degraded and cached only briefly (never as last-known-good).
         // Sustained activation = bcc-trust unbound or its read model failing.
         'search_trust'         => ['enrichment_unavailable'],
