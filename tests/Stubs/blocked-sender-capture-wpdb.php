@@ -52,6 +52,50 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
         /** @var int|string|null */
         public $varToReturn = 0;
 
+        /**
+         * Real `wpdb::$last_error`.
+         *
+         * ⚠⚠ MODELLING THIS HONESTLY IS THE WHOLE POINT OF F-99's TESTS,
+         * and a naive double cannot express the case that matters.
+         * Production CLEARS `last_error` before each probe, so a test that
+         * merely pre-sets this property is testing the STALE-error case,
+         * not a real failure — the clear wipes it before the query runs.
+         *
+         * So a real driver failure is modelled by `$errorOnQuery`, which
+         * the read methods assign to `last_error` WHEN THEY RUN, exactly
+         * as `wpdb::query()` does after a failed statement. The two cases
+         * are then distinguishable, and both are asserted.
+         */
+        public string $last_error = '';
+
+        /**
+         * A driver error RAISED BY the next read, or '' for success.
+         * Models `wpdb::query()` setting `last_error` on failure.
+         */
+        public string $errorOnQuery = '';
+
+        /**
+         * `last_error` as observed at the START of each read, before
+         * `$errorOnQuery` is applied.
+         *
+         * This is what proves production cleared it: if every recorded
+         * value is '', no stale error could have been mistaken for this
+         * query's failure. Asserting the clear from the OUTSIDE like this
+         * is stronger than grepping the source for an assignment.
+         *
+         * @var list<string>
+         */
+        public array $errorSeenAtQuery = [];
+
+        /** Record entry state, then apply any simulated driver error. */
+        private function enterQuery(): void
+        {
+            $this->errorSeenAtQuery[] = $this->last_error;
+            if ($this->errorOnQuery !== '') {
+                $this->last_error = $this->errorOnQuery;
+            }
+        }
+
         /** @param mixed ...$args */
         public function prepare(string $query, ...$args): string
         {
@@ -65,7 +109,13 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
          */
         public function get_col($sql): array
         {
-            return $this->colToReturn;
+            $this->enterQuery();
+            // ⚠ Real `get_col()` returns an EMPTY ARRAY on failure, never
+            // null — indistinguishable from "no rows" except through
+            // `last_error`. That indistinguishability IS the bug F-99
+            // reports, so the double must reproduce it rather than
+            // helpfully returning something falsy-but-different.
+            return $this->errorOnQuery !== '' ? [] : $this->colToReturn;
         }
 
         /**
@@ -75,7 +125,8 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
          */
         public function get_results($sql, $output = 0): array
         {
-            return $this->resultsToReturn;
+            $this->enterQuery();
+            return $this->errorOnQuery !== '' ? [] : $this->resultsToReturn;
         }
 
         /**
@@ -84,7 +135,10 @@ if (!class_exists(__NAMESPACE__ . '\\CaptureWpdb', false)) {
          */
         public function get_var($sql)
         {
-            return $this->varToReturn;
+            $this->enterQuery();
+            // ⚠ NULL on failure, which is the same value a genuine "no
+            // such row" produces. Reproducing that collision is the point.
+            return $this->errorOnQuery !== '' ? null : $this->varToReturn;
         }
 
         public function lastSql(): string
