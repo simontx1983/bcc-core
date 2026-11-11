@@ -41,6 +41,9 @@ final class ColWpdb
 
     public string $last_error = '';
 
+    /** The statement the last query received, as MySQL would see it. */
+    public string $lastSql = '';
+
     public int $queryCount = 0;
 
     /** Rows the next successful query yields. */
@@ -76,6 +79,7 @@ final class ColWpdb
     public function query($sql)
     {
         ++$this->queryCount;
+        $this->lastSql = (string) $sql;
 
         // flush(): last_error and last_result are cleared first.
         $this->last_error = '';
@@ -260,6 +264,71 @@ final class NonOpenGroupIdsStrictTest extends TestCase
 
         self::assertSame([1, 2], PeepSoGroupRepository::getNonOpenGroupIdsStrict($limit));
         self::assertSame(2, $wpdb->queryCount, 'a truncated answer must never be served again');
+    }
+
+
+    // ── post_status: the strict set ignores it, the lenient one does not ──
+
+    /**
+     * THE FIX. A deny list must be OVER-inclusive. Filtering to `publish`
+     * dropped a TRASHED or draft secret group out of the set, so its posts
+     * stopped being excluded — and a caller that replaces its visibility
+     * gate with this list would then show them to anyone. Nothing about
+     * moving a group row to the trash makes its content public.
+     */
+    public function testTheStrictQueryDoesNotFilterOnPostStatus(): void
+    {
+        $wpdb = $this->installWpdb([]);
+
+        PeepSoGroupRepository::getNonOpenGroupIdsStrict(500);
+
+        self::assertStringNotContainsString('post_status', $wpdb->lastSql);
+        self::assertStringContainsString("p.post_type = 'peepso-group'", $wpdb->lastSql);
+        self::assertStringContainsString("pm.meta_value IN ('1','2')", $wpdb->lastSql);
+    }
+
+    /**
+     * ADDITIVE, NOT A REWRITE: the LENIENT lookup keeps its `publish`
+     * filter. The feed uses it as one filter among several and its callers
+     * are unchanged, so widening it there would alter feed behaviour for no
+     * safety gain. If this ever fails, the change leaked across the seam.
+     */
+    public function testTheLenientQueryStillFiltersOnPostStatus(): void
+    {
+        $wpdb = $this->installWpdb([]);
+
+        PeepSoGroupRepository::getNonOpenGroupIds(500);
+
+        self::assertStringContainsString("p.post_status = 'publish'", $wpdb->lastSql);
+    }
+
+    /**
+     * Placeholder/argument parity after removing one bound value. The
+     * double asserts every bound argument has a placeholder, so a stale
+     * `$params` entry would surface here rather than as a silently
+     * shifted WHERE clause in production.
+     */
+    public function testEveryBoundArgumentStillHasAPlaceholder(): void
+    {
+        $wpdb = $this->installWpdb(['7']);
+
+        self::assertSame([7], PeepSoGroupRepository::getNonOpenGroupIdsStrict(500));
+        self::assertStringNotContainsString('<<UNBOUND>>', $wpdb->lastSql);
+    }
+
+    /**
+     * The cap now counts trashed and draft non-open groups too, so
+     * truncation arrives sooner on a site with many of them. It still
+     * degrades CLOSED — null, and the caller keeps its stricter gate.
+     */
+    public function testTrashedGroupsCountTowardTheCapAndTruncationStillFailsClosed(): void
+    {
+        $limit = 4;
+        // limit + 1 rows come back, as they would if trashed groups pushed
+        // the set past the bound.
+        $this->installWpdb(array_map('strval', range(1, $limit + 1)));
+
+        self::assertNull(PeepSoGroupRepository::getNonOpenGroupIdsStrict($limit));
     }
 
     public function testStrictRefusesANonPositiveLimit(): void
