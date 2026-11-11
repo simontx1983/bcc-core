@@ -622,25 +622,9 @@ add_filter('bcc_system_health', function (array $health): array {
             'verify_email_send_failed', // 2026-06-02 — /auth/signup + /auth/resend-verification
             'welcome_email_send_failed', // 2026-06-04 — /auth/verify-email (post-confirmation)
         ],
-        // legacy_ajax — Phase 1.7 (2026-05-09) instrumentation of
-        // suspected-dead AJAX handlers (V-08 candidates). Audit found
-        // no caller in any JS / PHP / TS / bcc-frontend. 30-day zero-hit
-        // window → safe to retire per Stabilization Plan V-08 Phase D.
-        // Sustained nonzero activation = an external consumer exists
-        // that the in-repo audit missed (cron / wp-cli / partner script
-        // / cached pre-deploy browser tab) — investigate before retire.
-        //
-        // 2026-05-25: the 6 wallet/collection AJAX handlers (wallet_challenge,
-        // wallet_verify, wallet_disconnect, wallet_set_primary, wallet_list,
-        // collection_toggle_profile) were retired under the fresh-install
-        // policy without waiting for the full 30-day window; SPA + claim
-        // flows have always used the REST surface.
-        'legacy_ajax'          => [
-            // bcc-trust/app/Domain/Core/Services/UserLifecycleService.php
-            'trust_sync_user',
-            'trust_bulk_sync_users',
-            'trust_init_page_score',
-        ],
+        // legacy_ajax — RETIRED 2026-11-11. Its last three events (the bcc-trust
+        // UserLifecycleService sync/init AJAX handlers) were removed with their
+        // handlers: no caller anywhere, admin-nonce + manage_options only.
         // cron_dispatch — soft failures from wp_schedule_single_event /
         // AsyncDispatcher::enqueueAsync on the trust async surface. A `false`
         // return from wp-cron's options-table write (or AS returning 0)
