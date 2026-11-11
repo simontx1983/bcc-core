@@ -76,16 +76,45 @@ final class SafeHttpClient
     /** DNS resolution cache TTL (seconds, request-local only). */
     private const DNS_CACHE_TTL = 60;
 
+    /**
+     * NEGATIVE DNS cache TTL — how long a FAILED resolve is remembered.
+     *
+     * ⚠⚠ WHY A SEPARATE, SHORTER TTL. The positive cache exists because,
+     * as its own comment says, a burst of calls to one host would
+     * otherwise "block on the OS resolver on every call" and slow
+     * NXDOMAINs "become a worker-exhaustion vector". But it was written
+     * ONLY ON SUCCESS — so the healthy path was cached and the
+     * pathological one, the very case that comment names, re-paid the
+     * full resolve every time. `ApiRetry` retries, so one synchronous
+     * user request could pay it several times over.
+     *
+     * ⚠ And PHP cannot bound that cost: `gethostbyname()` takes NO
+     * timeout argument and blocks on the OS resolver, whose own defaults
+     * commonly reach ~30s and are not settable from PHP;
+     * `dns_get_record()` is the same. A `timeout` in the request args
+     * bounds the HTTP exchange only — it cannot cover the resolve,
+     * because the resolve happens before the request is made.
+     *
+     * Shorter than the positive TTL on purpose: a cached FAILURE denies
+     * a legitimate request, so it should expire quickly once DNS
+     * recovers, whereas a cached success is merely a pin.
+     */
+    private const DNS_NEGATIVE_CACHE_TTL = 10;
+
     /** Pinned DNS entries: host → "host:port:ip" for CURLOPT_RESOLVE. */
     /** @var array<string, string> */
     private static array $pinnedResolves = [];
 
     /**
-     * Per-request DNS resolution cache keyed by host → ['ip' => string, 'expires' => int].
+     * Per-request DNS resolution cache keyed by host →
+     * `['ip' => string|null, 'expires' => int]`.
+     *
+     * ⚠ `ip => null` is a remembered FAILURE (negative cache), not an
+     * absent entry — see DNS_NEGATIVE_CACHE_TTL.
      * Reset on every request because PHP-FPM static lifetime would otherwise
      * outlive short-TTL records.
      *
-     * @var array<string, array{ip: string, expires: int}>
+     * @var array<string, array{ip: string|null, expires: int}>
      */
     private static array $dnsCache = [];
 
@@ -628,12 +657,59 @@ final class SafeHttpClient
         // processing a burst of calls to the same host would otherwise
         // block on the OS resolver on every call, and hostile upstreams
         // (or merely slow NXDOMAINs) become a worker-exhaustion vector.
+        //
+        // ⚠ A cached entry with a NULL ip is a remembered FAILURE. It is
+        // replayed as the same refusal rather than re-resolving, which is
+        // the whole point: the resolve below cannot be time-bounded from
+        // PHP, so not repeating it is the only lever available.
         if (isset(self::$dnsCache[$host]) && self::$dnsCache[$host]['expires'] > time()) {
+            if (self::$dnsCache[$host]['ip'] === null) {
+                return new \WP_Error(
+                    'ssrf_blocked',
+                    "Blocked: {$host} resolves to no public IP addresses"
+                );
+            }
             return ['host' => $host, 'port' => $port, 'ip' => self::$dnsCache[$host]['ip']];
         }
 
         $pinnedIp = self::resolvePublicIp($host);
         if ($pinnedIp === null) {
+            // ⚠⚠ NEGATIVE-CACHE THE FAILURE. Without this, every retry in
+            // the same request re-pays an unbounded `gethostbyname()`
+            // — and on a host with no A record, an unbounded
+            // `dns_get_record()` on top of it.
+            //
+            // ⚠ This CANNOT weaken the SSRF guard, which is the property
+            // that makes it safe to cache a security decision: a cached
+            // failure only ever produces a REFUSAL. The risk it does
+            // carry is the opposite one — briefly refusing a host that
+            // has since started resolving publicly — which is the
+            // fail-closed direction and is why the TTL is short.
+            self::$dnsCache[$host] = [
+                'ip'      => null,
+                'expires' => time() + self::DNS_NEGATIVE_CACHE_TTL,
+            ];
+
+            // Logged HERE rather than at the cache read, so it is emitted
+            // once per TTL per host instead of once per blocked call: the
+            // cache write IS the once-per-TTL gate. Guarded because
+            // SafeHttpClient is loadable without the logger.
+            // ⚠ BOTH conditions are the Logger's real preconditions, not
+            // defensiveness. The class can be autoloaded without
+            // WordPress, but `Logger::ensureInit()` resolves its log
+            // path from WP_CONTENT_DIR — so without WP it raises
+            // "Undefined constant", and SafeHttpClient is deliberately
+            // loadable (and unit-testable) outside a booted WP. Guarding
+            // on the constant keeps the log in production and silently
+            // skips it where no log file can exist, rather than making
+            // a pure-unit test write one.
+            if (defined('WP_CONTENT_DIR') && class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning(
+                    '[bcc-core] SafeHttpClient: host resolves to no public IP, negative-cached',
+                    ['host' => $host, 'ttl' => self::DNS_NEGATIVE_CACHE_TTL]
+                );
+            }
+
             return new \WP_Error(
                 'ssrf_blocked',
                 "Blocked: {$host} resolves to no public IP addresses"
