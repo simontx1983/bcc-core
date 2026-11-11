@@ -13,6 +13,7 @@ return array(
     'BCC\\Core\\Admin\\CronPage' => $baseDir . '/src/Admin/CronPage.php',
     'BCC\\Core\\Admin\\DeveloperPage' => $baseDir . '/src/Admin/DeveloperPage.php',
     'BCC\\Core\\Admin\\EnvBanner' => $baseDir . '/src/Admin/EnvBanner.php',
+    'BCC\\Core\\Admin\\ForeignNoticeFilter' => $baseDir . '/src/Admin/ForeignNoticeFilter.php',
     'BCC\\Core\\Admin\\HideWpDefaults' => $baseDir . '/src/Admin/HideWpDefaults.php',
     'BCC\\Core\\Admin\\SystemHealthPage' => $baseDir . '/src/Admin/SystemHealthPage.php',
     'BCC\\Core\\Contracts\\ChainReadInterface' => $baseDir . '/src/Contracts/ChainReadInterface.php',
