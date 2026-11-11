@@ -14,8 +14,8 @@ namespace BCC\Core\Admin;
  *
  * v1 scope (this commit):
  *   - Per-key status: defined / missing.
- *   - Masked preview (first 4 + last 4 chars, middle masked) when
- *     the value is long enough to be safe to fingerprint.
+ *   - Length only for a defined value — no characters of it, and nothing
+ *     derived from it (F-52; it used to show first 4 + last 4).
  *   - Source plugin + severity + description.
  *   - Grouped by severity (critical first).
  *
@@ -91,7 +91,7 @@ final class ApiKeysPage
         echo '<p><strong>Read-only.</strong> Values are stored in <code>wp-config.php</code> '
             . '(or environment variables / secret storage) and are never editable or viewable here. '
             . 'To rotate a secret: edit <code>wp-config.php</code> out of band, restart PHP, '
-            . 'then this page reflects the new defined-state and masked preview.</p>';
+            . 'then this page reflects the new defined-state and length.</p>';
         echo '</div>';
     }
 
@@ -162,7 +162,7 @@ final class ApiKeysPage
         echo '<th>Severity</th>';
         echo '<th>Source</th>';
         echo '<th>Status</th>';
-        echo '<th>Masked preview</th>';
+        echo '<th>Value</th>';
         echo '<th>Description</th>';
         echo '</tr></thead><tbody>';
 
@@ -204,26 +204,17 @@ final class ApiKeysPage
     // ────────────────────────────────────────────────────────────
 
     /**
-     * Constant-width masked preview. Trades a 4-char fingerprint
-     * (enough for an operator to confirm "yes this is the right
-     * value I expected" against an out-of-band reference like a
-     * password manager) for never exposing the secret in full to
-     * an admin session.
-     *
-     * Values <= 12 chars are too short to fingerprint safely (the
-     * first/last 4 + middle would reveal too much of the body),
-     * so we show length only.
+     * What the page shows for a defined secret: its LENGTH, never any of
+     * its characters (F-52). The previous first-4 + last-4 preview put 8
+     * real characters of production secrets into every admin page load
+     * (screen shares, screenshots, browser history caches). Nothing
+     * derived from the value (prefix, suffix, hash) is shown either — a
+     * derived value is still a partial disclosure. Confirming WHICH key is
+     * set is an out-of-band check against the password manager.
      */
-    private static function mask(string $value): string
+    public static function mask(string $value): string
     {
-        $len = strlen($value);
-        if ($len <= 12) {
-            return '[' . $len . ' chars]';
-        }
-        $first  = substr($value, 0, 4);
-        $last   = substr($value, -4);
-        $middle = str_repeat('•', max(4, min(20, $len - 8)));
-        return $first . $middle . $last;
+        return '•••• (' . strlen($value) . ' chars)';
     }
 
     private static function severityBadge(string $severity): string
