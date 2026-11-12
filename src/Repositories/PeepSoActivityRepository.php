@@ -80,18 +80,29 @@ final class PeepSoActivityRepository
      * as public. The viewer always sees their own posts, which must be in
      * the SQL because one page carries many authors.
      *
-     * ⚠ The CASE has NO admitting catch-all: an unrecognised effective
-     * level (a future PeepSo value, a corrupt row) falls to `ELSE 0` and
-     * is HIDDEN. That is the opposite of the `is_numeric` defect found in
-     * the profile gate, where an unreadable value cast to 0 and 0 meant
-     * PUBLIC. ⚠ It is also stricter than the range-based ladder
-     * (`<= 10` / `<= 20` / `<= 30` / else deny) recorded as the decision
-     * for this gate, and the difference is reachable: PeepSo's
-     * `change_post_privacy` writes `act_access` straight from
-     * `$this->_input->int('acc')` with no validation against
-     * {10,20,30,40}. Reconciling the two is a behaviour change and is
-     * deliberately NOT bundled into this plumbing; because the predicate
-     * now exists once, it is a one-place fix when decided.
+     * ⚠⚠ THE LADDER IS RANGE-BASED, NOT EXACT-MATCH, and that is the
+     * decision rather than an accident: `<= 10` public (which covers the
+     * 0 BCC's own writer stores), `<= 20` members, `<= 30` friends,
+     * anything above 30 denied.
+     *
+     * It matters because `act_access` is NOT a validated enum. PeepSo's
+     * `change_post_privacy` writes it straight from
+     * `$this->_input->int('acc')` with no check against {10,20,30,40}, so
+     * a value like 15 is reachable today and a future PeepSo level would
+     * arrive on upgrade. Under an exact-match `CASE`, every such value
+     * fell to `ELSE 0` and the post became invisible to everyone but its
+     * author — silently, and site-wide on a PeepSo upgrade. A post whose
+     * author chose a stray level should be treated at the nearest
+     * stricter rung, not deleted from view.
+     *
+     * ⚠ Above 30 still DENIES, so 40 ("only me") and anything beyond it
+     * are unaffected: widening never admits a post that the old ladder
+     * hid at 40, only ones it hid by accident.
+     *
+     * ⚠ The `GREATEST`/`COALESCE` expression is spelled out three times
+     * because MySQL has no statement-local binding and a derived table
+     * here would defeat the index on the feed query. It is built once in
+     * PHP below so the three copies cannot drift.
      *
      * @param list<int>|null $viewerFriendIds Capped at {@see VIEWER_FRIEND_IDS_MAX}; over the cap is treated as EMPTY (deny), never truncated — truncating would admit the first N friends and deny the rest with no signal, making the gate depend on array order.
      * @return array{join: string, where: string, params: list<int>}
@@ -132,21 +143,31 @@ final class PeepSoActivityRepository
             $params[] = $fid;
         }
 
+        // The effective level: the STRICTER of the post's own access and
+        // its author's profile level, because the ladder is ordered
+        // (10 < 20 < 30 < 40). `act_access <= 0` normalises to 10 - BCC's
+        // own writer stores 0, and PeepSo's `is_accessible_static` also
+        // treats 0 as public.
+        $effective = 'GREATEST('
+            . 'IF(a.act_access IS NULL OR a.act_access <= 0, 10, a.act_access),'
+            . ' COALESCE(pu.usr_profile_acc, 10)'
+            . ')';
+
         return [
             // LEFT, not INNER, so an author with no PeepSo row still
             // appears - their level then COALESCEs to 10, the column's
             // schema default.
             'join'  => ' LEFT JOIN ' . $wpdb->prefix . 'peepso_users pu'
                 . ' ON pu.usr_id = p.post_author',
+            // Searched CASE on RANGES, so a stray level lands on the
+            // nearest stricter rung instead of vanishing. See the
+            // docblock for why that is the decision.
             'where' => '('
                 . 'CASE WHEN %d > 0 AND p.post_author = %d THEN 1'
-                . ' ELSE CASE GREATEST('
-                .     'IF(a.act_access IS NULL OR a.act_access <= 0, 10, a.act_access),'
-                .     ' COALESCE(pu.usr_profile_acc, 10)'
-                . ')'
-                .   ' WHEN 10 THEN 1'
-                .   ' WHEN 20 THEN IF(%d > 0, 1, 0)'
-                .   ' WHEN 30 THEN ' . $friendBranch
+                . ' ELSE CASE'
+                .   ' WHEN ' . $effective . ' <= 10 THEN 1'
+                .   ' WHEN ' . $effective . ' <= 20 THEN IF(%d > 0, 1, 0)'
+                .   ' WHEN ' . $effective . ' <= 30 THEN ' . $friendBranch
                 .   ' ELSE 0'
                 . ' END END) = 1',
             'params' => $params,
