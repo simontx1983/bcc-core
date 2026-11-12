@@ -130,6 +130,10 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
 
         protected function setUp(): void
         {
+            require_once dirname(__DIR__) . '/tests/Stubs/nonopen-groups-seed.php';
+            // F-23 gate: default to "no group is non-open" so the rendered
+            // SQL is the pre-F-23 shape these tests pin.
+            \bcc_test_seed_nonopen_groups([]);
             $this->priorWpdb = $GLOBALS['wpdb'] ?? null;
         }
 

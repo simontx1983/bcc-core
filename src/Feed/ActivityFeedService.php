@@ -4,6 +4,7 @@ namespace BCC\Core\Feed;
 
 use BCC\Core\PeepSo\PeepSoGraphService;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Core\Repositories\PeepSoGroupRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -378,19 +379,32 @@ final class ActivityFeedService
     /**
      * Mirrors `getActivities()`'s global-feed visibility predicate:
      * a group-tagged post is visible outside the group only when
-     * explicitly marked `public_all`; non-group posts are always
-     * visible.
+     * explicitly marked `public_all` AND (F-23) none of its groups is
+     * currently closed or secret; non-group posts are always visible.
+     *
+     * Fails closed: if the non-open group set can't be read (query error
+     * or over the cap), a group-tagged post is not visible here.
      */
     private static function isVisibleGlobally(int $postId): bool
     {
         if ($postId <= 0) {
             return false;
         }
-        $groupId = get_post_meta($postId, 'peepso_group_id', true);
-        if ($groupId === '' || $groupId === false) {
+        $groupIds = array_values(array_filter(
+            array_map('intval', (array) get_post_meta($postId, 'peepso_group_id', false)),
+            static fn(int $id): bool => $id > 0
+        ));
+        if ($groupIds === []) {
             return true;
         }
-        return get_post_meta($postId, '_bcc_post_visibility', true) === 'public_all';
+        if (get_post_meta($postId, '_bcc_post_visibility', true) !== 'public_all') {
+            return false;
+        }
+        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIdsStrict();
+        if ($nonOpen === null) {
+            return false;
+        }
+        return array_intersect($groupIds, array_map('intval', $nonOpen)) === [];
     }
 
     /**
