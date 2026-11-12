@@ -396,11 +396,20 @@ final class ActivityFeedService
      *
      * `$deferGroupsToCaller` makes the GROUP-TAGGED branch the caller's
      * decision instead of a refusal — see
-     * {@see getActivityById()}'s parameter of the same purpose. It is
-     * scoped to that branch deliberately: the `$postId <= 0` guard and
-     * the non-group `true` are untouched, so the only behaviour it can
-     * change is "group-tagged, not public_all" — from "refuse" to "ask
-     * the caller".
+     * {@see getActivityById()}'s parameter of the same purpose.
+     *
+     * ⚠ BE PRECISE ABOUT HOW MUCH IT SKIPS. It returns early for a
+     * group-tagged post WHETHER OR NOT the post is `public_all`, so the
+     * `_bcc_post_visibility` check AND the {@see GroupSyndicationGate}
+     * rule below it are BOTH deferred. A `public_all` post whose group
+     * has since become non-open is refused by that gate and deferred
+     * when the caller asks — deliberately, because "may a member open
+     * this by link" is not the syndication question "may this leave the
+     * room". There is a test for exactly that case.
+     *
+     * What it does NOT touch: the `$postId <= 0` guard (a row with no
+     * backing post is still refused) and the non-group `true` (those
+     * were always visible).
      */
     private static function isVisibleGlobally(int $postId, bool $deferGroupsToCaller = false): bool
     {
@@ -416,9 +425,10 @@ final class ActivityFeedService
         }
 
         // Group-tagged, and the caller has said it will apply the
-        // group's own rule. Everything below this point is the
-        // SYNDICATION question ("may this leave the room?"), which is
-        // not the question a member asking for a permalink is asking.
+        // group's own rule. EVERYTHING below this point is the
+        // SYNDICATION question ("may this leave the room?") — both the
+        // `public_all` marker and the GroupSyndicationGate — and that
+        // is not the question a member asking for a permalink is asking.
         if ($deferGroupsToCaller) {
             return true;
         }

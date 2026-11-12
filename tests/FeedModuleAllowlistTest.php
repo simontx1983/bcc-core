@@ -321,6 +321,101 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
             self::assertNull(self::service()->getActivityById(150, 0));
         }
 
+        // ── $deferGroupVisibilityToCaller rescues NOTHING else ──────
+        //
+        // The parameter defers ONE question: whether a group-tagged post
+        // may be resolved by id. These assert that it does not quietly
+        // become a skeleton key for the gates ABOVE it in the method —
+        // all of which return before the group branch is ever reached.
+        //
+        // ⚠ Worth pinning explicitly rather than reasoning from source
+        // order: the risk with an opt-in like this is not that it fails,
+        // it is that a later refactor moves it earlier.
+
+        /** A draft stays unreachable even when the caller takes the group decision. */
+        public function testDeferringDoesNotRescueANonPublishedRow(): void
+        {
+            $wpdb = $this->installWpdb();
+            $wpdb->rowToReturn = (object) [
+                'act_id'          => 150,
+                'act_user_id'     => 140,
+                'act_module_id'   => '1',
+                'act_external_id' => 4973,
+                'act_time'        => '2026-06-11 20:14:18',
+                'act_access'      => '0',
+                'act_status'      => 'draft',
+            ];
+
+            self::assertNull(self::service()->getActivityById(
+                150,
+                0,
+                deferGroupVisibilityToCaller: true
+            ));
+        }
+
+        /** A private-module activity stays unreachable too (F058 holds). */
+        public function testDeferringDoesNotRescueAnExcludedModule(): void
+        {
+            $wpdb = $this->installWpdb();
+            $wpdb->rowToReturn = (object) [
+                'act_id'          => 150,
+                'act_user_id'     => 140,
+                'act_module_id'   => '6', // private message
+                'act_external_id' => 4973,
+                'act_time'        => '2026-06-11 20:14:18',
+                'act_access'      => '0',
+                'act_status'      => 'publish',
+            ];
+
+            self::assertNull(self::service()->getActivityById(
+                150,
+                0,
+                deferGroupVisibilityToCaller: true
+            ));
+        }
+
+        /**
+         * The opaque exclusion channels still apply: a moderation-hidden
+         * act id and a blocked / shadow-limited author are both refused
+         * with deferring on.
+         */
+        public function testDeferringDoesNotRescueAnExcludedAuthorOrActId(): void
+        {
+            $row = (object) [
+                'act_id'          => 150,
+                'act_user_id'     => 140,
+                'act_module_id'   => '1',
+                'act_external_id' => 4973,
+                'act_time'        => '2026-06-11 20:14:18',
+                'act_access'      => '0',
+                'act_status'      => 'publish',
+            ];
+
+            $wpdb = $this->installWpdb();
+            $wpdb->rowToReturn = $row;
+            self::assertNull(
+                self::service()->getActivityById(
+                    150,
+                    0,
+                    excludedAuthorIds: [140],
+                    deferGroupVisibilityToCaller: true
+                ),
+                'an excluded author must stay excluded'
+            );
+
+            $wpdb = $this->installWpdb();
+            $wpdb->rowToReturn = $row;
+            self::assertNull(
+                self::service()->getActivityById(
+                    150,
+                    0,
+                    excludedActIds: [150],
+                    deferGroupVisibilityToCaller: true
+                ),
+                'a hidden act id must stay hidden'
+            );
+        }
+
         // ── isPublicFeedModule() gate truth table ───────────────────────
 
         public function testIsPublicFeedModuleTruthTable(): void
