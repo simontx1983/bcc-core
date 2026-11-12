@@ -378,8 +378,9 @@ final class Throttle
             // source every bcc-trust consumer (votes, fingerprints, audit,
             // RateLimiter) uses, so anonymous throttle keys follow it too.
             // It honours the Cloudflare opt-in, and delegates back to
-            // clientIp() here when trusted proxies are declared (F-125). Today bcc-trust is always present alongside
-            // bcc-core in production, but this class_exists() guard is
+            // clientIp() here when trusted proxies are declared (F-125).
+            // Today bcc-trust is always present alongside bcc-core in
+            // production, but this class_exists() guard is
             // intentional: it preserves the architectural seam so
             // bcc-core can theoretically run standalone (test fixtures,
             // a future plugin split). Do NOT delete without first
