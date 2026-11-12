@@ -20,6 +20,15 @@ namespace BCC\Core\Repositories {
     if (!class_exists(PeepSoGroupRepository::class, false)) {
         class PeepSoGroupRepository
         {
+            public static function getMembershipStatusOrFail(int $userId, int $groupId): string|null|false
+            {
+                if (!empty($GLOBALS['__bcc_gw_fixture']['read_failed'])) {
+                    return false;
+                }
+                $status = $GLOBALS['__bcc_gw_fixture']['status'] ?? null;
+                return is_string($status) ? $status : null;
+            }
+
             public static function getMembershipStatus(int $userId, int $groupId): ?string
             {
                 $status = $GLOBALS['__bcc_gw_fixture']['status'] ?? null;
@@ -63,6 +72,11 @@ namespace {
             public function member_join(): void
             {
                 $GLOBALS['__bcc_gw_fixture']['member_join_calls'][] = [$this->groupId, $this->userId];
+            }
+
+            public function member_leave(): void
+            {
+                $GLOBALS['__bcc_gw_fixture']['member_leave_calls'][] = [$this->groupId, $this->userId];
             }
         }
     }

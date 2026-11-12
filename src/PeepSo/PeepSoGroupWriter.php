@@ -50,12 +50,15 @@ final class PeepSoGroupWriter
      *     ban must stick until an admin lifts it
      *   - Existing pending/block_invites row → upgraded by PeepSo's
      *     member_join to 'member'; we surface as success
+     *   - Membership read failed → REFUSED (returns false): a failure must
+     *     not read as "no row" while a banned row may be there
      *
      * Returns:
      *   - true  on success (membership now active)
      *   - false when PeepSoGroupUser is missing (PeepSo deactivated),
-     *           inputs are invalid (zero/negative IDs), or the user has
-     *           a banned membership row in this group
+     *           inputs are invalid (zero/negative IDs), the user has
+     *           a banned membership row in this group, or the
+     *           membership read failed
      */
     public static function join(int $userId, int $groupId): bool
     {
@@ -84,7 +87,15 @@ final class PeepSoGroupWriter
         // (REST joins, auto-join reconcile, future doors) would silently
         // flip an admin's ban back to full membership. Refuse centrally
         // here rather than per-caller so the invariant can't be missed.
-        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus($userId, $groupId);
+        // A read that did not run refuses too: it must not read as "no row".
+        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatusOrFail($userId, $groupId);
+        if ($status === false) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group join refused — membership read failed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
+            return false;
+        }
         if ($status === 'banned') {
             \BCC\Core\Log\Logger::warning('[bcc-core] group join refused — banned membership row', [
                 'user_id'  => $userId,
@@ -115,11 +126,21 @@ final class PeepSoGroupWriter
      *
      * Behavior:
      *   - Active 'member%' row → row removed by PeepSo's member_leave
-     *   - No existing row or pending/banned → idempotent success
+     *   - No existing row or a pending row → member_leave (deletes the
+     *     pending request/invite, if any); success
+     *   - 'banned' row → NO-OP success: the row is KEPT and no leave hook
+     *     fires. PeepSo's member_leave() raw-DELETEs the (user, group) row
+     *     whatever its status, so leaving used to erase the ban, and the
+     *     next join() saw no banned row (Leave then Join undid a ban).
+     *   - 'member_owner' row → refused (false)
+     *   - Membership read failed → refused (false): a banned row may be
+     *     there, and member_leave() would delete it
      *
      * Returns:
-     *   - true  on success (membership now absent)
-     *   - false when PeepSoGroupUser is missing or inputs are invalid
+     *   - true  when the user is not a member afterwards (left, never was,
+     *           or banned — a banned user is not a member)
+     *   - false when PeepSoGroupUser is missing, inputs are invalid, the
+     *           user owns the group, or the membership read failed
      */
     public static function leave(int $userId, int $groupId): bool
     {
@@ -142,9 +163,21 @@ final class PeepSoGroupWriter
         // group ownerless, which PeepSo treats as broken state. Admins
         // who legitimately want to delete a group should do it through
         // PeepSo's group-delete flow, not by removing the owner row.
-        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatus($userId, $groupId);
+        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatusOrFail($userId, $groupId);
+        if ($status === false) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group leave refused — membership read failed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
+            return false;
+        }
         if ($status === 'member_owner') {
             return false;
+        }
+        // A ban must survive the banned user's own Leave: member_leave()
+        // would DELETE the banned row, and join() would then let them back.
+        if ($status === 'banned') {
+            return true;
         }
 
         $member = new \PeepSoGroupUser($groupId, $userId);
