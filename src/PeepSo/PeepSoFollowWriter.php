@@ -42,10 +42,22 @@ final class PeepSoFollowWriter
      *   - self-follow attempt (active === passive)
      *   - invalid user IDs (zero or negative)
      *   - the constructor's contract failed (DB error path)
+     *   - a block between the two users, in EITHER direction, or a block
+     *     state that cannot be read (F-30, fail closed)
+     *
+     * ⚠ F-30: a block prevents the follow, at this single write point, so
+     * every caller is covered. It used to be possible for someone you had
+     * blocked (or who had blocked you) to follow you. Callers that need to
+     * tell "refused because of a block" apart from a failure check
+     * PeepSoBlockRepository::isMutuallyBlockedOrUnknown() themselves; this
+     * method only ever says 0.
      */
     public static function follow(int $activeUserId, int $passiveUserId): int
     {
         if ($activeUserId <= 0 || $passiveUserId <= 0 || $activeUserId === $passiveUserId) {
+            return 0;
+        }
+        if (\BCC\Core\Repositories\PeepSoBlockRepository::isMutuallyBlockedOrUnknown($activeUserId, $passiveUserId) !== false) {
             return 0;
         }
         if (!class_exists('PeepSoUserFollower')) {
