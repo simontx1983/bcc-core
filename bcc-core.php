@@ -472,6 +472,8 @@ add_filter('bcc_system_health', function (array $health): array {
             'group_writer_join',
             'group_writer_leave',
             'group_writer_transfer',
+            'group_writer_create',  // createPlainGroup (recorded since V1.6, never registered)
+            'group_writer_pending', // the eight F-272 request/invite doors
             'notification_writer_send',
             'reaction_writer_set',
             'reaction_writer_remove',
