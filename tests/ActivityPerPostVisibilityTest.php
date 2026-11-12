@@ -97,6 +97,137 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             return trim($wpdb->lastSql);
         }
 
+        /**
+         * The same question asked of the SINGLE-post reader.
+         *
+         * Named arguments on purpose: `getById()`'s visibility
+         * parameters sit behind `$allowedModuleIds`, and this mirrors how
+         * the service calls it.
+         *
+         * @param list<int>|null $friendIds
+         */
+        private function sqlForById(int $viewerId, ?array $friendIds, bool $enforce): string
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getById(
+                4242,
+                null,
+                viewerFriendIds: $friendIds,
+                enforcePostVisibility: $enforce,
+                viewerId: $viewerId
+            );
+
+            return trim($wpdb->lastSql);
+        }
+
+        /** Extract the F-02 predicate from a rendered statement. */
+        private static function predicateOf(string $sql): string
+        {
+            $start = strpos($sql, 'CASE WHEN');
+            self::assertNotFalse($start, 'no F-02 predicate in: ' . $sql);
+            $end = strpos($sql, ') = 1', $start);
+            self::assertNotFalse($end, 'unterminated F-02 predicate');
+
+            return substr($sql, $start, $end - $start + 5);
+        }
+
+        // ── the single-post reader ─────────────────────────────────────
+
+        /**
+         * ⚠⚠ THE POINT OF SHARING ONE PREDICATE. A permalink that served
+         * a post the feed hides — or hid one the feed serves — would be
+         * worse than either behaviour on its own, and nothing else in the
+         * suite would notice: both queries would still look correct read
+         * separately. So this compares them BYTE FOR BYTE.
+         */
+        public function testThePermalinkPredicateIsIdenticalToTheFeedPredicate(): void
+        {
+            $viewer  = 7;
+            $friends = [11, 12];
+
+            self::assertSame(
+                self::predicateOf($this->sqlFor($viewer, $friends, true)),
+                self::predicateOf($this->sqlForById($viewer, $friends, true)),
+                'the list read and the single-post read must apply the SAME rule'
+            );
+        }
+
+        /**
+         * The opt-in claim again, for the new reader: every pre-existing
+         * caller of `getById()` — author resolution, comment parents,
+         * moderation, interaction gating — passes nothing, and must get a
+         * byte-identical query.
+         */
+        public function testGetByIdAddsNothingWhenTheSwitchIsOff(): void
+        {
+            $sql = $this->sqlForById(7, [11, 12], false);
+
+            self::assertStringNotContainsString('peepso_users', $sql);
+            self::assertStringNotContainsString('usr_profile_acc', $sql);
+            self::assertStringNotContainsString('CASE', $sql);
+        }
+
+        /**
+         * ⚠ The DEFAULT, not an explicitly-passed false. Every
+         * pre-existing caller — author resolution, comment-parent
+         * lookup, moderation, interaction gating — calls
+         * `getById($actId)` or `getById($actId, $modules)` and passes
+         * nothing about visibility. Flipping the default would silently
+         * start gating all of them, and a test that passes `false` by
+         * hand would not notice: found by mutation, which survived until
+         * this existed.
+         */
+        public function testGetByIdIsUngatedForACallerThatPassesNothing(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getById(4242);
+
+            $sql = trim($wpdb->lastSql);
+            self::assertStringNotContainsString('peepso_users', $sql);
+            self::assertStringNotContainsString('usr_profile_acc', $sql);
+            self::assertStringNotContainsString('CASE', $sql);
+            self::assertStringContainsString('a.act_id = 4242', $sql);
+        }
+
+        /** The join has to be present for the predicate to mean anything. */
+        public function testGetByIdJoinsTheAuthorLevelWhenEnforcing(): void
+        {
+            $sql = $this->sqlForById(7, null, true);
+
+            self::assertStringContainsString('LEFT JOIN', $sql);
+            self::assertStringContainsString('peepso_users pu', $sql);
+            self::assertStringContainsString('pu.usr_id = p.post_author', $sql);
+        }
+
+        /**
+         * Same positional-binding risk as the list read: the own-post
+         * guard reads the viewer twice, the members branch once, then the
+         * friend ids. A slip binds a viewer id where a friend id belongs
+         * and silently changes who can see what.
+         */
+        public function testGetByIdBindsTheViewerAndFriendIdsIntoTheCorrectSlots(): void
+        {
+            $sql = $this->sqlForById(7, [11, 12], true);
+
+            self::assertStringContainsString('CASE WHEN 7 > 0 AND p.post_author = 7', $sql);
+            self::assertStringContainsString('WHEN 20 THEN IF(7 > 0, 1, 0)', $sql);
+            self::assertStringContainsString('p.post_author IN (11,12)', $sql);
+        }
+
+        /**
+         * Control: the act_id still binds. If the new parameters had
+         * displaced it positionally, every assertion above would still
+         * pass while the query fetched the wrong row.
+         */
+        public function testGetByIdStillBindsTheActIdItWasAskedFor(): void
+        {
+            $sql = $this->sqlForById(7, null, true);
+
+            self::assertStringContainsString('a.act_id = 4242', $sql);
+        }
+
         // ── OFF by default: the additive claim ─────────────────────────
 
         /**
