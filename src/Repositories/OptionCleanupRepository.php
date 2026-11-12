@@ -20,26 +20,37 @@ if (!defined('ABSPATH')) {
 final class OptionCleanupRepository
 {
     /**
-     * Delete up to $batchSize expired rows in the half-open range
-     * [$rangeStart, $rangeEnd). The option_value is expected to be
-     * in the form "<count>|<unix_expiry>" — the expiry is parsed via
-     * SUBSTRING_INDEX and compared to UNIX_TIMESTAMP().
+     * Delete up to $batchSize expired rows whose option_name starts with
+     * $prefix. The option_value is "<count>|<unix_expiry>" or a bare
+     * "<unix_expiry>" (a transient timeout row): the text after the last
+     * '|' (the whole value when there is none) is the expiry, compared to
+     * UNIX_TIMESTAMP().
+     *
+     * ⚠ F-126: select by an ESCAPED PREFIX LIKE, never by a
+     * `[prefix, prefix.'~')` range. Under wp_options' utf8mb4_unicode_ci /
+     * unicode_520_ci collation `~` sorts BELOW digits and letters, so that
+     * range matches none of the md5-hex keys after the prefix: the old
+     * deleteExpiredRange() deleted nothing. A literal-prefix LIKE is still
+     * an index range scan on option_name.
      *
      * Returns the number of rows deleted, or null on DB error.
      */
-    public static function deleteExpiredRange(string $rangeStart, string $rangeEnd, int $batchSize = 1000): ?int
+    public static function deleteExpiredByPrefix(string $prefix, int $batchSize = 1000): ?int
     {
         global $wpdb;
+
+        if ($prefix === '') {
+            return 0;
+        }
 
         $batchSize = $batchSize > 0 ? $batchSize : 1000;
 
         $result = $wpdb->query($wpdb->prepare(
             "DELETE FROM {$wpdb->options}
-             WHERE option_name >= %s AND option_name < %s
+             WHERE option_name LIKE %s
                AND CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) < UNIX_TIMESTAMP()
              LIMIT %d",
-            $rangeStart,
-            $rangeEnd,
+            $wpdb->esc_like($prefix) . '%',
             $batchSize
         ));
 
@@ -51,19 +62,21 @@ final class OptionCleanupRepository
     }
 
     /**
-     * Delete every wp_options row whose option_name is in the half-open
-     * range [$prefix, $prefix . '~'). Used by plugin-level migration
-     * scripts to purge legacy option keys whose payload shape does not
-     * match the "count|expiry" format and therefore cannot go through
-     * deleteExpiredRange().
+     * Delete every wp_options row whose option_name starts with $prefix.
+     * Used by plugin-level migration scripts to purge legacy option keys
+     * whose payload shape does not match the "count|expiry" format and
+     * therefore cannot go through deleteExpiredByPrefix().
      *
-     * The '~' (0x7E) suffix is one codepoint above any normal ASCII
-     * character, so the range safely terminates after every key matching
-     * the given prefix. Deletes in LIMIT-chunked batches (matching
-     * deleteExpiredRange) so a large legacy keyspace never holds one
-     * long row-locking DELETE on the options table. Returns the total
-     * number of rows deleted, or null on DB error (partial progress is
-     * discarded from the count; already-deleted rows stay deleted).
+     * Selected by an escaped prefix LIKE (an index range scan on
+     * option_name). It used to be the range [$prefix, $prefix . '~'), on the
+     * belief that '~' sorts above every normal character. That holds for a
+     * binary collation only: under wp_options' utf8mb4_unicode_ci /
+     * unicode_520_ci '~' sorts BELOW digits and letters, so the range
+     * missed most keys (F-126). Deletes in LIMIT-chunked batches so a large
+     * legacy keyspace never holds one long row-locking DELETE on the
+     * options table. Returns the total number of rows deleted, or null on
+     * DB error (partial progress is discarded from the count;
+     * already-deleted rows stay deleted).
      */
     public static function deleteByPrefix(string $prefix, int $batchSize = 1000): ?int
     {
@@ -85,9 +98,8 @@ final class OptionCleanupRepository
             return 0;
         }
 
-        $batchSize  = $batchSize > 0 ? $batchSize : 1000;
-        $rangeStart = $prefix;
-        $rangeEnd   = $prefix . '~';
+        $batchSize = $batchSize > 0 ? $batchSize : 1000;
+        $like      = $wpdb->esc_like($prefix) . '%';
 
         // Hard iteration ceiling guarantees termination (1000 batches ×
         // 1000 rows = 1M rows — far beyond any real install); if it is
@@ -96,10 +108,9 @@ final class OptionCleanupRepository
         for ($i = 0; $i < 1000; $i++) {
             $result = $wpdb->query($wpdb->prepare(
                 "DELETE FROM {$wpdb->options}
-                 WHERE option_name >= %s AND option_name < %s
+                 WHERE option_name LIKE %s
                  LIMIT %d",
-                $rangeStart,
-                $rangeEnd,
+                $like,
                 $batchSize
             ));
 
