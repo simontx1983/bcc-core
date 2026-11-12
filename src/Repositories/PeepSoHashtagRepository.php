@@ -124,7 +124,9 @@ final class PeepSoHashtagRepository
      *
      * Cached for PUBLIC_CACHE_TTL seconds as one ranking; `$limit` only
      * slices it. A failed read returns [] and is NOT cached: trending fails
-     * closed (an empty rail) and recovers on the next request.
+     * closed (an empty rail) and recovers on the next request. A ranking
+     * counted while the non-open group lookup could not answer is served
+     * (fail-closed undercount) but NOT cached either.
      *
      * @return list<object{ht_name: string, ht_count: int}>
      */
@@ -140,9 +142,17 @@ final class PeepSoHashtagRepository
             }
         }
 
-        $ranking = self::computePublicRanking();
+        $cacheable = true;
+        $ranking   = self::computePublicRanking($cacheable);
         if ($ranking === null) {
             return [];
+        }
+        if (!$cacheable) {
+            // The non-open group lookup could not answer, so the recount ran
+            // with the gate's fail-closed predicate: it also dropped OPEN
+            // groups' public_all posts. Serve that undercount for this request
+            // only; caching it would pin a degraded rail for PUBLIC_CACHE_TTL.
+            return array_slice($ranking, 0, $limit);
         }
         $toCache = [];
         foreach ($ranking as $r) {
@@ -186,9 +196,12 @@ final class PeepSoHashtagRepository
     }
 
     /**
+     * @param bool $cacheable set false when the result is a fail-closed
+     *        degradation (the non-open group lookup could not answer) that
+     *        is correct to serve but must not be cached
      * @return list<object{ht_name: string, ht_count: int}>|null null = a read failed
      */
-    private static function computePublicRanking(): ?array
+    private static function computePublicRanking(bool &$cacheable): ?array
     {
         global $wpdb;
 
@@ -231,12 +244,13 @@ final class PeepSoHashtagRepository
         // F-23 / Gate 12: the SAME syndication rule as the global feed. A
         // public_all post of a now-closed/secret group drops unless it was
         // made while the group was already non-open. null (lookup can't
-        // answer) fails closed inside the predicate.
-        $syndication = GroupSyndicationGate::sqlPredicate(
-            $wpdb->postmeta,
-            PeepSoGroupRepository::getNonOpenGroupIdsStrict(),
-            'p'
-        );
+        // answer) fails closed inside the predicate, and that run's ranking
+        // is not cached (the caller serves it uncached).
+        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIdsStrict();
+        if ($nonOpen === null) {
+            $cacheable = false;
+        }
+        $syndication = GroupSyndicationGate::sqlPredicate($wpdb->postmeta, $nonOpen, 'p');
 
         // ⚠ The group and visibility markers are EXISTS checks, not the
         // feed's LEFT JOINs: this is a SUM, and a post with two rows of

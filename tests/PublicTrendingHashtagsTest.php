@@ -143,6 +143,29 @@ final class PublicTrendingHashtagsTest extends TestCase
         self::assertStringContainsString('AND ' . (string) preg_replace('/\s+/', ' ', $gate['where']) . ' AND EXISTS', $GLOBALS['__pt']['sql'][2]);
     }
 
+    /**
+     * The fail-closed ranking above is an UNDERCOUNT (open groups' public_all
+     * posts drop too): served for that request, never cached, so the next
+     * request recounts once the lookup answers.
+     */
+    public function testARankingCountedWithoutTheNonOpenSetIsServedButNotCached(): void
+    {
+        \BccTestPersistentCache::reset(); // cache miss → the lookup queries, and that query fails
+        $GLOBALS['__pt']['results'] = [self::candidates(['a']), false, self::totals([1])];
+
+        self::assertSame([['a', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(5)));
+        self::assertArrayNotHasKey(PeepSoHashtagRepository::PUBLIC_CACHE_KEY, $GLOBALS['__pt']['transients']);
+
+        // The lookup answers again (seeded): the next read recounts, and caches.
+        bcc_test_seed_nonopen_groups([]);
+        $before = count($GLOBALS['__pt']['sql']);
+        $GLOBALS['__pt']['results'] = [self::candidates(['a', 'b']), self::totals([1, 2])];
+
+        self::assertSame([['b', 2], ['a', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(5)));
+        self::assertCount($before + 2, $GLOBALS['__pt']['sql'], 'recounted, not served from a cache');
+        self::assertSame([['b', 2], ['a', 1]], $GLOBALS['__pt']['transients'][PeepSoHashtagRepository::PUBLIC_CACHE_KEY]);
+    }
+
     public function testTheRankingIsCachedOnceAndTheLimitOnlySlicesIt(): void
     {
         $GLOBALS['__pt']['results'] = [self::candidates(['x', 'y', 'z']), self::totals([3, 2, 1])];
