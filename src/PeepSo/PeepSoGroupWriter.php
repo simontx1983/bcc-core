@@ -346,7 +346,10 @@ final class PeepSoGroupWriter
             return [self::OUTCOME_UNAVAILABLE, null];
         }
         if (!class_exists('PeepSoGroupUsers')) {
-            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_' . $op);
+            // One registered event for all eight F-272 doors, so the
+            // /system/health row shows it (an unregistered event name is
+            // counted but never displayed).
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_pending');
             return [self::OUTCOME_UNAVAILABLE, null];
         }
 
