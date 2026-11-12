@@ -261,7 +261,13 @@ final class DegradationAlerter
             'body'     => $payload,
         ]);
         if (function_exists('is_wp_error') && is_wp_error($resp) && class_exists(Logger::class)) {
-            Logger::warning('[bcc-core] degradation alert webhook failed', ['url' => $url]);
+            // Never log the URL (F-51): for Slack/Discord-style webhooks the
+            // path IS the secret. The host is enough to know which sink broke;
+            // the WP_Error code says how.
+            Logger::warning('[bcc-core] degradation alert webhook failed', [
+                'webhook_host' => (string) (parse_url($url, PHP_URL_HOST) ?: 'unparseable'),
+                'error_code'   => (string) $resp->get_error_code(),
+            ]);
         }
     }
 }

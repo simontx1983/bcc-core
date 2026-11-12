@@ -230,7 +230,9 @@ final class Logger
      * Wallet addresses: show first 6 + last 4 chars (e.g. "0x1234...abcd").
      * Secret-bearing keys (api keys, tokens, passwords, signatures, …):
      * fully redacted, matched by substring so prefixed names
-     * (`helius_api_key`, `refresh_token`) are covered. NB: only CONTEXT
+     * (`helius_api_key`, `refresh_token`) are covered. Webhook keys too
+     * (`webhook`, `webhook_url`, F-51) — a webhook URL carries its secret in
+     * the path — except `webhook_host`, which is only the hostname. NB: only CONTEXT
      * values are scrubbed — never interpolate a secret into the message
      * string itself.
      *
@@ -255,7 +257,7 @@ final class Logger
             // over-redacting an innocent 'tokens_total' style key costs a
             // log detail; under-redacting costs a secret on disk.
             if (preg_match(
-                '/api_?key|token|secret|password|passwd|signature|authorization|bearer|private_key|mnemonic|credential/',
+                '/api_?key|token|secret|password|passwd|signature|authorization|bearer|private_key|mnemonic|credential|webhook(?!_host)/',
                 $lowerKey
             ) === 1) {
                 $value = '***REDACTED***';
