@@ -57,6 +57,19 @@ namespace BCC\Core\Feed\Tests {
             return $out;
         }
 
+        /**
+         * The same predicate with the group-tagged branch handed to the
+         * caller ($deferGroupsToCaller = true).
+         */
+        private static function isVisibleGloballyDeferred(int $postId): bool
+        {
+            $ref = new ReflectionMethod(ActivityFeedService::class, 'isVisibleGlobally');
+            $ref->setAccessible(true);
+            $out = $ref->invoke(null, $postId, true);
+            self::assertIsBool($out);
+            return $out;
+        }
+
         public function testInvalidActIdReturnsNullWithoutTouchingTheDb(): void
         {
             self::assertNull(self::service()->getActivityById(0, 1));
@@ -261,6 +274,93 @@ namespace BCC\Core\Feed\Tests {
         public function testCollectPrimablePostIdsEmptyInput(): void
         {
             self::assertSame([], self::collectPrimablePostIds([]));
+        }
+
+        // ── $deferGroupVisibilityToCaller ─────────────────────
+        //
+        // The opt-in that lets a caller which CAN resolve group
+        // membership (bcc-trust) decide a group-tagged post for itself,
+        // instead of this layer refusing it because it cannot tell a
+        // member from a stranger.
+        //
+        // ⚠ Every test here is paired with its default-OFF twin, because
+        // the whole value of the parameter is that it changes nothing
+        // until it is passed.
+
+        /**
+         * ⭐ THE PAIR THAT MATTERS. A `members_only` group post — the
+         * DEFAULT for a group post — is refused by link as it always
+         * was, and returned when the caller takes responsibility.
+         */
+        public function testMembersOnlyGroupPostIsStillRefusedByDefault(): void
+        {
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => '7',
+                '_bcc_post_visibility' => 'members_only',
+            ];
+            self::assertFalse(self::isVisibleGlobally(123));
+        }
+
+        public function testMembersOnlyGroupPostIsDeferredToTheCaller(): void
+        {
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => '7',
+                '_bcc_post_visibility' => 'members_only',
+            ];
+            self::assertTrue(self::isVisibleGloballyDeferred(123));
+        }
+
+        /** `public_group` behaves the same way: refused, then deferred. */
+        public function testPublicGroupPostIsDeferredToTheCaller(): void
+        {
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => '7',
+                '_bcc_post_visibility' => 'public_group',
+            ];
+            self::assertFalse(self::isVisibleGlobally(123));
+            self::assertTrue(self::isVisibleGloballyDeferred(123));
+        }
+
+        /**
+         * ⚠⚠ THE FAIL-CLOSED CONTROL. Deferring must not become a
+         * blanket "return true": a row with NO BACKING POST is still
+         * refused, because that guard sits above the group branch and is
+         * not a syndication question at all.
+         */
+        public function testDeferringStillRefusesARowWithNoBackingPost(): void
+        {
+            self::assertFalse(self::isVisibleGloballyDeferred(0));
+            self::assertFalse(self::isVisibleGloballyDeferred(-5));
+        }
+
+        /**
+         * A NON-group post is unaffected either way — it was always
+         * visible, so the parameter cannot widen anything here. This is
+         * what makes the change safe for every existing caller.
+         */
+        public function testANonGroupPostIsUnaffectedByDeferring(): void
+        {
+            $GLOBALS['__test_post_meta'][123] = [];
+            self::assertTrue(self::isVisibleGlobally(123));
+            self::assertTrue(self::isVisibleGloballyDeferred(123));
+        }
+
+        /**
+         * Deferring bypasses the SYNDICATION question entirely, not just
+         * the `public_all` check. A post made public_all while its group
+         * was open, whose group has since become non-open, is refused by
+         * the syndication rule — and deferred when the caller asks,
+         * because "may a member open this" is a different question.
+         */
+        public function testDeferringBypassesTheSyndicationRuleToo(): void
+        {
+            \bcc_test_seed_nonopen_groups([7]);
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => '7',
+                '_bcc_post_visibility' => 'public_all',
+            ];
+            self::assertFalse(self::isVisibleGlobally(123));
+            self::assertTrue(self::isVisibleGloballyDeferred(123));
         }
     }
 }
