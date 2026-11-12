@@ -379,11 +379,13 @@ final class ActivityFeedService
     /**
      * Mirrors `getActivities()`'s global-feed visibility predicate:
      * a group-tagged post is visible outside the group only when
-     * explicitly marked `public_all` AND (F-23) none of its groups is
-     * currently closed or secret; non-group posts are always visible.
+     * explicitly marked `public_all` AND the shared group-syndication
+     * rule allows it ({@see GroupSyndicationGate}: its group is open now,
+     * or it was made public_all while the group was already non-open).
+     * Non-group posts are always visible.
      *
      * Fails closed: if the non-open group set can't be read (query error
-     * or over the cap), a group-tagged post is not visible here.
+     * or over the cap), only posts recorded as made while non-open pass.
      */
     private static function isVisibleGlobally(int $postId): bool
     {
@@ -400,11 +402,17 @@ final class ActivityFeedService
         if (get_post_meta($postId, '_bcc_post_visibility', true) !== 'public_all') {
             return false;
         }
-        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIdsStrict();
-        if ($nonOpen === null) {
-            return false;
+        $privacyAtPost = get_post_meta($postId, GroupSyndicationGate::META_PRIVACY_AT_POST, true);
+        if (GroupSyndicationGate::madeWhileNonOpen($privacyAtPost)) {
+            // A deliberate non-open syndication passes whatever the
+            // group's state is now: no need to read the non-open set.
+            return true;
         }
-        return array_intersect($groupIds, array_map('intval', $nonOpen)) === [];
+        return GroupSyndicationGate::allows(
+            $groupIds,
+            $privacyAtPost,
+            PeepSoGroupRepository::getNonOpenGroupIdsStrict()
+        );
     }
 
     /**
