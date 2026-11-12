@@ -43,18 +43,32 @@ final class WalletIdentityService
      * @param int    $userId        WordPress user ID.
      * @param string $chainSlug     Chain slug (e.g. 'ethereum', 'cosmos').
      * @param int    $chainId       Numeric chain ID from bcc_chains table.
+     * F-253: one key per (user, address), so a new challenge for any purpose
+     * replaces a pending one for the same wallet. The purpose is stored with
+     * it and consumeChallenge() refuses a challenge spent on the wrong one.
+     *
+     * @param int    $userId        WordPress user ID.
+     * @param string $chainSlug     Chain slug (e.g. 'ethereum', 'cosmos').
+     * @param int    $chainId       Numeric chain ID from bcc_chains table.
      * @param string $walletAddress Wallet public address.
-     * @return array{nonce: string, message: string, chain_slug: string, chain_id: int, wallet_address: string, expires_at: int}
+     * @param string $purpose       One of WalletChallenge::AUTHED_PURPOSES.
+     * @return array{nonce: string, message: string, chain_slug: string, chain_id: int, wallet_address: string, expires_at: int, purpose: string}
      */
     public static function generateChallenge(
         int $userId,
         string $chainSlug,
         int $chainId,
-        string $walletAddress
+        string $walletAddress,
+        string $purpose = WalletChallenge::PURPOSE_VERIFY
     ): array {
-        $challenge = WalletChallenge::generate($chainSlug, WalletChallenge::PURPOSE_VERIFY);
+        if (!in_array($purpose, WalletChallenge::AUTHED_PURPOSES, true)) {
+            throw new \InvalidArgumentException('Not a signed-in wallet challenge purpose: ' . $purpose);
+        }
+
+        $challenge = WalletChallenge::generate($chainSlug, $purpose);
 
         $payload = [
+            'purpose'        => $purpose,
             'nonce'          => $challenge['nonce'],
             'message'        => $challenge['message'],
             'chain_slug'     => $chainSlug,
@@ -78,10 +92,20 @@ final class WalletIdentityService
      * Returns null if the challenge does not exist, has expired, or the
      * address does not match the one used at generation time.
      *
+     * F-253: also null when the challenge was issued for another purpose.
+     * The default is PURPOSE_VERIFY, so a caller that names no purpose (wallet
+     * linking, and bcc-trust builds from before F-253) can never spend an
+     * account-change confirmation. A payload stored before purposes existed
+     * has none and counts as PURPOSE_VERIFY. A mismatch still consumes the
+     * challenge: it was single-use either way.
+     *
      * @return array<string, mixed>|null The challenge payload, or null.
      */
-    public static function consumeChallenge(int $userId, string $walletAddress): ?array
-    {
+    public static function consumeChallenge(
+        int $userId,
+        string $walletAddress,
+        string $expectedPurpose = WalletChallenge::PURPOSE_VERIFY
+    ): ?array {
         $key = self::challengeKey($userId, $walletAddress);
 
         // Atomic get+delete via repository (SELECT … FOR UPDATE in a transaction).
@@ -93,6 +117,11 @@ final class WalletIdentityService
 
         // Expired (belt-and-suspenders — transient TTL should handle this).
         if (time() > (int) ($challenge['expires_at'] ?? 0)) {
+            return null;
+        }
+
+        $purpose = (string) ($challenge['purpose'] ?? WalletChallenge::PURPOSE_VERIFY);
+        if ($purpose !== $expectedPurpose) {
             return null;
         }
 
