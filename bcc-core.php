@@ -287,10 +287,12 @@ add_action('deleted_user_meta', $bccBustPeepSoMediaCache, 10, 3);
 // │ the outcome was a property of WHEN it ran, not of the code.
 // │
 // │ ⚠ `OptionCleanupRepository::deleteByPrefix()` is NOT at fault and is
-// │ kept. It is a correct range delete (`>= prefix` to `< prefix.'~'`,
-// │ and `~` sorts above every letter, digit and `_`), so it would have
-// │ matched every key above. It did what it was told; the prefix list was
-// │ the defect.
+// │ kept. It deletes every key under the prefix, so it would have matched
+// │ every key above. It did what it was told; the prefix list was the
+// │ defect. (It was a `[prefix, prefix.'~')` range then, which under a
+// │ unicode collation actually missed most keys — `~` sorts below digits
+// │ and letters there. It is a prefix LIKE since F-126. Missing keys by
+// │ accident is not a safety property either.)
 // │
 // │ ⭐ THE RULE, enforced by OptionSweepGuardTest: a sweep of anything
 // │ under `bcc_` must name EXACT KEYS, never a prefix. A prefix cannot
@@ -312,9 +314,11 @@ add_action('deleted_user_meta', $bccBustPeepSoMediaCache, 10, 3);
 // └─────────────────────────────────────────────────────────────┘
 
 // ── Rate-limit row cleanup ──────────────────────────────────────
-// Throttle's DB fallback and RateLimiter write rows to wp_options
-// that never auto-expire. This hourly cron garbage-collects expired
-// entries in bounded batches to avoid table-locking.
+// bcc-trust's RateLimiter (and Throttle's removed DB fallback) write rows to
+// wp_options that never auto-expire. This cron garbage-collects the expired
+// ones in bounded batches to avoid table-locking. The drain itself, and why it
+// selects by prefix LIKE rather than a '~' range (F-126: the range deleted
+// nothing), is in RateLimitRowCleanup.
 
 add_action('bcc_core_rl_cleanup', function () {
     // Advisory lock prevents overlapping runs when WP-Cron fires
@@ -324,40 +328,19 @@ add_action('bcc_core_rl_cleanup', function () {
     }
 
     try {
-        // Clean both prefixes: _bcc_rl_ (Throttle) and _transient_bcc_rl_ (RateLimiter).
-        // Use range scan instead of LIKE wildcards to avoid full table scan.
-        // Loop up to 10 times (10000 rows max per cron tick).
-        $ranges = [
-            ['_bcc_rl_',           '_bcc_rl_~'],
-            ['_transient_bcc_rl_', '_transient_bcc_rl_~'],
-        ];
+        $result = \BCC\Core\Cron\RateLimitRowCleanup::run();
 
-        $totalDeleted = 0;
-        foreach ($ranges as [$rangeStart, $rangeEnd]) {
-            $iterations = 0;
-            do {
-                $deleted = \BCC\Core\Repositories\OptionCleanupRepository::deleteExpiredRange(
-                    $rangeStart,
-                    $rangeEnd,
-                    1000
-                );
-
-                if ($deleted === null) {
-                    \BCC\Core\Log\Logger::error('[bcc-core] rl_cleanup DELETE failed', [
-                        'range' => $rangeStart,
-                        'error' => \BCC\Core\Repositories\OptionCleanupRepository::lastError(),
-                    ]);
-                    break;
-                }
-
-                $totalDeleted += $deleted;
-                $iterations++;
-            } while ($deleted >= 1000 && $iterations < 10);
+        foreach ($result['failed'] as $prefix) {
+            \BCC\Core\Log\Logger::error('[bcc-core] rl_cleanup DELETE failed', [
+                'prefix' => $prefix,
+                'error'  => \BCC\Core\Repositories\OptionCleanupRepository::lastError(),
+            ]);
         }
 
-        if ($totalDeleted > 0) {
+        if ($result['deleted'] > 0 || $result['backlog']) {
             \BCC\Core\Log\Logger::info('[bcc-core] rl_cleanup', [
-                'deleted' => $totalDeleted,
+                'deleted' => $result['deleted'],
+                'backlog' => $result['backlog'],
             ]);
         }
     } finally {
@@ -885,16 +868,13 @@ add_action('rest_api_init', function () {
             wp_cache_delete($cacheTestKey, 'bcc_health');
 
             // ── Rate-limit row count in wp_options ──────────────────────
-            // Use range scan instead of LIKE wildcards to avoid full table scan.
-            $rlRowCount1 = \BCC\Core\Repositories\DbMetricsRepository::countOptionsInRange(
-                '_bcc_rl_',
-                '_bcc_rl_~'
-            );
-            $rlRowCount2 = \BCC\Core\Repositories\DbMetricsRepository::countOptionsInRange(
-                '_transient_bcc_rl_',
-                '_transient_bcc_rl_~'
-            );
-            $rlRowCount  = $rlRowCount1 + $rlRowCount2;
+            // Every family the cleanup cron reaps, counted by escaped prefix
+            // LIKE (an index range scan). F-126: the old '~' range counted
+            // none of them under a unicode collation.
+            $rlRowCount = 0;
+            foreach (\BCC\Core\Cron\RateLimitRowCleanup::PREFIXES as $rlPrefix) {
+                $rlRowCount += \BCC\Core\Repositories\DbMetricsRepository::countOptionsWithPrefix($rlPrefix);
+            }
 
             // ── Service availability ────────────────────────────────────
             $services = [];

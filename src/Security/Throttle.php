@@ -370,9 +370,10 @@ final class Throttle
         $user_id = get_current_user_id();
         if ($user_id === 0 && $key === null) {
             // Fallback to IP for anonymous users to avoid shared bucket.
-            // Normalize to /24 (IPv4) or /64 (IPv6) subnet to bound cardinality.
+            // Normalize to /24 (IPv4) or /48 (IPv6) subnet to bound cardinality.
             // A /24 covers 256 IPs → one bucket per household/office, preventing
-            // unbounded DB growth from rotating IPs (mobile, VPN, Tor).
+            // unbounded DB growth from rotating IPs (mobile, VPN, Tor). See
+            // normalizeIpToSubnet() for why IPv6 is /48, not /64 (F-126).
             //
             // CROSS-PLUGIN BOUNDARY: bcc-trust's IpResolver is the one IP
             // source every bcc-trust consumer (votes, fingerprints, audit,
@@ -484,13 +485,6 @@ final class Throttle
         );
     }
 
-    /**
-     * Normalize an IP address to its subnet to bound key cardinality.
-     *
-     * IPv4 → /24 (e.g., 1.2.3.4 → 1.2.3.0)
-     * IPv6 → /64 (e.g., 2001:db8::1 → 2001:0db8:0000:0000::)
-     * Invalid → returned as-is (md5 still hashes it safely)
-     */
     /**
      * Process-level backstop — now ALWAYS fail-closed.
      *
@@ -918,6 +912,27 @@ final class Throttle
         }
     }
 
+    /**
+     * Normalize an IP address to the network an anonymous bucket is keyed on.
+     *
+     * IPv4 → /24 (1.2.3.4 → 1.2.3.0).
+     * IPv4-mapped IPv6 (::ffff:1.2.3.4, what a dual-stack socket reports for
+     * an IPv4 peer) → that IPv4's /24. Masked as IPv6, every such client
+     * would share ONE bucket ("::"), since the first 10 bytes are zero.
+     * IPv6 → /48 (2001:db8:abcd:12::1 → 2001:db8:abcd::).
+     * Invalid → returned as-is (md5 still hashes it safely).
+     *
+     * F-126 — why /48 and not /64. A /64 is usually one subscriber, but it is
+     * not what an abuser holds: a site gets a /48 (RFC 6177), and a free
+     * tunnel-broker account or a cheap VPS hands one out. Keyed at /64, one
+     * /48 is 65,536 fresh buckets — the limit is meaningless and every bucket
+     * is a new wp_options row. At /48 an address block costs the same per
+     * bucket as an IPv4 /24, and this matches bcc-trust's RateLimiter, which
+     * has keyed IPv6 at /48 since it was written. The cost is the IPv4 /24
+     * trade-off again: unrelated anonymous visitors in one /48 (a carrier
+     * pool, an office) share a bucket. That only affects anonymous traffic:
+     * signed-in callers are keyed per account.
+     */
     private static function normalizeIpToSubnet(string $ip): string
     {
         // IPv4: mask to /24
@@ -927,28 +942,24 @@ final class Throttle
             return implode('.', $parts);
         }
 
-        // IPv6: mask to /64 (first 4 groups)
         if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-            // inet_pton/inet_ntop can only fail for non-IPv6 input, but $ip is
-            // validated above. Fail safe by returning the unnormalized IP —
-            // rate limiting still works, just at a finer granularity than /64.
-            $binary = inet_pton($ip);
-            if ($binary === false) {
+            // $ip is validated above, so inet_pton()/inet_ntop() cannot fail
+            // in practice. Fail safe by returning the unnormalized IP: rate
+            // limiting still works, just at a finer granularity.
+            $packed = inet_pton($ip);
+            if ($packed === false || strlen($packed) !== 16) {
                 return $ip;
             }
-            $ntop = inet_ntop($binary);
-            if ($ntop === false) {
-                return $ip;
+
+            // IPv4-mapped (::ffff:a.b.c.d): key on the IPv4 /24.
+            if (substr($packed, 0, 12) === str_repeat("\0", 10) . "\xff\xff") {
+                $v4 = inet_ntop(substr($packed, 12, 4));
+                return $v4 === false ? $ip : self::normalizeIpToSubnet($v4);
             }
-            $expanded = $ntop;
-            // inet_ntop may return compressed form; expand to full groups
-            $full = implode(':', array_map(
-                fn(string $g): string => str_pad($g, 4, '0', STR_PAD_LEFT),
-                explode(':', str_replace('::', str_repeat(':0000', 8 - substr_count($expanded, ':')) . ':', $expanded))
-            ));
-            $groups = explode(':', $full);
-            // Keep first 4 groups (/64), zero out the rest
-            return implode(':', array_slice($groups, 0, 4)) . ':0:0:0:0';
+
+            // Keep the first 6 bytes (/48), zero the subnet-ID and host part.
+            $ntop = inet_ntop(substr($packed, 0, 6) . str_repeat("\0", 10));
+            return $ntop === false ? $ip : $ntop;
         }
 
         return $ip;

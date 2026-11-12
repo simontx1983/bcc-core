@@ -20,18 +20,20 @@ if (!defined('ABSPATH')) {
 final class DbMetricsRepository
 {
     /**
-     * Count wp_options rows whose option_name falls in [start, end).
+     * Count wp_options rows whose option_name starts with $prefix.
      *
-     * Range-scan (not LIKE) so the index is usable and the scan is
-     * bounded to the rate-limiter key range.
+     * An escaped literal-prefix LIKE: an index range scan on option_name,
+     * bounded to the prefix. ⚠ F-126: this was a `[prefix, prefix.'~')`
+     * range, which under utf8mb4_unicode_ci / unicode_520_ci (`~` sorts
+     * below digits and letters) counted none of the rate-limit rows, so
+     * /system/health reported ~0 while the table grew.
      */
-    public static function countOptionsInRange(string $rangeStart, string $rangeEnd): int
+    public static function countOptionsWithPrefix(string $prefix): int
     {
         global $wpdb;
         return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name >= %s AND option_name < %s",
-            $rangeStart,
-            $rangeEnd
+            "SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name LIKE %s",
+            $wpdb->esc_like($prefix) . '%'
         ));
     }
 

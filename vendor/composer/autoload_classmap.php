@@ -29,6 +29,7 @@ return array(
     'BCC\\Core\\Contracts\\WalletLinkWriteInterface' => $baseDir . '/src/Contracts/WalletLinkWriteInterface.php',
     'BCC\\Core\\Contracts\\WalletSignalWriteInterface' => $baseDir . '/src/Contracts/WalletSignalWriteInterface.php',
     'BCC\\Core\\Cron\\AsyncDispatcher' => $baseDir . '/src/Cron/AsyncDispatcher.php',
+    'BCC\\Core\\Cron\\RateLimitRowCleanup' => $baseDir . '/src/Cron/RateLimitRowCleanup.php',
     'BCC\\Core\\Crypto\\CosmosSignatureVerifier' => $baseDir . '/src/Crypto/CosmosSignatureVerifier.php',
     'BCC\\Core\\Crypto\\EthSignatureVerifier' => $baseDir . '/src/Crypto/EthSignatureVerifier.php',
     'BCC\\Core\\Crypto\\Keccak256' => $baseDir . '/src/Crypto/Keccak256.php',

@@ -44,6 +44,7 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\Contracts\\WalletLinkWriteInterface' => __DIR__ . '/../..' . '/src/Contracts/WalletLinkWriteInterface.php',
         'BCC\\Core\\Contracts\\WalletSignalWriteInterface' => __DIR__ . '/../..' . '/src/Contracts/WalletSignalWriteInterface.php',
         'BCC\\Core\\Cron\\AsyncDispatcher' => __DIR__ . '/../..' . '/src/Cron/AsyncDispatcher.php',
+        'BCC\\Core\\Cron\\RateLimitRowCleanup' => __DIR__ . '/../..' . '/src/Cron/RateLimitRowCleanup.php',
         'BCC\\Core\\Crypto\\CosmosSignatureVerifier' => __DIR__ . '/../..' . '/src/Crypto/CosmosSignatureVerifier.php',
         'BCC\\Core\\Crypto\\EthSignatureVerifier' => __DIR__ . '/../..' . '/src/Crypto/EthSignatureVerifier.php',
         'BCC\\Core\\Crypto\\Keccak256' => __DIR__ . '/../..' . '/src/Crypto/Keccak256.php',
