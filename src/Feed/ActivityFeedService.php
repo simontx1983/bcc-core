@@ -309,9 +309,14 @@ final class ActivityFeedService
      * Visibility mirrors `getActivities()`'s global-feed gate (publish
      * status + non-group-post-or-public_all) — a permalink must never
      * surface something the list feed itself would have excluded.
-     * Member-aware visibility for closed/secret group posts is out of
-     * scope here, same as the global feed path; the dedicated
-     * group-feed endpoint owns that gate.
+     *
+     * ⚠ Member-aware visibility for closed/secret group posts is still
+     * not resolved HERE — group membership lives in bcc-trust, which
+     * owns the group surfaces — but it is no longer simply "out of
+     * scope": a caller that CAN resolve membership may now take that
+     * decision for itself by passing `$deferGroupVisibilityToCaller`.
+     * See that parameter; the default keeps this method's historical
+     * behaviour exactly.
      *
      * `$excludedAuthorIds`/`$excludedActIds` mirror the same opaque
      * exclusion channels `getFeed()` accepts (§O4.1 shadow-limit / §K1
@@ -326,6 +331,7 @@ final class ActivityFeedService
      * @param list<int>|null $excludedActIds
      * @param list<int>|null $viewerFriendIds §F-02: the authors the VIEWER is a friend of, for the level-30 branch. Only read when `$enforcePostVisibility` is true. ⚠ bcc-core does NOT discover this itself — friendship lives in `peepso_user_friends`, owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed depend on an add-on that may not be installed. The caller computes it and passes it. ⚠ null/[] means "a friend of nobody", which DENIES level 30 (except the viewer's own posts) rather than ignoring the branch — correct for an anonymous reader, and currently the only possible value in BCC, where peepso-friends is not installed.
      * @param bool $enforcePostVisibility §F-02 per-post gate, OPT-IN. ⚠⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them — the switch is the caller's to throw, which is also how an admin read is expressed (pass false). When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows posts already written under it. ⚠ Forwarded to the repository BY NAME: `getActivities()` takes nineteen parameters and these sit at 17-19, so positional padding would mean several bare nulls per call site, and a positional slip there is silent.
+     * @param bool $deferGroupVisibilityToCaller Hand the GROUP-TAGGED case to the caller, OPT-IN. ⚠⚠ THIS WIDENS WHAT THIS METHOD RETURNS, so read before using. Normally a group-tagged post is resolvable by id only when marked `public_all` AND the group-syndication rule allows it ({@see isVisibleGlobally}); a `members_only` or `public_group` post is refused by link for everyone, member or not, because this layer cannot tell a member from a stranger. When this is true that refusal is SKIPPED FOR GROUP-TAGGED POSTS ONLY and the row is returned, which means THE CALLER BECOMES RESPONSIBLE for applying the group's own rule to it. A caller that passes true and then applies nothing turns closed-group posts into public permalinks. Everything else still applies unchanged: the module allowlist, `act_status`, the exclusion lists, and §F-02 above. ⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them. Non-group posts are unaffected either way — they were always visible — and a row with no backing post is still refused.
      * @return array<string, mixed>|null Same per-item shape as a `getFeed()` row; null = not found or not visible.
      */
     public function getActivityById(
@@ -334,7 +340,8 @@ final class ActivityFeedService
         ?array $excludedAuthorIds = null,
         ?array $excludedActIds = null,
         ?array $viewerFriendIds = null,
-        bool $enforcePostVisibility = false
+        bool $enforcePostVisibility = false,
+        bool $deferGroupVisibilityToCaller = false
     ): ?array {
         if ($actId <= 0) {
             return null;
@@ -368,7 +375,7 @@ final class ActivityFeedService
             return null;
         }
 
-        if (!self::isVisibleGlobally((int) $row->act_external_id)) {
+        if (!self::isVisibleGlobally((int) $row->act_external_id, $deferGroupVisibilityToCaller)) {
             return null;
         }
 
@@ -386,8 +393,25 @@ final class ActivityFeedService
      *
      * Fails closed: if the non-open group set can't be read (query error
      * or over the cap), only posts recorded as made while non-open pass.
+     *
+     * `$deferGroupsToCaller` makes the GROUP-TAGGED branch the caller's
+     * decision instead of a refusal — see
+     * {@see getActivityById()}'s parameter of the same purpose.
+     *
+     * ⚠ BE PRECISE ABOUT HOW MUCH IT SKIPS. It returns early for a
+     * group-tagged post WHETHER OR NOT the post is `public_all`, so the
+     * `_bcc_post_visibility` check AND the {@see GroupSyndicationGate}
+     * rule below it are BOTH deferred. A `public_all` post whose group
+     * has since become non-open is refused by that gate and deferred
+     * when the caller asks — deliberately, because "may a member open
+     * this by link" is not the syndication question "may this leave the
+     * room". There is a test for exactly that case.
+     *
+     * What it does NOT touch: the `$postId <= 0` guard (a row with no
+     * backing post is still refused) and the non-group `true` (those
+     * were always visible).
      */
-    private static function isVisibleGlobally(int $postId): bool
+    private static function isVisibleGlobally(int $postId, bool $deferGroupsToCaller = false): bool
     {
         if ($postId <= 0) {
             return false;
@@ -399,6 +423,16 @@ final class ActivityFeedService
         if ($groupIds === []) {
             return true;
         }
+
+        // Group-tagged, and the caller has said it will apply the
+        // group's own rule. EVERYTHING below this point is the
+        // SYNDICATION question ("may this leave the room?") — both the
+        // `public_all` marker and the GroupSyndicationGate — and that
+        // is not the question a member asking for a permalink is asking.
+        if ($deferGroupsToCaller) {
+            return true;
+        }
+
         if (get_post_meta($postId, '_bcc_post_visibility', true) !== 'public_all') {
             return false;
         }
