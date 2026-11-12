@@ -5,7 +5,7 @@
  * transient API faked.
  *
  * $GLOBALS['__pt'] drives them:
- *   transients  key => value
+ *   transients  key => value (delete_transient() removes it)
  *   ttl         key => seconds the last set_transient() asked for
  *   results     list of scripted query outcomes, consumed one per query():
  *               a list<object> (rows), false (query() fails), or
@@ -33,6 +33,14 @@ namespace {
             $GLOBALS['__pt']['transients'][$key] = $value;
             $GLOBALS['__pt']['ttl'][$key]        = $ttl;
             return true;
+        }
+    }
+    if (!function_exists('delete_transient')) {
+        function delete_transient(string $key): bool
+        {
+            $had = array_key_exists($key, $GLOBALS['__pt']['transients']);
+            unset($GLOBALS['__pt']['transients'][$key]);
+            return $had;
         }
     }
 

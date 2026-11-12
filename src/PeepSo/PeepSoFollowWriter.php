@@ -43,9 +43,9 @@ final class PeepSoFollowWriter
      *   - invalid user IDs (zero or negative)
      *   - the constructor's contract failed (DB error path)
      *   - a block between the two users, in EITHER direction, or a block
-     *     state that cannot be read (F-30, fail closed)
+     *     state that cannot be read (F-29, fail closed)
      *
-     * ⚠ F-30: a block prevents the follow, at this single write point, so
+     * ⚠ F-29: a block prevents the follow, at this single write point, so
      * every caller is covered. It used to be possible for someone you had
      * blocked (or who had blocked you) to follow you. Callers that need to
      * tell "refused because of a block" apart from a failure check

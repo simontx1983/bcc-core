@@ -183,6 +183,19 @@ final class PublicTrendingHashtagsTest extends TestCase
         self::assertArrayNotHasKey(PeepSoHashtagRepository::PUBLIC_CACHE_KEY, $GLOBALS['__pt']['transients']);
     }
 
+    public function testABustDropsTheCachedRankingSoTheNextReadRecounts(): void
+    {
+        // A group's privacy changed: the cached ranking still counts its posts.
+        $GLOBALS['__pt']['results'] = [self::candidates(['secretish', 'open']), self::totals([5, 1])];
+        self::assertSame([['secretish', 5], ['open', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(10)));
+
+        PeepSoHashtagRepository::bustPublicTrendingCache();
+
+        self::assertArrayNotHasKey(PeepSoHashtagRepository::PUBLIC_CACHE_KEY, $GLOBALS['__pt']['transients']);
+        $GLOBALS['__pt']['results'] = [self::candidates(['secretish', 'open']), self::totals([0, 1])];
+        self::assertSame([['open', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(10)), 'recounted, not served stale');
+    }
+
     public function testACacheEntryOfAnotherShapeIsRecomputed(): void
     {
         $GLOBALS['__pt']['transients'][PeepSoHashtagRepository::PUBLIC_CACHE_KEY] = [['ht_name' => 'old', 'ht_count' => '9']];
