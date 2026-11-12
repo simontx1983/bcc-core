@@ -92,7 +92,8 @@ final class PublicTrendingHashtagsTest extends TestCase
         foreach ([
             "p.post_type = 'peepso-post'",
             "p.post_status = 'publish'",
-            "(gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')",
+            "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND vis_pm.meta_value = 'public_all'))",
+            'FROM wp_posts p LEFT JOIN wp_peepso_users pu ON pu.usr_id = p.post_author WHERE',
             'COALESCE(pu.usr_profile_acc, 10)',
             'IF(a_pub.act_access IS NULL OR a_pub.act_access <= 0, 10, a_pub.act_access)',
             'NOT EXISTS (SELECT 1 FROM wp_peepso_activities a_hid',

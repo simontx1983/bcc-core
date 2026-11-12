@@ -205,20 +205,24 @@ final class PeepSoHashtagRepository
         $acts  = $wpdb->prefix . 'peepso_activities';
         $level = static fn (string $a): string => "GREATEST(IF({$a}.act_access IS NULL OR {$a}.act_access <= 0, 10, {$a}.act_access), COALESCE(pu.usr_profile_acc, 10))";
 
+        // ⚠ The group and visibility markers are EXISTS checks, not the
+        // feed's LEFT JOINs: this is a SUM, and a post with two rows of
+        // either meta key would be counted twice through a join. Same
+        // meaning as the feed's `(gx_pm IS NULL OR vis_pm = 'public_all')`.
+        // `peepso_users` is joined because usr_id is its primary key (one
+        // row at most).
         $sql = 'SELECT ' . implode(', ', $sums) . '
                   FROM ' . $wpdb->posts . ' p
                   LEFT JOIN ' . $wpdb->prefix . 'peepso_users pu
                     ON pu.usr_id = p.post_author
-                  LEFT JOIN ' . $wpdb->postmeta . ' gx_pm
-                    ON gx_pm.post_id  = p.ID
-                   AND gx_pm.meta_key = \'peepso_group_id\'
-                  LEFT JOIN ' . $wpdb->postmeta . ' vis_pm
-                    ON vis_pm.post_id  = p.ID
-                   AND vis_pm.meta_key = \'_bcc_post_visibility\'
                  WHERE p.post_type   = \'peepso-post\'
                    AND p.post_status = \'publish\'
                    AND p.post_content LIKE \'%%#%%\'
-                   AND (gx_pm.meta_value IS NULL OR vis_pm.meta_value = \'public_all\')
+                   AND (NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' gx_pm
+                                     WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = \'peepso_group_id\')
+                        OR EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' vis_pm
+                                    WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = \'_bcc_post_visibility\'
+                                      AND vis_pm.meta_value = \'public_all\'))
                    AND EXISTS (SELECT 1 FROM ' . $acts . ' a_pub
                                 WHERE a_pub.act_external_id = p.ID
                                   AND ' . $level('a_pub') . ' = 10)
