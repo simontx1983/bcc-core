@@ -65,6 +65,25 @@ final class RenderingWpdb
         return $this->resultsToReturn;
     }
 
+    /** @var object|null */
+    public $rowToReturn = null;
+
+    /**
+     * Single-row read, for the callers that use it (`getById`). Records
+     * the statement exactly as `get_results()` does, so a test can assert
+     * the rendered SQL of a single-post query.
+     *
+     * @param string $sql
+     * @return object|null
+     */
+    public function get_row($sql)
+    {
+        $this->lastSql = $sql;
+        ++$this->queryCount;
+
+        return $this->rowToReturn;
+    }
+
     /** @var list<int|string> */
     public array $colToReturn = [];
 

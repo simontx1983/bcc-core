@@ -57,6 +57,124 @@ final class PeepSoActivityRepository
     private const TABLE_SUFFIX = 'peepso_activities';
 
     /**
+     * The §F-02 per-post visibility predicate, as reusable parts.
+     *
+     * ⚠⚠ ONE COPY ON PURPOSE. Two readers apply this rule — the list
+     * read ({@see getActivities}) and the single-post read
+     * ({@see getById}) — and a feed that hid a post while its permalink
+     * served it (or the reverse) would be worse than either behaviour
+     * alone. A second hand-written copy of a sixty-line privacy
+     * predicate is a drift waiting to happen, so there is exactly one.
+     *
+     * Returns the LEFT JOIN, the WHERE fragment, and the params in
+     * PLACEHOLDER ORDER. ⚠ The caller must append `params` in the same
+     * position it appends `where`: the binding is POSITIONAL and a
+     * mismatch is silent — it would bind a viewer id where a friend id
+     * belongs and quietly change who can see what.
+     *
+     * The rule itself: a post is visible at the STRICTER of its own
+     * `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`.
+     * GREATEST picks the stricter because the ladder is ordered
+     * (10 < 20 < 30 < 40). `act_access <= 0` normalises to 10 — BCC's own
+     * writer stores 0, and PeepSo's `is_accessible_static` also treats 0
+     * as public. The viewer always sees their own posts, which must be in
+     * the SQL because one page carries many authors.
+     *
+     * ⚠⚠ THE LADDER IS RANGE-BASED, NOT EXACT-MATCH, and that is the
+     * decision rather than an accident: `<= 10` public (which covers the
+     * 0 BCC's own writer stores), `<= 20` members, `<= 30` friends,
+     * anything above 30 denied.
+     *
+     * It matters because `act_access` is NOT a validated enum. PeepSo's
+     * `change_post_privacy` writes it straight from
+     * `$this->_input->int('acc')` with no check against {10,20,30,40}, so
+     * a value like 15 is reachable today and a future PeepSo level would
+     * arrive on upgrade. Under an exact-match `CASE`, every such value
+     * fell to `ELSE 0` and the post became invisible to everyone but its
+     * author — silently, and site-wide on a PeepSo upgrade. A post whose
+     * author chose a stray level should be treated at the nearest
+     * stricter rung, not deleted from view.
+     *
+     * ⚠ Above 30 still DENIES, so 40 ("only me") and anything beyond it
+     * are unaffected: widening never admits a post that the old ladder
+     * hid at 40, only ones it hid by accident.
+     *
+     * ⚠ The `GREATEST`/`COALESCE` expression is spelled out three times
+     * because MySQL has no statement-local binding and a derived table
+     * here would defeat the index on the feed query. It is built once in
+     * PHP below so the three copies cannot drift.
+     *
+     * @param list<int>|null $viewerFriendIds Capped at {@see VIEWER_FRIEND_IDS_MAX}; over the cap is treated as EMPTY (deny), never truncated — truncating would admit the first N friends and deny the rest with no signal, making the gate depend on array order.
+     * @return array{join: string, where: string, params: list<int>}
+     */
+    private static function f02PostVisibilityClause(int $viewerId, ?array $viewerFriendIds): array
+    {
+        global $wpdb;
+
+        $friendsClean = [];
+        if (is_array($viewerFriendIds)) {
+            foreach ($viewerFriendIds as $fid) {
+                $f = (int) $fid;
+                if ($f > 0) {
+                    $friendsClean[$f] = true;
+                }
+            }
+        }
+        $friendsClean = array_keys($friendsClean);
+
+        if (count($friendsClean) > self::VIEWER_FRIEND_IDS_MAX) {
+            $friendsClean = [];
+        }
+
+        // No friends (or anonymous) => the level-30 branch is a literal 0.
+        // An empty `IN ()` is a SQL syntax error, and spelling the branch
+        // out keeps the CASE total rather than relying on the catch-all.
+        $friendBranch = '0';
+        $friendParams = [];
+        if ($viewerId > 0 && $friendsClean !== []) {
+            $friendBranch = 'IF(p.post_author IN ('
+                . implode(',', array_fill(0, count($friendsClean), '%d'))
+                . '), 1, 0)';
+            $friendParams = $friendsClean;
+        }
+
+        $params = [$viewerId, $viewerId, $viewerId];
+        foreach ($friendParams as $fid) {
+            $params[] = $fid;
+        }
+
+        // The effective level: the STRICTER of the post's own access and
+        // its author's profile level, because the ladder is ordered
+        // (10 < 20 < 30 < 40). `act_access <= 0` normalises to 10 - BCC's
+        // own writer stores 0, and PeepSo's `is_accessible_static` also
+        // treats 0 as public.
+        $effective = 'GREATEST('
+            . 'IF(a.act_access IS NULL OR a.act_access <= 0, 10, a.act_access),'
+            . ' COALESCE(pu.usr_profile_acc, 10)'
+            . ')';
+
+        return [
+            // LEFT, not INNER, so an author with no PeepSo row still
+            // appears - their level then COALESCEs to 10, the column's
+            // schema default.
+            'join'  => ' LEFT JOIN ' . $wpdb->prefix . 'peepso_users pu'
+                . ' ON pu.usr_id = p.post_author',
+            // Searched CASE on RANGES, so a stray level lands on the
+            // nearest stricter rung instead of vanishing. See the
+            // docblock for why that is the decision.
+            'where' => '('
+                . 'CASE WHEN %d > 0 AND p.post_author = %d THEN 1'
+                . ' ELSE CASE'
+                .   ' WHEN ' . $effective . ' <= 10 THEN 1'
+                .   ' WHEN ' . $effective . ' <= 20 THEN IF(%d > 0, 1, 0)'
+                .   ' WHEN ' . $effective . ' <= 30 THEN ' . $friendBranch
+                .   ' ELSE 0'
+                . ' END END) = 1',
+            'params' => $params,
+        ];
+    }
+
+    /**
      * Post-meta marker tying a status post to the page it was written for.
      * bcc-trust stamps it after its write gate passes; the marker is the only
      * thing the page-scoped read filters on, so a post stays on its page
@@ -650,74 +768,14 @@ final class PeepSoActivityRepository
         // LEFT, not INNER, so an author with no PeepSo row still appears -
         // their level then COALESCEs to 10, the column's schema default.
         if ($enforcePostVisibility) {
-            $friendsClean = [];
-            if (is_array($viewerFriendIds)) {
-                foreach ($viewerFriendIds as $fid) {
-                    $f = (int) $fid;
-                    if ($f > 0) {
-                        $friendsClean[$f] = true;
-                    }
-                }
-            }
-            $friendsClean = array_keys($friendsClean);
-
-            // Over the cap: EMPTY, which denies level 30 rather than
-            // admitting it. Truncating would admit the first N friends and
-            // deny the rest with no signal - a gate whose behaviour
-            // depends on array order.
-            if (count($friendsClean) > self::VIEWER_FRIEND_IDS_MAX) {
-                $friendsClean = [];
-            }
-
-            $authorAccJoin = ' LEFT JOIN ' . $wpdb->prefix . 'peepso_users pu'
-                . ' ON pu.usr_id = p.post_author';
-
-            // No friends (or anonymous) => the level-30 branch is a literal
-            // 0. An empty `IN ()` is a SQL syntax error, and spelling the
-            // branch out keeps the CASE total rather than relying on the
-            // catch-all.
-            $friendBranch = '0';
-            $friendParams = [];
-            if ($viewerId > 0 && $friendsClean !== []) {
-                $friendBranch = 'IF(p.post_author IN ('
-                    . implode(',', array_fill(0, count($friendsClean), '%d'))
-                    . '), 1, 0)';
-                $friendParams = $friendsClean;
-            }
-
-            // GREATEST picks the stricter level because the ladder is
-            // ordered: 10 < 20 < 30 < 40. `act_access <= 0` normalises to
-            // 10 - BCC's own writer stores 0, and PeepSo's
-            // `is_accessible_static` also treats 0 as public.
-            //
-            // ⚠ The CASE has NO admitting catch-all: an unrecognised
-            // effective level (a future PeepSo value, a corrupt row) falls
-            // to `ELSE 0` and is hidden. That is the opposite of the
-            // `is_numeric` defect found in the profile gate, where an
-            // unreadable value cast to 0 and 0 meant PUBLIC.
-            $where[] = '('
-                . 'CASE WHEN %d > 0 AND p.post_author = %d THEN 1'
-                . ' ELSE CASE GREATEST('
-                .     'IF(a.act_access IS NULL OR a.act_access <= 0, 10, a.act_access),'
-                .     ' COALESCE(pu.usr_profile_acc, 10)'
-                . ')'
-                .   ' WHEN 10 THEN 1'
-                .   ' WHEN 20 THEN IF(%d > 0, 1, 0)'
-                .   ' WHEN 30 THEN ' . $friendBranch
-                .   ' ELSE 0'
-                . ' END END) = 1';
-
-            // Params in clause order: the own-post guard reads $viewerId
-            // twice, then the members-only branch once, then the friend
-            // ids. ⚠ This list and the placeholders above are matched
-            // POSITIONALLY and a mismatch is silent - it would bind a
-            // viewer id where a friend id belongs and quietly change who
-            // can see what. The sibling test asserts the RENDERED values.
-            $params[] = $viewerId;
-            $params[] = $viewerId;
-            $params[] = $viewerId;
-            foreach ($friendParams as $fid) {
-                $params[] = $fid;
+            // Built by the shared helper so the SINGLE-post reader
+            // (getById) applies a byte-identical rule — see
+            // f02PostVisibilityClause().
+            $f02          = self::f02PostVisibilityClause($viewerId, $viewerFriendIds);
+            $authorAccJoin = $f02['join'];
+            $where[]       = $f02['where'];
+            foreach ($f02['params'] as $f02Param) {
+                $params[] = $f02Param;
             }
         }
 
@@ -764,10 +822,17 @@ final class PeepSoActivityRepository
      *   callers (author resolution, comment-parent lookup, moderation,
      *   interaction gating) that must resolve any activity regardless of
      *   kind.
+     * @param list<int>|null $viewerFriendIds See {@see f02PostVisibilityClause}. Only read when `$enforcePostVisibility` is true.
+     * @param bool $enforcePostVisibility OPT-IN §F-02 per-post gate, matching {@see getActivities}. `false` (the default, and every pre-existing caller including {@see getAuthorId}) leaves this query byte-identical. ⚠ Enforcing here is what stops a permalink from serving a post the feed hides: the two readers share one predicate for exactly that reason.
      * @phpstan-return ActivityRow|null
      */
-    public static function getById(int $actId, ?array $allowedModuleIds = null): ?object
-    {
+    public static function getById(
+        int $actId,
+        ?array $allowedModuleIds = null,
+        ?array $viewerFriendIds = null,
+        bool $enforcePostVisibility = false,
+        int $viewerId = 0
+    ): ?object {
         global $wpdb;
 
         $where  = ['a.act_id = %d'];
@@ -783,11 +848,22 @@ final class PeepSoActivityRepository
             }
         }
 
+        $authorAccJoin = '';
+        if ($enforcePostVisibility) {
+            $f02           = self::f02PostVisibilityClause($viewerId, $viewerFriendIds);
+            $authorAccJoin = $f02['join'];
+            $where[]       = $f02['where'];
+            foreach ($f02['params'] as $f02Param) {
+                $params[] = $f02Param;
+            }
+        }
+
         /** @phpstan-var ActivityRow|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
             'SELECT ' . self::COLUMNS . '
                FROM ' . self::table() . ' a
                INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
+               ' . $authorAccJoin . '
               WHERE ' . implode(' AND ', $where) . '
               LIMIT 1',
             ...$params

@@ -97,6 +97,137 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             return trim($wpdb->lastSql);
         }
 
+        /**
+         * The same question asked of the SINGLE-post reader.
+         *
+         * Named arguments on purpose: `getById()`'s visibility
+         * parameters sit behind `$allowedModuleIds`, and this mirrors how
+         * the service calls it.
+         *
+         * @param list<int>|null $friendIds
+         */
+        private function sqlForById(int $viewerId, ?array $friendIds, bool $enforce): string
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getById(
+                4242,
+                null,
+                viewerFriendIds: $friendIds,
+                enforcePostVisibility: $enforce,
+                viewerId: $viewerId
+            );
+
+            return trim($wpdb->lastSql);
+        }
+
+        /** Extract the F-02 predicate from a rendered statement. */
+        private static function predicateOf(string $sql): string
+        {
+            $start = strpos($sql, 'CASE WHEN');
+            self::assertNotFalse($start, 'no F-02 predicate in: ' . $sql);
+            $end = strpos($sql, ') = 1', $start);
+            self::assertNotFalse($end, 'unterminated F-02 predicate');
+
+            return substr($sql, $start, $end - $start + 5);
+        }
+
+        // ── the single-post reader ─────────────────────────────────────
+
+        /**
+         * ⚠⚠ THE POINT OF SHARING ONE PREDICATE. A permalink that served
+         * a post the feed hides — or hid one the feed serves — would be
+         * worse than either behaviour on its own, and nothing else in the
+         * suite would notice: both queries would still look correct read
+         * separately. So this compares them BYTE FOR BYTE.
+         */
+        public function testThePermalinkPredicateIsIdenticalToTheFeedPredicate(): void
+        {
+            $viewer  = 7;
+            $friends = [11, 12];
+
+            self::assertSame(
+                self::predicateOf($this->sqlFor($viewer, $friends, true)),
+                self::predicateOf($this->sqlForById($viewer, $friends, true)),
+                'the list read and the single-post read must apply the SAME rule'
+            );
+        }
+
+        /**
+         * The opt-in claim again, for the new reader: every pre-existing
+         * caller of `getById()` — author resolution, comment parents,
+         * moderation, interaction gating — passes nothing, and must get a
+         * byte-identical query.
+         */
+        public function testGetByIdAddsNothingWhenTheSwitchIsOff(): void
+        {
+            $sql = $this->sqlForById(7, [11, 12], false);
+
+            self::assertStringNotContainsString('peepso_users', $sql);
+            self::assertStringNotContainsString('usr_profile_acc', $sql);
+            self::assertStringNotContainsString('CASE', $sql);
+        }
+
+        /**
+         * ⚠ The DEFAULT, not an explicitly-passed false. Every
+         * pre-existing caller — author resolution, comment-parent
+         * lookup, moderation, interaction gating — calls
+         * `getById($actId)` or `getById($actId, $modules)` and passes
+         * nothing about visibility. Flipping the default would silently
+         * start gating all of them, and a test that passes `false` by
+         * hand would not notice: found by mutation, which survived until
+         * this existed.
+         */
+        public function testGetByIdIsUngatedForACallerThatPassesNothing(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getById(4242);
+
+            $sql = trim($wpdb->lastSql);
+            self::assertStringNotContainsString('peepso_users', $sql);
+            self::assertStringNotContainsString('usr_profile_acc', $sql);
+            self::assertStringNotContainsString('CASE', $sql);
+            self::assertStringContainsString('a.act_id = 4242', $sql);
+        }
+
+        /** The join has to be present for the predicate to mean anything. */
+        public function testGetByIdJoinsTheAuthorLevelWhenEnforcing(): void
+        {
+            $sql = $this->sqlForById(7, null, true);
+
+            self::assertStringContainsString('LEFT JOIN', $sql);
+            self::assertStringContainsString('peepso_users pu', $sql);
+            self::assertStringContainsString('pu.usr_id = p.post_author', $sql);
+        }
+
+        /**
+         * Same positional-binding risk as the list read: the own-post
+         * guard reads the viewer twice, the members branch once, then the
+         * friend ids. A slip binds a viewer id where a friend id belongs
+         * and silently changes who can see what.
+         */
+        public function testGetByIdBindsTheViewerAndFriendIdsIntoTheCorrectSlots(): void
+        {
+            $sql = $this->sqlForById(7, [11, 12], true);
+
+            self::assertStringContainsString('CASE WHEN 7 > 0 AND p.post_author = 7', $sql);
+            self::assertStringContainsString('<= 20 THEN IF(7 > 0, 1, 0)', $sql);
+            self::assertStringContainsString('p.post_author IN (11,12)', $sql);
+        }
+
+        /**
+         * Control: the act_id still binds. If the new parameters had
+         * displaced it positionally, every assertion above would still
+         * pass while the query fetched the wrong row.
+         */
+        public function testGetByIdStillBindsTheActIdItWasAskedFor(): void
+        {
+            $sql = $this->sqlForById(7, null, true);
+
+            self::assertStringContainsString('a.act_id = 4242', $sql);
+        }
+
         // ── OFF by default: the additive claim ─────────────────────────
 
         /**
@@ -152,12 +283,12 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
                 'the own-post guard must bind the viewer id twice'
             );
             self::assertStringContainsString(
-                'WHEN 20 THEN IF(42 > 0, 1, 0)',
+                '<= 20 THEN IF(42 > 0, 1, 0)',
                 $sql,
                 'the members-only branch must bind the viewer id, not a friend id'
             );
             self::assertStringContainsString(
-                'WHEN 30 THEN IF(p.post_author IN (7,9), 1, 0)',
+                '<= 30 THEN IF(p.post_author IN (7,9), 1, 0)',
                 $sql,
                 'the friends branch must bind the friend ids, in order, and nothing else'
             );
@@ -176,10 +307,104 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             // The only admitting arms are the enumerated ones.
             self::assertSame(
                 1,
-                substr_count($sql, 'WHEN 10 THEN 1'),
+                substr_count($sql, '<= 10 THEN 1'),
                 'exactly one admitting arm for public'
             );
             self::assertStringNotContainsString('ELSE 1', $sql, 'nothing admits by default');
+        }
+
+        // ── The ladder is RANGE-based (the stray-level decision) ──────
+
+        /**
+         * Read the ladder's thresholds out of the GENERATED SQL, in the
+         * order they appear.
+         *
+         * ⚠ This does not re-implement the ladder — that would test a
+         * replica. It takes the real thresholds from the real statement
+         * and applies the one rule SQL guarantees: in a searched CASE,
+         * the FIRST matching WHEN wins. bcc-core has no MySQL-backed
+         * suite, so this is the closest thing to evaluating the
+         * expression that a unit test can honestly claim.
+         *
+         * @return list<int>
+         */
+        private function ladderThresholds(string $sql): array
+        {
+            preg_match_all('/<= (\d+) THEN/', $sql, $m);
+            $out = array_map('intval', $m[1]);
+
+            self::assertNotSame([], $out, 'no range arms found in: ' . $sql);
+
+            return $out;
+        }
+
+        /** Which rung an effective level lands on: first threshold >= level. */
+        private function rungFor(int $level, string $sql): ?int
+        {
+            foreach ($this->ladderThresholds($sql) as $threshold) {
+                if ($level <= $threshold) {
+                    return $threshold;
+                }
+            }
+
+            return null; // falls to ELSE 0 — denied
+        }
+
+        /**
+         * ⚠⚠ THE REASON THIS LADDER IS RANGE-BASED. `act_access` is NOT a
+         * validated enum: PeepSo's `change_post_privacy` writes it
+         * straight from `$this->_input->int('acc')` with no check against
+         * {10,20,30,40}. Under the exact-match CASE this gate shipped
+         * with, every stray value fell to `ELSE 0` and the post became
+         * invisible to everyone but its author — silently, and site-wide
+         * the day a PeepSo upgrade introduced a new level.
+         *
+         * A stray level must land on the nearest STRICTER rung instead.
+         */
+        public function testAStrayLevelLandsOnTheNearestStricterRung(): void
+        {
+            $sql = $this->sqlFor(42, [7, 9], true);
+
+            self::assertSame([10, 20, 30], $this->ladderThresholds($sql), 'the three rungs, in order');
+
+            // 15 sits between public and members: members, not vanished.
+            self::assertSame(20, $this->rungFor(15, $sql));
+            // 25 sits between members and friends: friends.
+            self::assertSame(30, $this->rungFor(25, $sql));
+            // 35 sits between friends and private: above the last rung,
+            // so denied — correct, it is closer to "only me" than to
+            // "friends", and widening must never admit what 40 hid.
+            self::assertNull($this->rungFor(35, $sql));
+            // An unknown high value stays denied.
+            self::assertNull($this->rungFor(999, $sql));
+        }
+
+        /**
+         * The rungs that were already correct must not move. 10, 20, 30
+         * and 40 behaved correctly under exact-match too, so this change
+         * is only allowed to affect the values BETWEEN them.
+         */
+        public function testTheFourRealLevelsAreUnaffectedByTheWidening(): void
+        {
+            $sql = $this->sqlFor(42, [7, 9], true);
+
+            self::assertSame(10, $this->rungFor(10, $sql), 'public stays public');
+            self::assertSame(20, $this->rungFor(20, $sql), 'members stays members');
+            self::assertSame(30, $this->rungFor(30, $sql), 'friends stays friends');
+            self::assertNull($this->rungFor(40, $sql), 'only-me stays denied');
+        }
+
+        /**
+         * Control: the widening must not have become a catch-all. If the
+         * last arm admitted instead of denying, every assertNull above
+         * would flip and a level-40 post would be world-readable.
+         */
+        public function testNothingAdmitsAboveTheTopRung(): void
+        {
+            $sql = $this->sqlFor(42, [7, 9], true);
+
+            self::assertStringContainsString('ELSE 0 END END', $sql, 'the ladder still ends in a deny');
+            self::assertStringNotContainsString('ELSE 1', $sql);
         }
 
         // ── Degenerate inputs: no empty IN(), and fail closed ─────────
@@ -193,10 +418,10 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
         {
             $sql = $this->sqlFor(0, null, true);
 
-            self::assertStringContainsString('WHEN 30 THEN 0', $sql, 'literal 0, never IN ()');
+            self::assertStringContainsString('<= 30 THEN 0', $sql, 'literal 0, never IN ()');
             self::assertStringNotContainsString('IN ()', $sql);
             self::assertStringContainsString(
-                'WHEN 20 THEN IF(0 > 0, 1, 0)',
+                '<= 20 THEN IF(0 > 0, 1, 0)',
                 $sql,
                 'members-only denies an anonymous reader'
             );
@@ -206,7 +431,7 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
         {
             $sql = $this->sqlFor(42, [], true);
 
-            self::assertStringContainsString('WHEN 30 THEN 0', $sql);
+            self::assertStringContainsString('<= 30 THEN 0', $sql);
             self::assertStringNotContainsString('IN ()', $sql);
             // ...but still sees their OWN posts at any level.
             self::assertStringContainsString('p.post_author = 42 THEN 1', $sql);
@@ -232,14 +457,14 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
         {
             $sql = $this->sqlFor(42, [], true);
 
-            self::assertStringContainsString('WHEN 30 THEN 0', $sql, 'nobody is admitted by the friends arm');
+            self::assertStringContainsString('<= 30 THEN 0', $sql, 'nobody is admitted by the friends arm');
             self::assertStringContainsString(
                 'CASE WHEN 42 > 0 AND p.post_author = 42 THEN 1',
                 $sql,
                 'except the owner, whose own posts stay visible'
             );
-            self::assertStringNotContainsString('WHEN 30 THEN 1', $sql, 'the arm never admits unconditionally');
-            self::assertStringNotContainsString('WHEN 40', $sql, 'there is no 40 arm at all — it falls to ELSE 0');
+            self::assertStringNotContainsString('<= 30 THEN 1', $sql, 'the arm never admits unconditionally');
+            self::assertStringNotContainsString('<= 40', $sql, 'there is no 40 arm at all — it falls to ELSE 0');
         }
 
         /**
@@ -254,7 +479,7 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             foreach ([null, []] as $degraded) {
                 $sql = $this->sqlFor(42, $degraded, true);
                 self::assertStringContainsString(
-                    'WHEN 30 THEN 0',
+                    '<= 30 THEN 0',
                     $sql,
                     'a failed friends lookup must deny level 30, never admit it'
                 );
@@ -279,7 +504,7 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             $ids = range(1, PeepSoActivityRepository::VIEWER_FRIEND_IDS_MAX + 1);
             $sql = $this->sqlFor(42, $ids, true);
 
-            self::assertStringContainsString('WHEN 30 THEN 0', $sql, 'denied, not truncated');
+            self::assertStringContainsString('<= 30 THEN 0', $sql, 'denied, not truncated');
             self::assertStringNotContainsString('IN (1,2,3', $sql, 'no partial list reaches SQL');
         }
 
@@ -290,7 +515,7 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             $ids = range(1, PeepSoActivityRepository::VIEWER_FRIEND_IDS_MAX);
             $sql = $this->sqlFor(42, $ids, true);
 
-            self::assertStringContainsString('WHEN 30 THEN IF(p.post_author IN (1,2,3', $sql);
+            self::assertStringContainsString('<= 30 THEN IF(p.post_author IN (1,2,3', $sql);
         }
 
         /**

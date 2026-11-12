@@ -70,9 +70,11 @@ final class ActivityFeedService
      * @param list<string>|null $groupVisibilityIn Optional per-post visibility allow-list for the GROUP-SCOPED path (`$onlyForGroupId` set). null = no visibility filter (member read → every post incl members_only). Non-null = restrict to posts whose `_bcc_post_visibility` post-meta is one of these values (bcc-trust passes ['public_group','public_all'] for a non-member teaser). Enforced as an INNER JOIN downstream so posts with absent visibility meta are EXCLUDED for non-members — the security invariant. Only applies on the `$onlyForGroupId` path; ignored for the global feed (which has its own per-post visibility gate keyed on 'public_all').
      * @param ?string $hashtag Optional hashtag filter (tag text WITHOUT the leading '#'). When a non-empty string, narrows the candidate set to posts whose body carries the '#tag' token (forwarded verbatim to PeepSoActivityRepository::getActivities, which applies the LIKE predicate). Pure narrowing — composes with every exclusion / visibility gate above; it can never surface a post those gates would otherwise drop. Used by the §F3 tag feed (`GET /bcc/v1/feed/tag`).
      * @param ?string $hallFeed Ranked-Hall channel selector (Rank Phase 7, §21.3) — forwarded verbatim to PeepSoActivityRepository::getActivities and only meaningful on the group-scoped path (`$onlyForGroupId` set). 'ranked' = ranked-channel posts only; 'main' = exclude ranked-channel posts; null = no channel filter (legacy callers). Posting into the ranked channel is gated in bcc-trust; reading it is open to everyone.
+     * @param list<int>|null $viewerFriendIds §F-02: the authors the VIEWER is a friend of, for the level-30 branch. Only read when `$enforcePostVisibility` is true. ⚠ bcc-core does NOT discover this itself — friendship lives in `peepso_user_friends`, owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed depend on an add-on that may not be installed. The caller computes it and passes it. ⚠ null/[] means "a friend of nobody", which DENIES level 30 (except the viewer's own posts) rather than ignoring the branch — correct for an anonymous reader, and currently the only possible value in BCC, where peepso-friends is not installed.
+     * @param bool $enforcePostVisibility §F-02 per-post gate, OPT-IN. ⚠⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them — the switch is the caller's to throw, which is also how an admin read is expressed (pass false). When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows posts already written under it. ⚠ Forwarded to the repository BY NAME: `getActivities()` takes nineteen parameters and these sit at 17-19, so positional padding would mean several bare nulls per call site, and a positional slip there is silent.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
-    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null, ?array $groupVisibilityIn = null, ?string $hashtag = null, ?string $hallFeed = null): array
+    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null, ?array $groupVisibilityIn = null, ?string $hashtag = null, ?string $hallFeed = null, ?array $viewerFriendIds = null, bool $enforcePostVisibility = false): array
     {
         if (!in_array($scope, self::VALID_SCOPES, true)) {
             $scope = self::SCOPE_FOR_YOU;
@@ -106,7 +108,10 @@ final class ActivityFeedService
             $excludedGroupIds,
             $groupVisibilityIn,
             $hashtag,
-            $hallFeed
+            $hallFeed,
+            viewerId: $viewerId,
+            viewerFriendIds: $viewerFriendIds,
+            enforcePostVisibility: $enforcePostVisibility
         );
 
         $hasMore = count($rows) > $limit;
@@ -150,6 +155,8 @@ final class ActivityFeedService
      * @param list<int>|null $excludedAuthorIds Same §O4.1 shadow-limit channel as `getFeed()`. On a single-author wall, passing the caution-tier list here makes the wall empty when the wall owner is on it — bcc-trust decides whether to apply that policy.
      * @param list<int>|null $excludedActIds    §K1 Phase C per-row moderation hide list.
      * @param list<int>|null $excludedGroupIds  Group-exclusion list — drop wall posts authored inside a closed/secret/NFT-gated group the viewer doesn't belong to. The wall is the same data stream as `getFeed()`, so the same leak surface applies; the same exclude-list pattern closes it.
+     * @param list<int>|null $viewerFriendIds §F-02: the authors the VIEWER is a friend of, for the level-30 branch. Only read when `$enforcePostVisibility` is true. ⚠ bcc-core does NOT discover this itself — friendship lives in `peepso_user_friends`, owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed depend on an add-on that may not be installed. The caller computes it and passes it. ⚠ null/[] means "a friend of nobody", which DENIES level 30 (except the viewer's own posts) rather than ignoring the branch — correct for an anonymous reader, and currently the only possible value in BCC, where peepso-friends is not installed.
+     * @param bool $enforcePostVisibility §F-02 per-post gate, OPT-IN. ⚠⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them — the switch is the caller's to throw, which is also how an admin read is expressed (pass false). When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows posts already written under it. ⚠ Forwarded to the repository BY NAME: `getActivities()` takes nineteen parameters and these sit at 17-19, so positional padding would mean several bare nulls per call site, and a positional slip there is silent.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
     public function getActivityForAuthor(
@@ -159,7 +166,9 @@ final class ActivityFeedService
         int $limit = 20,
         ?array $excludedAuthorIds = null,
         ?array $excludedActIds = null,
-        ?array $excludedGroupIds = null
+        ?array $excludedGroupIds = null,
+        ?array $viewerFriendIds = null,
+        bool $enforcePostVisibility = false
     ): array {
         if ($authorId <= 0) {
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
@@ -178,7 +187,14 @@ final class ActivityFeedService
             $excludedAuthorIds,
             $excludedActIds,
             null,
-            $excludedGroupIds
+            $excludedGroupIds,
+            null,
+            null,
+            null,
+            null,
+            viewerId: $viewerId,
+            viewerFriendIds: $viewerFriendIds,
+            enforcePostVisibility: $enforcePostVisibility
         );
 
         $hasMore = count($rows) > $limit;
@@ -217,6 +233,8 @@ final class ActivityFeedService
      *
      * @param list<int>|null $excludedAuthorIds Same §O4.1 shadow-limit channel as `getFeed()`.
      * @param list<int>|null $excludedActIds    §K1 Phase C per-row moderation hide list.
+     * @param list<int>|null $viewerFriendIds §F-02: the authors the VIEWER is a friend of, for the level-30 branch. Only read when `$enforcePostVisibility` is true. ⚠ bcc-core does NOT discover this itself — friendship lives in `peepso_user_friends`, owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed depend on an add-on that may not be installed. The caller computes it and passes it. ⚠ null/[] means "a friend of nobody", which DENIES level 30 (except the viewer's own posts) rather than ignoring the branch — correct for an anonymous reader, and currently the only possible value in BCC, where peepso-friends is not installed.
+     * @param bool $enforcePostVisibility §F-02 per-post gate, OPT-IN. ⚠⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them — the switch is the caller's to throw, which is also how an admin read is expressed (pass false). When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows posts already written under it. ⚠ Forwarded to the repository BY NAME: `getActivities()` takes nineteen parameters and these sit at 17-19, so positional padding would mean several bare nulls per call site, and a positional slip there is silent.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
     public function getActivityForPage(
@@ -225,7 +243,9 @@ final class ActivityFeedService
         ?string $cursor = null,
         int $limit = 20,
         ?array $excludedAuthorIds = null,
-        ?array $excludedActIds = null
+        ?array $excludedActIds = null,
+        ?array $viewerFriendIds = null,
+        bool $enforcePostVisibility = false
     ): array {
         if ($pageId <= 0) {
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
@@ -248,7 +268,13 @@ final class ActivityFeedService
             null,
             null,
             null,
-            $pageId
+            $pageId,
+            null,
+            null,
+            null,
+            viewerId: $viewerId,
+            viewerFriendIds: $viewerFriendIds,
+            enforcePostVisibility: $enforcePostVisibility
         );
 
         $hasMore = count($rows) > $limit;
@@ -297,13 +323,17 @@ final class ActivityFeedService
      *
      * @param list<int>|null $excludedAuthorIds
      * @param list<int>|null $excludedActIds
+     * @param list<int>|null $viewerFriendIds §F-02: the authors the VIEWER is a friend of, for the level-30 branch. Only read when `$enforcePostVisibility` is true. ⚠ bcc-core does NOT discover this itself — friendship lives in `peepso_user_friends`, owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed depend on an add-on that may not be installed. The caller computes it and passes it. ⚠ null/[] means "a friend of nobody", which DENIES level 30 (except the viewer's own posts) rather than ignoring the branch — correct for an anonymous reader, and currently the only possible value in BCC, where peepso-friends is not installed.
+     * @param bool $enforcePostVisibility §F-02 per-post gate, OPT-IN. ⚠⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them — the switch is the caller's to throw, which is also how an admin read is expressed (pass false). When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows posts already written under it. ⚠ Forwarded to the repository BY NAME: `getActivities()` takes nineteen parameters and these sit at 17-19, so positional padding would mean several bare nulls per call site, and a positional slip there is silent.
      * @return array<string, mixed>|null Same per-item shape as a `getFeed()` row; null = not found or not visible.
      */
     public function getActivityById(
         int $actId,
         int $viewerId,
         ?array $excludedAuthorIds = null,
-        ?array $excludedActIds = null
+        ?array $excludedActIds = null,
+        ?array $viewerFriendIds = null,
+        bool $enforcePostVisibility = false
     ): ?array {
         if ($actId <= 0) {
             return null;
@@ -313,7 +343,13 @@ final class ActivityFeedService
         // unknown-module activity is filtered out in SQL so it can never
         // be resolved by id (same allowlist the global feed query uses).
         $allowedModuleIds = FeedItemNormalizer::publicFeedModuleIds();
-        $row = PeepSoActivityRepository::getById($actId, $allowedModuleIds);
+        $row = PeepSoActivityRepository::getById(
+            $actId,
+            $allowedModuleIds,
+            viewerFriendIds: $viewerFriendIds,
+            enforcePostVisibility: $enforcePostVisibility,
+            viewerId: $viewerId
+        );
         if ($row === null || (string) $row->act_status !== 'publish') {
             return null;
         }
