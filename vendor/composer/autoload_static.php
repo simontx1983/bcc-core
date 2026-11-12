@@ -101,6 +101,7 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\Repositories\\PeepSoHashtagRepository' => __DIR__ . '/../..' . '/src/Repositories/PeepSoHashtagRepository.php',
         'BCC\\Core\\Repositories\\PeepSoMessageRepository' => __DIR__ . '/../..' . '/src/Repositories/PeepSoMessageRepository.php',
         'BCC\\Core\\Repositories\\PeepSoPageRepository' => __DIR__ . '/../..' . '/src/Repositories/PeepSoPageRepository.php',
+        'BCC\\Core\\Repositories\\ProbesReads' => __DIR__ . '/../..' . '/src/Repositories/ProbesReads.php',
         'BCC\\Core\\Rest\\IdentityEndpoint' => __DIR__ . '/../..' . '/src/Rest/IdentityEndpoint.php',
         'BCC\\Core\\Security\\GiphyUrl' => __DIR__ . '/../..' . '/src/Security/GiphyUrl.php',
         'BCC\\Core\\Security\\Throttle' => __DIR__ . '/../..' . '/src/Security/Throttle.php',

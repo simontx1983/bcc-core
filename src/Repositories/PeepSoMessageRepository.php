@@ -42,6 +42,8 @@ if (!defined('ABSPATH')) {
  */
 final class PeepSoMessageRepository
 {
+    use ProbesReads;
+
     /** Hard cap on the inbox-list IN()-clause when batching unread counts. */
     private const INBOX_BATCH_MAX = 100;
 
@@ -65,6 +67,31 @@ final class PeepSoMessageRepository
      * }>
      */
     public static function findConversationsForUser(int $userId, int $limit, int $offset): array
+    {
+        return self::findConversationsForUserOrUnknown($userId, $limit, $offset) ?? [];
+    }
+
+    /**
+     * `findConversationsForUser()` that can say "I could not tell".
+     *
+     * Returns the rows, or NULL when the read failed (F-300). The old
+     * `get_results() ?: []` reported a failed read as an empty inbox, so
+     * the client rendered "No conversations yet" over a DB error.
+     * Additive on purpose, like PeepSoBlockRepository's `...OrUnknown`
+     * reads: bcc-trust CI resolves this repo's default branch, and the old
+     * method keeps its exact contract by delegating here.
+     *
+     * @return list<array{
+     *     root_msg_id: int,
+     *     last_msg_id: int,
+     *     last_msg_author_id: int,
+     *     last_msg_content: string,
+     *     last_msg_posted_at: string,
+     *     is_group: bool,
+     *     last_activity: string|null
+     * }>|null
+     */
+    public static function findConversationsForUserOrUnknown(int $userId, int $limit, int $offset): ?array
     {
         if ($userId <= 0 || $limit <= 0) {
             return [];
@@ -111,8 +138,10 @@ final class PeepSoMessageRepository
             max(0, $offset)
         );
 
-        /** @var list<array<string, string|null>> $rows */
-        $rows = $wpdb->get_results($sql, ARRAY_A) ?: [];
+        if (!self::runProbe((string) $sql)) {
+            return null;
+        }
+        $rows = self::lastRowsAsArrays();
 
         $out = [];
         foreach ($rows as $row) {
@@ -445,6 +474,30 @@ final class PeepSoMessageRepository
         int $limit,
         int $offset
     ): array {
+        return self::findMessagesInConversationOrUnknown($rootMsgId, $userId, $limit, $offset) ?? [];
+    }
+
+    /**
+     * `findMessagesInConversation()` that can say "I could not tell".
+     *
+     * Returns the rows, or NULL when EITHER of its two reads failed
+     * (F-300). The old `?: []` reported a failed read as an empty thread,
+     * and the caller then went on to mark the conversation read.
+     *
+     * @return list<array{
+     *     id: int,
+     *     author_id: int,
+     *     body: string,
+     *     posted_at: string,
+     *     post_type: string
+     * }>|null
+     */
+    public static function findMessagesInConversationOrUnknown(
+        int $rootMsgId,
+        int $userId,
+        int $limit,
+        int $offset
+    ): ?array {
         if ($rootMsgId <= 0 || $userId <= 0 || $limit <= 0) {
             return [];
         }
@@ -468,12 +521,16 @@ final class PeepSoMessageRepository
             $limit,
             max(0, $offset)
         );
-        /** @var list<string> $idRows */
-        $idRows = $wpdb->get_col($idSql) ?: [];
-        if ($idRows === []) {
+        if (!self::runProbe((string) $idSql)) {
+            return null;
+        }
+        $ids = [];
+        foreach (self::lastRowsAsArrays() as $idRow) {
+            $ids[] = (int) ($idRow['mrec_msg_id'] ?? 0);
+        }
+        if ($ids === []) {
             return [];
         }
-        $ids = array_map('intval', $idRows);
 
         // Step 2: fetch the matching wp_posts rows ordered ASC for
         // chat-style rendering on the page. IN() is bounded by `$limit`.
@@ -493,8 +550,10 @@ final class PeepSoMessageRepository
             ...$ids
         );
 
-        /** @var list<array<string, string|null>> $rows */
-        $rows = $wpdb->get_results($postSql, ARRAY_A) ?: [];
+        if (!self::runProbe((string) $postSql)) {
+            return null;
+        }
+        $rows = self::lastRowsAsArrays();
 
         $out = [];
         foreach ($rows as $row) {
@@ -704,5 +763,22 @@ final class PeepSoMessageRepository
             $authorId,
             $windowSeconds
         ));
+    }
+
+    /**
+     * The rows of the SELECT that `runProbe()` just vouched for, as
+     * associative arrays (the shape `get_results(..., ARRAY_A)` gave).
+     * Read from `last_result` rather than re-running the query.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private static function lastRowsAsArrays(): array
+    {
+        global $wpdb;
+        $out = [];
+        foreach ((array) ($wpdb->last_result ?? []) as $row) {
+            $out[] = (array) $row;
+        }
+        return $out;
     }
 }
