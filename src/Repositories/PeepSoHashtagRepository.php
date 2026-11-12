@@ -20,6 +20,8 @@
 
 namespace BCC\Core\Repositories;
 
+use BCC\Core\Feed\GroupSyndicationGate;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -110,10 +112,15 @@ final class PeepSoHashtagRepository
      *   - a published `peepso-post`;
      *   - not group-tagged, or group-tagged AND marked `public_all`
      *     (PeepSoActivityRepository's global-feed gate);
-     *   - effective access 10: the STRICTER of the post's `act_access`
+     *   - allowed by GroupSyndicationGate (F-23, Gate 12): a post of a group
+     *     that is NOW closed or secret is dropped, unless it was made
+     *     public_all while the group was already non-open; an unreadable
+     *     non-open group set fails closed;
+     *   - effective access public: the STRICTER of the post's `act_access`
      *     (`<= 0` is public, as BCC's writer and PeepSo both treat it) and
-     *     the author's `usr_profile_acc` (F-02), across EVERY activity row
-     *     backing the post. One non-public row hides the post.
+     *     the author's `usr_profile_acc` (F-02) is `<= 10`, the feed's range
+     *     ladder, across EVERY activity row backing the post. One row above
+     *     10 hides the post.
      *
      * Cached for PUBLIC_CACHE_TTL seconds as one ranking; `$limit` only
      * slices it. A failed read returns [] and is NOT cached: trending fails
@@ -205,6 +212,16 @@ final class PeepSoHashtagRepository
         $acts  = $wpdb->prefix . 'peepso_activities';
         $level = static fn (string $a): string => "GREATEST(IF({$a}.act_access IS NULL OR {$a}.act_access <= 0, 10, {$a}.act_access), COALESCE(pu.usr_profile_acc, 10))";
 
+        // F-23 / Gate 12: the SAME syndication rule as the global feed. A
+        // public_all post of a now-closed/secret group drops unless it was
+        // made while the group was already non-open. null (lookup can't
+        // answer) fails closed inside the predicate.
+        $syndication = GroupSyndicationGate::sqlPredicate(
+            $wpdb->postmeta,
+            PeepSoGroupRepository::getNonOpenGroupIdsStrict(),
+            'p'
+        );
+
         // ⚠ The group and visibility markers are EXISTS checks, not the
         // feed's LEFT JOINs: this is a SUM, and a post with two rows of
         // either meta key would be counted twice through a join. Same
@@ -222,13 +239,18 @@ final class PeepSoHashtagRepository
                                      WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = \'peepso_group_id\')
                         OR EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' vis_pm
                                     WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = \'_bcc_post_visibility\'
-                                      AND vis_pm.meta_value = \'public_all\'))
+                                      AND vis_pm.meta_value = \'public_all\'))'
+                   . ($syndication['where'] !== '' ? ' AND ' . $syndication['where'] : '') . '
                    AND EXISTS (SELECT 1 FROM ' . $acts . ' a_pub
                                 WHERE a_pub.act_external_id = p.ID
-                                  AND ' . $level('a_pub') . ' = 10)
+                                  AND ' . $level('a_pub') . ' <= 10)
                    AND NOT EXISTS (SELECT 1 FROM ' . $acts . ' a_hid
                                     WHERE a_hid.act_external_id = p.ID
-                                      AND ' . $level('a_hid') . ' <> 10)';
+                                      AND ' . $level('a_hid') . ' > 10)';
+        // WHERE placeholders follow the SELECT's LIKE placeholders.
+        foreach ($syndication['params'] as $param) {
+            $params[] = $param;
+        }
 
         $rows = self::trustedRows($wpdb->prepare($sql, ...$params));
         if ($rows === null || !isset($rows[0])) {
