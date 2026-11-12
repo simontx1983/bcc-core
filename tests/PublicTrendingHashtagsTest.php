@@ -145,25 +145,39 @@ final class PublicTrendingHashtagsTest extends TestCase
 
     /**
      * The fail-closed ranking above is an UNDERCOUNT (open groups' public_all
-     * posts drop too): served for that request, never cached, so the next
-     * request recounts once the lookup answers.
+     * posts drop too): served, and cached only for DEGRADED_CACHE_TTL. That
+     * short cache still absorbs a burst (a persistent lookup failure must not
+     * rerun the aggregate per request); once it expires and the lookup
+     * answers, the recount is cached for the full PUBLIC_CACHE_TTL.
      */
-    public function testARankingCountedWithoutTheNonOpenSetIsServedButNotCached(): void
+    public function testARankingCountedWithoutTheNonOpenSetIsCachedOnlyBriefly(): void
     {
+        self::assertLessThan(PeepSoHashtagRepository::PUBLIC_CACHE_TTL, PeepSoHashtagRepository::DEGRADED_CACHE_TTL);
+
         \BccTestPersistentCache::reset(); // cache miss → the lookup queries, and that query fails
         $GLOBALS['__pt']['results'] = [self::candidates(['a']), false, self::totals([1])];
 
         self::assertSame([['a', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(5)));
-        self::assertArrayNotHasKey(PeepSoHashtagRepository::PUBLIC_CACHE_KEY, $GLOBALS['__pt']['transients']);
+        self::assertSame(
+            PeepSoHashtagRepository::DEGRADED_CACHE_TTL,
+            $GLOBALS['__pt']['ttl'][PeepSoHashtagRepository::PUBLIC_CACHE_KEY],
+            'the degraded ranking is cached, but only briefly'
+        );
 
-        // The lookup answers again (seeded): the next read recounts, and caches.
-        bcc_test_seed_nonopen_groups([]);
+        // Within that window: served from the cache, no aggregate rerun.
         $before = count($GLOBALS['__pt']['sql']);
+        self::assertSame([['a', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(5)));
+        self::assertCount($before, $GLOBALS['__pt']['sql'], 'a repeat request inside the short TTL does not recount');
+
+        // The short entry expires and the lookup answers again (seeded): the
+        // next read recounts and caches for the full TTL.
+        unset($GLOBALS['__pt']['transients'][PeepSoHashtagRepository::PUBLIC_CACHE_KEY]);
+        bcc_test_seed_nonopen_groups([]);
         $GLOBALS['__pt']['results'] = [self::candidates(['a', 'b']), self::totals([1, 2])];
 
         self::assertSame([['b', 2], ['a', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(5)));
-        self::assertCount($before + 2, $GLOBALS['__pt']['sql'], 'recounted, not served from a cache');
-        self::assertSame([['b', 2], ['a', 1]], $GLOBALS['__pt']['transients'][PeepSoHashtagRepository::PUBLIC_CACHE_KEY]);
+        self::assertCount($before + 2, $GLOBALS['__pt']['sql'], 'recounted');
+        self::assertSame(PeepSoHashtagRepository::PUBLIC_CACHE_TTL, $GLOBALS['__pt']['ttl'][PeepSoHashtagRepository::PUBLIC_CACHE_KEY]);
     }
 
     public function testTheRankingIsCachedOnceAndTheLimitOnlySlicesIt(): void
