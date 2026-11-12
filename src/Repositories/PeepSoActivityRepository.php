@@ -261,7 +261,7 @@ final class PeepSoActivityRepository
      * @param int|null $onlyForGroupId          null = no group filter; positive int = only activities whose backing wp_post lives in this PeepSo group (joined via `peepso_group_id` post-meta). Used by /bcc/v1/groups/{id}/feed for the group-scoped feed; bcc-trust's caller handles the privacy gate before invoking this.
      * @param list<int>|null $excludedGroupIds  INERT for global-feed inclusion as of the per-post-visibility phase. The non-group (global) feed now syndicates a group-tagged post ONLY when it carries `_bcc_post_visibility = 'public_all'` post-meta; non-group posts (no `peepso_group_id`) are always included. The old "(non-open groups) - (viewer memberships)" exclusion-list no longer drives the WHERE — the per-post visibility gate supersedes it. The param is retained in the signature so existing callers (which still pass a computed list) keep working without churn, but it is intentionally unused in the query. Removed cleanly when the call sites stop computing the list.
      * @param list<string>|null $groupVisibilityIn Per-post visibility allow-list for the GROUP-SCOPED path. Only applies when non-null AND `$onlyForGroupId !== null`. Adds an INNER JOIN on `_bcc_post_visibility` post-meta restricting to the given values (bcc-trust passes ['public_group','public_all'] for a non-member teaser feed). INNER (not LEFT) JOIN: posts with absent `_bcc_post_visibility` meta are EXCLUDED for non-members — absent ⇒ members_only ⇒ hidden — which is the security invariant. When null (member read) the join is omitted so members see every post in the group. Ignored on the global path (`$onlyForGroupId === null`), which has its own 'public_all' gate.
-     * @param ?string $hashtag Optional hashtag filter (tag text WITHOUT the leading '#'). When a non-empty string, restricts the candidate set to activities whose backing wp_post.post_content contains the tag via `p.post_content LIKE '%#<tag>%'`. This mirrors how PeepSo itself associates a post with a hashtag (substring match on the rendered '#tag' token), so the filtered set is consistent with PeepSo's own `ht_count` accounting. null/'' = no hashtag filter. The filter is a pure narrowing predicate — it can never WIDEN the candidate set, so every other visibility / exclusion clause still applies in full.
+     * @param ?string $hashtag Optional hashtag filter (tag text WITHOUT the leading '#'). When a non-empty string, restricts the candidate set to activities whose backing wp_post.post_content carries #tag as a whole word, by PeepSo's own predicate (`PeepSo::hashtags_query_where`, shared via PeepSoHashtagRepository::matchSql — F-268), so the filtered set is exactly what the public trending recount counts. null/'' = no hashtag filter. The filter is a pure narrowing predicate — it can never WIDEN the candidate set, so every other visibility / exclusion clause still applies in full.
      * @param ?string $hallFeed Ranked-Hall channel selector for the GROUP-SCOPED path only (Rank Phase 7, §21.3). Only applies when `$onlyForGroupId !== null`; ignored (no-op) on every global path. 'ranked' → INNER JOIN on `_bcc_ranked_feed = '1'` post-meta so ONLY ranked-channel posts surface. 'main' → LEFT JOIN + IS NULL anti-join so ranked-channel posts are EXCLUDED from the group's main feed. null = no channel filter (legacy callers unchanged). bcc-trust's FeedRankingService passes 'ranked'/'main' for /groups/{id}/feed; the write-side gate (Journeyman+ AND Neutral+ AND Hall member) lives in bcc-trust — bcc-core stays unaware of the policy, same coupling-avoidance pattern as the exclusion channels above.
      * @param int|null $onlyForPageId           null = no page filter; positive int = only activities whose backing wp_post carries {@see self::PAGE_TARGET_META} post-meta matching this page; non-positive = no posts (returns []). Used by /bcc/v1/pages/{id}/feed. INNER JOIN on the marker alone: the author's current standing is deliberately not consulted here. Pure narrowing — the global-feed visibility gate below still applies, since this path leaves `$onlyForGroupId` null.
      * @param list<int>|null $restrictedGroupIds ENFORCED group exclusion — drops any activity whose backing wp_post is in one of these PeepSo groups. null = no list supplied; [] = supplied and empty ("restricted from nothing"); the two are NOT interchangeable, see `$groupGateMode`. ⚠ Deliberately NOT the same thing as `$excludedGroupIds` above, which is INERT: that one is a no-op kept for caller compatibility, so an exclusion passed there filters NOTHING. Use THIS param when a read must actually hide group content — the profile Blog tab (`/users/{handle}/blog`) passes the viewer's restricted-group list so a blog written inside a group the viewer may not see cannot surface on a public profile. Enforced as a per-post `NOT EXISTS` subquery, NOT a join: a post carrying two `peepso_group_id` rows (one restricted, one allowed) is DROPPED, where a join plus `NOT IN` would have let the allowed row satisfy the predicate and `SELECT DISTINCT` would have collapsed it back in. A post in no group always survives. Ids are de-duplicated and integer-cast before binding. Capped at {@see self::RESTRICTED_GROUP_IDS_MAX} — a longer list is REFUSED and the global gate kept, never silently truncated. bcc-core stays unaware of WHY a group is restricted — bcc-trust computes the list, same coupling-avoidance pattern as `$excludedAuthorIds`.
@@ -393,18 +393,18 @@ final class PeepSoActivityRepository
             $params[] = $cursorActId;
         }
 
-        // Hashtag filter — narrow the candidate set to posts whose body
-        // contains the '#tag' token. Substring LIKE on post_content
-        // mirrors how PeepSo associates a post with a hashtag (and how it
-        // derives ht_count), so the slice stays consistent with PeepSo's
-        // own counter. esc_like neutralizes %/_ inside the tag so a tag
-        // like "c_plus" doesn't become a wildcard. This is a WHERE param:
-        // it renders AFTER any JOIN params and BEFORE the LIMIT, matching
-        // the strict left-to-right prepare ordering — appended to $params
-        // (not $joinParams) at the point its placeholder appears.
+        // Hashtag filter — narrow the candidate set to posts that carry
+        // #tag as a WHOLE WORD, by PeepSo's own predicate, shared with the
+        // public trending recount (PeepSoHashtagRepository::matchSql), so
+        // the tag feed shows exactly the posts trending counts. F-268: a
+        // bare `LIKE '%#tag%'` here matched `#ethereum` for `#eth` and
+        // `&#039;` for `039`. This is a WHERE param: it renders AFTER any
+        // JOIN params and BEFORE the LIMIT, matching the strict
+        // left-to-right prepare ordering — appended to $params (not
+        // $joinParams) at the point its placeholder appears.
         if (is_string($hashtag) && $hashtag !== '') {
-            $where[]  = 'p.post_content LIKE %s';
-            $params[] = '%#' . $wpdb->esc_like($hashtag) . '%';
+            $where[]  = PeepSoHashtagRepository::matchSql('p.post_content');
+            $params[] = PeepSoHashtagRepository::matchParam($hashtag);
         }
 
         // Group scope: filter to activities whose backing wp_post lives in
