@@ -204,12 +204,17 @@ add_filter('bcc_api_keys_inventory', function (array $inventory): array {
 // (subsequent), and a privacy-row deletion (rare, but possible via
 // admin tools) leaves the group as "no row = open" so the cache
 // must drop it from the non-open list.
+// The cached public trending ranking (PeepSoHashtagRepository, F-168)
+// counts only posts anyone can see, which depends on that same non-open
+// set, so it is dropped on the same writes rather than serving a ranking
+// that still counts a now-hidden group's posts for up to its TTL.
 // First positional arg differs across the three actions (int meta_id
 // for added/updated, list<string> meta_ids for deleted). We don't read
 // it, so leave it untyped on the closure signature.
 $bccBustNonOpenGroupCache = static function ($_metaIdOrIds, $_objectId, $metaKey): void {
     if (is_string($metaKey) && $metaKey === 'peepso_group_privacy') {
         \BCC\Core\Repositories\PeepSoGroupRepository::bustNonOpenGroupIdsCache();
+        \BCC\Core\Repositories\PeepSoHashtagRepository::bustPublicTrendingCache();
     }
 };
 add_action('added_post_meta',   $bccBustNonOpenGroupCache, 10, 3);

@@ -154,6 +154,22 @@ final class PeepSoHashtagRepository
     }
 
     /**
+     * Drop the cached public ranking, so the next read recounts it.
+     *
+     * Wired in bcc-core.php to the `peepso_group_privacy` post-meta write
+     * hooks, beside PeepSoGroupRepository::bustNonOpenGroupIdsCache(): a
+     * group turning closed or secret takes its posts out of what ANYONE can
+     * see, and a cached ranking would keep counting them (keep a tag trending
+     * whose only posts are now hidden) for up to PUBLIC_CACHE_TTL seconds.
+     * A group opening up is the same in reverse. Public and static for the
+     * same reason as that bust: the hook registers against the class.
+     */
+    public static function bustPublicTrendingCache(): void
+    {
+        delete_transient(self::PUBLIC_CACHE_KEY);
+    }
+
+    /**
      * @param array<mixed> $cached
      * @return list<object{ht_name: string, ht_count: int}>|null null = not a ranking this version wrote
      */
