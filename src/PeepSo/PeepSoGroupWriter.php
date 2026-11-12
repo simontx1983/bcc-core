@@ -350,6 +350,13 @@ final class PeepSoGroupWriter
             // /system/health row shows it (an unregistered event name is
             // counted but never displayed).
             \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_pending');
+            // The door's name goes in the log for triage; once per door
+            // per request, like the other writers' degraded-path line.
+            static $loggedOps = [];
+            if (!isset($loggedOps[$op])) {
+                \BCC\Core\Log\Logger::warning('[bcc-core] PeepSo not loaded — degraded path in group ' . $op);
+                $loggedOps[$op] = true;
+            }
             return [self::OUTCOME_UNAVAILABLE, null];
         }
 
