@@ -2,6 +2,9 @@
   "name": "bcc/core",
   "description": "BCC Core Plugin",
   "type": "wordpress-plugin",
+  "require": {
+    "php": ">=8.0"
+  },
   "autoload": {
     "psr-4": {
       "BCC\\Core\\": "src/"
