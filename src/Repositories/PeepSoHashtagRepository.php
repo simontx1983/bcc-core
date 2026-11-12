@@ -89,6 +89,12 @@ final class PeepSoHashtagRepository
     public const PUBLIC_CACHE_TTL = 600;
 
     /**
+     * Seconds a DEGRADED public ranking is cached: one counted while the
+     * non-open group lookup could not answer (a fail-closed undercount).
+     */
+    public const DEGRADED_CACHE_TTL = 60;
+
+    /**
      * Trending hashtags counted over posts ANYONE can see (F-168).
      *
      * `ht_count` is PeepSo's own counter, and PeepSo counts every published
@@ -124,7 +130,9 @@ final class PeepSoHashtagRepository
      *
      * Cached for PUBLIC_CACHE_TTL seconds as one ranking; `$limit` only
      * slices it. A failed read returns [] and is NOT cached: trending fails
-     * closed (an empty rail) and recovers on the next request.
+     * closed (an empty rail) and recovers on the next request. A ranking
+     * counted while the non-open group lookup could not answer is served
+     * (fail-closed undercount) and cached only for DEGRADED_CACHE_TTL.
      *
      * @return list<object{ht_name: string, ht_count: int}>
      */
@@ -140,7 +148,8 @@ final class PeepSoHashtagRepository
             }
         }
 
-        $ranking = self::computePublicRanking();
+        $cacheable = true;
+        $ranking   = self::computePublicRanking($cacheable);
         if ($ranking === null) {
             return [];
         }
@@ -148,7 +157,17 @@ final class PeepSoHashtagRepository
         foreach ($ranking as $r) {
             $toCache[] = [$r->ht_name, $r->ht_count];
         }
-        set_transient(self::PUBLIC_CACHE_KEY, $toCache, self::PUBLIC_CACHE_TTL);
+        // A ranking counted while the non-open group lookup could not answer
+        // ran with the gate's fail-closed predicate, which also dropped OPEN
+        // groups' public_all posts. It is cached only briefly: long enough
+        // that a persistent lookup failure cannot make every anonymous request
+        // rerun the aggregate, short enough not to pin the undercount for
+        // PUBLIC_CACHE_TTL.
+        set_transient(
+            self::PUBLIC_CACHE_KEY,
+            $toCache,
+            $cacheable ? self::PUBLIC_CACHE_TTL : self::DEGRADED_CACHE_TTL
+        );
 
         return array_slice($ranking, 0, $limit);
     }
@@ -186,9 +205,12 @@ final class PeepSoHashtagRepository
     }
 
     /**
+     * @param bool $cacheable set false when the result is a fail-closed
+     *        degradation (the non-open group lookup could not answer) that
+     *        is correct to serve but may only be cached briefly
      * @return list<object{ht_name: string, ht_count: int}>|null null = a read failed
      */
-    private static function computePublicRanking(): ?array
+    private static function computePublicRanking(bool &$cacheable): ?array
     {
         global $wpdb;
 
@@ -231,12 +253,13 @@ final class PeepSoHashtagRepository
         // F-23 / Gate 12: the SAME syndication rule as the global feed. A
         // public_all post of a now-closed/secret group drops unless it was
         // made while the group was already non-open. null (lookup can't
-        // answer) fails closed inside the predicate.
-        $syndication = GroupSyndicationGate::sqlPredicate(
-            $wpdb->postmeta,
-            PeepSoGroupRepository::getNonOpenGroupIdsStrict(),
-            'p'
-        );
+        // answer) fails closed inside the predicate, and that run's ranking
+        // is cached only for DEGRADED_CACHE_TTL by the caller.
+        $nonOpen = PeepSoGroupRepository::getNonOpenGroupIdsStrict();
+        if ($nonOpen === null) {
+            $cacheable = false;
+        }
+        $syndication = GroupSyndicationGate::sqlPredicate($wpdb->postmeta, $nonOpen, 'p');
 
         // ⚠ The group and visibility markers are EXISTS checks, not the
         // feed's LEFT JOINs: this is a SUM, and a post with two rows of
