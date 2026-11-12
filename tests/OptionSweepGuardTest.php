@@ -57,6 +57,25 @@ final class OptionSweepGuardTest extends TestCase
      */
     private const ALLOWED = [];
 
+    /**
+     * Every option-name root that reaches bcc data, including each wrapped
+     * form a transient takes in `wp_options`.
+     *
+     * ⚠ A transient is stored under TWO rows — `_transient_<key>` and
+     * `_transient_timeout_<key>` — with `_site_` variants on multisite, so a
+     * sweep can reach `bcc_signals_u5` without ever mentioning `bcc_`. All
+     * five are roots in their own right rather than something to strip.
+     *
+     * @var list<string>
+     */
+    private const OUR_ROOTS = [
+        'bcc_',
+        '_transient_bcc_',
+        '_transient_timeout_bcc_',
+        '_site_transient_bcc_',
+        '_site_transient_timeout_bcc_',
+    ];
+
     // ── the rule ────────────────────────────────────────
 
     /**
@@ -290,6 +309,90 @@ final class OptionSweepGuardTest extends TestCase
         }
     }
 
+    /**
+     * ⚠⚠ A PARTIAL WRAPPER REACHES OUR TRANSIENTS, and the stripping
+     * version reported every one of these as CLEAN. It only recognised a
+     * wrapper spelled in full, so anything shorter was left intact and then
+     * failed to match `bcc_` in either direction.
+     *
+     * `bcc_signals_u5` lives in `wp_options` as `_transient_bcc_signals_u5`,
+     * so a range delete from `'_'` takes it — along with every other
+     * transient on the site.
+     */
+    public function testAPartialWrapperIsReported(): void
+    {
+        foreach (
+            [
+                "'_'",
+                "'_t'",
+                "'_transient'",
+                "'_transient_'",
+                "'_transient_b'",
+                "'_transient_timeout'",
+                "'_site_'",
+                "'_site_transient'",
+            ] as $literal
+        ) {
+            self::assertSame(
+                [$literal],
+                self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix({$literal});\n"),
+                'this prefix reaches our transients: ' . $literal
+            );
+        }
+    }
+
+    /** Each wrapped root in full, and a key beneath it. */
+    public function testEachWrappedRootIsReported(): void
+    {
+        foreach (
+            [
+                "'_transient_bcc_'",
+                "'_transient_timeout_bcc_'",
+                "'_site_transient_bcc_'",
+                "'_site_transient_timeout_bcc_'",
+                "'_transient_bcc_signals_u5'",
+                "'_SITE_TRANSIENT_BCC_onchain_'",
+            ] as $literal
+        ) {
+            self::assertSame(
+                [$literal],
+                self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix({$literal});\n"),
+                'a wrapped bcc root: ' . $literal
+            );
+        }
+    }
+
+    /**
+     * ⚠⚠ ANTI-VACUITY, WIDENED WITH THE RULE. Five roots tested in two
+     * directions is one more step toward "reports everything", which would
+     * be a guard nobody can satisfy and which therefore gets deleted.
+     *
+     * The load-bearing member is `'_transient_someoneelse_'`: it shares a
+     * long head with two of the roots and must still pass. `'_transient_s'`
+     * is the same trap one character from divergence.
+     */
+    public function testAForeignPrefixStillPassesUnderTheWiderRule(): void
+    {
+        foreach (
+            [
+                "'_transient_someoneelse_'",
+                "'_transient_s'",
+                "'_transient_timeout_someoneelse_'",
+                "'_site_transient_wp_'",
+                "'wp_'",
+                "'bcd_'",
+                "'bccx_'",
+                "'peepso_'",
+            ] as $literal
+        ) {
+            self::assertSame(
+                [],
+                self::sweepOffenders("<?php\nOptionCleanupRepository::deleteByPrefix({$literal});\n"),
+                'not ours and not broader than one of our roots: ' . $literal
+            );
+        }
+    }
+
     // ── the detector ──────────────────────────────────
 
     /**
@@ -388,50 +491,44 @@ final class OptionSweepGuardTest extends TestCase
     /**
      * Does this option-name prefix reach bcc data?
      *
-     * ⚠ The transient wrappers are stripped first. `bcc_signals_u5` lives in
-     * wp_options as `_transient_bcc_signals_u5`, so a sweep of
-     * `_transient_bcc_signals_` reaches our data without starting with
-     * `bcc_` — the miss that review caught, and exactly what the removed
-     * code listed.
+     * ⚠⚠ EVERY WRAPPED FORM IS ITS OWN ROOT, AND THE TEST RUNS BOTH
+     * DIRECTIONS AGAINST EACH. `deleteByPrefix()` is a RANGE delete
+     * (`option_name >= $prefix AND option_name < $prefix . '~'`), never a
+     * `LIKE`, so a prefix SHORTER than one of our roots is BROADER than it:
+     *
+     *     ''              the entire options table
+     *     'b' 'bc' 'bcc'  bcc_* and more
+     *     '_'             every transient, ours included
+     *     '_transient'    every transient, ours included
+     *     '_site_'        every site transient, ours included
+     *
+     * ⚠ The previous version STRIPPED a known wrapper and then tested the
+     * remainder against `bcc_`. That handled `_transient_bcc_signals_`, but
+     * it only recognised wrappers spelled in full: `'_'` and `'_transient'`
+     * matched no wrapper, were left intact, and then matched `bcc_` in
+     * neither direction — so both were reported CLEAN while covering all of
+     * our transients.
+     *
+     * ⭐ Listing the wrapped roots instead removes that class entirely: a
+     * partial wrapper now falls out of the reverse direction, because
+     * `str_starts_with('_transient_bcc_', '_transient')` is true. No
+     * stripping, and no spelling to get exactly right.
+     *
+     * ⚠ Lowercased first: `option_name`'s collation is case-INSENSITIVE, so
+     * a range delete from `'BCC_'` reaches the same rows as one from
+     * `'bcc_'`.
      */
     private static function isOurPrefix(string $prefix): bool
     {
-        // ⚠ LOWERCASED FIRST. `option_name`'s collation is case-INSENSITIVE,
-        // so `DELETE ... WHERE option_name >= 'BCC_'` reaches the same rows a
-        // lowercase prefix would. A case-sensitive guard would wave that
-        // through.
         $prefix = strtolower($prefix);
 
-        foreach (
-            [
-                '_site_transient_timeout_',
-                '_site_transient_',
-                '_transient_timeout_',
-                '_transient_',
-            ] as $wrapper
-        ) {
-            if (str_starts_with($prefix, $wrapper)) {
-                $prefix = substr($prefix, strlen($wrapper));
-                break;
+        foreach (self::OUR_ROOTS as $root) {
+            if (str_starts_with($prefix, $root) || str_starts_with($root, $prefix)) {
+                return true;
             }
         }
 
-        // ⚠⚠ BOTH DIRECTIONS, because `deleteByPrefix()` is a RANGE DELETE
-        // (`option_name >= $prefix AND option_name < $prefix . '~'`), not a
-        // `LIKE 'bcc_%'`. A prefix SHORTER than ours still covers our rows:
-        //
-        //     ''      covers every option in the table
-        //     'b'     covers bcc_* along with everything else starting b
-        //     'bcc'   covers bcc_* exactly
-        //
-        // and `'_transient_'` strips to `''` above, so the empty case is
-        // reachable through a wrapper too. The first version tested only
-        // `str_starts_with($prefix, 'bcc_')` and so passed all four.
-        //
-        // The second clause is the containment test in reverse: is OUR
-        // namespace inside the given prefix? `str_starts_with('bcc_', '')` is
-        // true, which is what makes the empty prefix fail closed.
-        return str_starts_with($prefix, 'bcc_') || str_starts_with('bcc_', $prefix);
+        return false;
     }
 
     /**
