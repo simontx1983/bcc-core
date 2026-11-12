@@ -62,6 +62,12 @@ final class PeepSoGroupWriter
      */
     public static function join(int $userId, int $groupId): bool
     {
+        return self::withMemberLock($groupId, $userId, static fn (): bool => self::joinUnlocked($userId, $groupId), false);
+    }
+
+    /** join() under the pair lock. */
+    private static function joinUnlocked(int $userId, int $groupId): bool
+    {
         if ($userId <= 0 || $groupId <= 0) {
             return false;
         }
@@ -143,6 +149,12 @@ final class PeepSoGroupWriter
      *           user owns the group, or the membership read failed
      */
     public static function leave(int $userId, int $groupId): bool
+    {
+        return self::withMemberLock($groupId, $userId, static fn (): bool => self::leaveUnlocked($userId, $groupId), false);
+    }
+
+    /** leave() under the pair lock. */
+    private static function leaveUnlocked(int $userId, int $groupId): bool
     {
         if ($userId <= 0 || $groupId <= 0) {
             return false;
@@ -231,8 +243,11 @@ final class PeepSoGroupWriter
     public const OUTCOME_CONFLICT = 'conflict';
     /** The row is banned (or blocks invitations): never changed here. */
     public const OUTCOME_REFUSED = 'refused';
-    /** PeepSo missing, invalid ids, or a read or write that failed. */
+    /** PeepSo missing, invalid ids, a read or write that failed, or the pair lock was busy. */
     public const OUTCOME_UNAVAILABLE = 'unavailable';
+
+    /** How long a membership write waits for its (user, group) pair lock. */
+    private const MEMBER_LOCK_WAIT_SECONDS = 2;
 
     /**
      * Ask to join a closed group: no row → `pending_admin`.
@@ -352,6 +367,12 @@ final class PeepSoGroupWriter
     /** @return self::OUTCOME_* */
     private static function createPending(int $userId, int $groupId, string $status, ?int $inviterId, string $op): string
     {
+        return self::withMemberLock($groupId, $userId, static fn (): string => self::createPendingUnlocked($userId, $groupId, $status, $inviterId, $op), self::OUTCOME_UNAVAILABLE);
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function createPendingUnlocked(int $userId, int $groupId, string $status, ?int $inviterId, string $op): string
+    {
         [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
         if ($stop !== null) {
             return $stop;
@@ -375,6 +396,12 @@ final class PeepSoGroupWriter
     /** @return self::OUTCOME_* */
     private static function removePending(int $userId, int $groupId, string $expected, string $op): string
     {
+        return self::withMemberLock($groupId, $userId, static fn (): string => self::removePendingUnlocked($userId, $groupId, $expected, $op), self::OUTCOME_UNAVAILABLE);
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function removePendingUnlocked(int $userId, int $groupId, string $expected, string $op): string
+    {
         [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
         if ($stop !== null) {
             return $stop;
@@ -394,6 +421,12 @@ final class PeepSoGroupWriter
 
     /** @return self::OUTCOME_* */
     private static function promotePending(int $userId, int $groupId, string $expected, ?int $actorId, string $op): string
+    {
+        return self::withMemberLock($groupId, $userId, static fn (): string => self::promotePendingUnlocked($userId, $groupId, $expected, $actorId, $op), self::OUTCOME_UNAVAILABLE);
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function promotePendingUnlocked(int $userId, int $groupId, string $expected, ?int $actorId, string $op): string
     {
         [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
         if ($stop !== null) {
@@ -419,6 +452,48 @@ final class PeepSoGroupWriter
         }
         do_action('peepso_action_group_user_join', $groupId, $userId);
         return self::OUTCOME_DONE;
+    }
+
+    /**
+     * Serialize every membership write for one (user, group) pair: join(),
+     * leave() and all eight F-272 doors run their read AND write under this
+     * one key. peepso_group_members has no unique (user, group) index, so
+     * without it a sweep auto-join racing a join request could leave TWO
+     * rows for the pair (and getMembershipStatusOrFail reads one, LIMIT 1).
+     * Callers that take their own outer lock must use a DIFFERENT key.
+     *
+     * ⚠ Residual: PeepSo's own UI/AJAX doors write without this lock. BCC's
+     * headless frontend does not use them.
+     *
+     * Not acquired (held elsewhere past the wait, or a lock error) → the
+     * caller's $onBusy value: fail closed, nothing written.
+     *
+     * @template T
+     * @param callable(): T $write
+     * @param T $onBusy
+     * @return T
+     */
+    private static function withMemberLock(int $groupId, int $userId, callable $write, mixed $onBusy): mixed
+    {
+        $key = self::memberLockKey($groupId, $userId);
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($key, self::MEMBER_LOCK_WAIT_SECONDS)) {
+            \BCC\Core\Log\Logger::warning('[bcc-core] group membership write skipped — pair lock not acquired', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
+            return $onBusy;
+        }
+        try {
+            return $write();
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($key);
+        }
+    }
+
+    /** The pair lock's key (≤ 64 chars for MySQL GET_LOCK). */
+    public static function memberLockKey(int $groupId, int $userId): string
+    {
+        return 'bcc_group_member_' . $groupId . '_' . $userId;
     }
 
     private static function logWriteFailure(string $op, int $userId, int $groupId): void

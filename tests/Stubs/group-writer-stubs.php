@@ -52,20 +52,57 @@ namespace BCC\Core\Repositories {
         {
             public static function insertPendingIfAbsent(int $userId, int $groupId, string $status, ?int $invitedBy): int|false
             {
+                $GLOBALS['__bcc_gw_fixture']['locked_writes'][] = \BCC\Core\DB\AdvisoryLock::anyHeld();
                 $GLOBALS['__bcc_gw_fixture']['writes'][] = ['insert', $userId, $groupId, $status, $invitedBy];
                 return $GLOBALS['__bcc_gw_fixture']['insert_result'] ?? 1;
             }
 
             public static function promotePending(int $userId, int $groupId, string $fromStatus, ?int $acceptedBy): int|false
             {
+                $GLOBALS['__bcc_gw_fixture']['locked_writes'][] = \BCC\Core\DB\AdvisoryLock::anyHeld();
                 $GLOBALS['__bcc_gw_fixture']['writes'][] = ['promote', $userId, $groupId, $fromStatus, $acceptedBy];
                 return $GLOBALS['__bcc_gw_fixture']['promote_result'] ?? 1;
             }
 
             public static function deletePending(int $userId, int $groupId, string $status): int|false
             {
+                $GLOBALS['__bcc_gw_fixture']['locked_writes'][] = \BCC\Core\DB\AdvisoryLock::anyHeld();
                 $GLOBALS['__bcc_gw_fixture']['writes'][] = ['delete', $userId, $groupId, $status];
                 return $GLOBALS['__bcc_gw_fixture']['delete_result'] ?? 1;
+            }
+        }
+    }
+}
+
+namespace BCC\Core\DB {
+    if (!class_exists(AdvisoryLock::class, false)) {
+        /**
+         * Fixture keys: lock_busy (bool) makes acquire() fail; lock_calls
+         * records [acquire|release, key]; held is the set of held keys.
+         */
+        class AdvisoryLock
+        {
+            public static function acquire(string $key, int $timeout = 0): bool
+            {
+                $GLOBALS['__bcc_gw_fixture']['lock_calls'][] = ['acquire', $key];
+                if (!empty($GLOBALS['__bcc_gw_fixture']['lock_busy'])) {
+                    return false;
+                }
+                $GLOBALS['__bcc_gw_fixture']['held'][$key] = true;
+                return true;
+            }
+
+            public static function release(string $key): bool
+            {
+                $GLOBALS['__bcc_gw_fixture']['lock_calls'][] = ['release', $key];
+                unset($GLOBALS['__bcc_gw_fixture']['held'][$key]);
+                return true;
+            }
+
+            /** Test helper: is any pair lock held right now? */
+            public static function anyHeld(): bool
+            {
+                return !empty($GLOBALS['__bcc_gw_fixture']['held']);
             }
         }
     }
@@ -104,11 +141,13 @@ namespace {
 
             public function member_join(): void
             {
+                $GLOBALS['__bcc_gw_fixture']['locked_writes'][] = \BCC\Core\DB\AdvisoryLock::anyHeld();
                 $GLOBALS['__bcc_gw_fixture']['member_join_calls'][] = [$this->groupId, $this->userId];
             }
 
             public function member_leave(): void
             {
+                $GLOBALS['__bcc_gw_fixture']['locked_writes'][] = \BCC\Core\DB\AdvisoryLock::anyHeld();
                 $GLOBALS['__bcc_gw_fixture']['member_leave_calls'][] = [$this->groupId, $this->userId];
             }
 

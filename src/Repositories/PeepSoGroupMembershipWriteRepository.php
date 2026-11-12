@@ -19,9 +19,11 @@
  * ⚠ peepso_group_members has NO unique index on (gm_user_id, gm_group_id)
  * (PeepSo's install/activate.php: single-column indexes only), so the
  * NOT EXISTS insert below is atomic only against writers that serialize on
- * the same pair — bcc-trust's GroupJoinRequestService holds a per-(user,
- * group) advisory lock around every F-272 door. PeepSo's own UI doors do
- * not take it; BCC's headless frontend does not use them.
+ * the same pair. PeepSoGroupWriter does: join(), leave() and every F-272
+ * door run under one per-(user, group) advisory lock
+ * (PeepSoGroupWriter::memberLockKey). PeepSo's own UI doors do not take it;
+ * BCC's headless frontend does not use them. Call these methods only from
+ * inside that lock.
  *
  * Every method returns the affected-row count (0 or 1) or false when the
  * statement failed — a failure is never reported as "nothing to change".

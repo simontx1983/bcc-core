@@ -285,6 +285,68 @@ final class PeepSoGroupWriterPendingTest extends TestCase
         self::assertNothingWritten();
     }
 
+    // ── the (user, group) pair lock (no unique index on the pair) ─────
+
+    /** @param list<int> $args */
+    #[DataProvider('everyTransition')]
+    public function testEveryDoorWritesOnlyInsideThePairLockAndReleasesIt(string $method, array $args): void
+    {
+        // A state each door accepts, so every door reaches its write.
+        $GLOBALS['__bcc_gw_fixture']['status'] = match ($method) {
+            'requestJoin', 'invite'                                   => null,
+            'cancelJoinRequest', 'approveJoinRequest', 'denyJoinRequest' => 'pending_admin',
+            default                                                   => 'pending_user',
+        };
+
+        self::assertSame(PeepSoGroupWriter::OUTCOME_DONE, PeepSoGroupWriter::$method(...$args));
+        self::assertSame([true], self::fx()['locked_writes'], 'the write ran while the pair lock was held');
+        self::assertSame(
+            [['acquire', 'bcc_group_member_42_7'], ['release', 'bcc_group_member_42_7']],
+            self::fx()['lock_calls']
+        );
+        self::assertSame([], self::fx()['held'] ?? [], 'released afterwards');
+    }
+
+    /** @param list<int> $args */
+    #[DataProvider('everyTransition')]
+    public function testABusyPairLockIsUnavailableAndWritesNothing(string $method, array $args): void
+    {
+        $GLOBALS['__bcc_gw_fixture']['status']    = 'pending_admin';
+        $GLOBALS['__bcc_gw_fixture']['lock_busy'] = true;
+
+        self::assertSame(PeepSoGroupWriter::OUTCOME_UNAVAILABLE, PeepSoGroupWriter::$method(...$args));
+        self::assertNothingWritten();
+    }
+
+    /**
+     * join() inserts for the same pair (MyGroups, Halls, holder and delegator
+     * groups, the reconcile sweep) — it must take the SAME lock, or a sweep
+     * auto-join racing a join request could leave two rows for the pair.
+     */
+    public function testJoinTakesTheSamePairLockAndFailsClosedWhenBusy(): void
+    {
+        self::assertTrue(PeepSoGroupWriter::join(7, 42));
+        self::assertSame([true], self::fx()['locked_writes']);
+        self::assertSame(['acquire', 'bcc_group_member_42_7'], self::fx()['lock_calls'][0]);
+
+        $GLOBALS['__bcc_gw_fixture'] = ['lock_busy' => true, 'member_join_calls' => [], 'actions' => []];
+        self::assertFalse(PeepSoGroupWriter::join(7, 42));
+        self::assertSame([], self::fx()['member_join_calls']);
+        self::assertSame([], self::fx()['actions']);
+    }
+
+    public function testLeaveTakesTheSamePairLockAndFailsClosedWhenBusy(): void
+    {
+        $GLOBALS['__bcc_gw_fixture']['status'] = 'member';
+        self::assertTrue(PeepSoGroupWriter::leave(7, 42));
+        self::assertSame([true], self::fx()['locked_writes']);
+
+        $GLOBALS['__bcc_gw_fixture'] = ['status' => 'member', 'lock_busy' => true, 'member_leave_calls' => [], 'actions' => []];
+        self::assertFalse(PeepSoGroupWriter::leave(7, 42));
+        self::assertSame([], self::fx()['member_leave_calls']);
+        self::assertSame([], self::fx()['actions']);
+    }
+
     public function testInvitingSomeoneWhoBlocksInvitesIsRefused(): void
     {
         $GLOBALS['__bcc_gw_fixture']['status'] = 'block_invites';
