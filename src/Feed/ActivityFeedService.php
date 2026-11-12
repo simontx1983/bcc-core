@@ -576,6 +576,16 @@ final class ActivityFeedService
             if ($name === '' || strcasecmp($name, trim((string) $u->user_login)) === 0) {
                 $name = $handle;
             }
+            // F-28: "Hide my real name" (§K2, bcc-trust PrivacySettings,
+            // stored as user meta bcc_privacy_real_name_hidden = '1'/'0').
+            // Everyone but the author sees '@handle'. Same rule as
+            // bcc-trust's PublicIdentity::visibleName (bcc-core can't
+            // depend on bcc-trust, so it is spelled out here).
+            if ($id !== $viewerId
+                && filter_var(get_user_meta($id, 'bcc_privacy_real_name_hidden', true), FILTER_VALIDATE_BOOLEAN)
+            ) {
+                $name = '@' . $handle;
+            }
             $byId[$id] = [
                 'kind'                  => 'user',
                 'id'                    => $id,

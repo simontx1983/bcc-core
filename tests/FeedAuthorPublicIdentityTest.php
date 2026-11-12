@@ -69,13 +69,23 @@ final class FeedAuthorPublicIdentityTest extends TestCase
     }
 
     /** @return array<int, array<string, mixed>> */
-    private static function hydrate(): array
+    private static function hydrate(int $viewerId = 0): array
     {
         /** @var ActivityFeedService $svc */
         $svc = (new ReflectionClass(ActivityFeedService::class))->newInstanceWithoutConstructor();
+        if ($viewerId > 0) {
+            // A signed-in viewer makes hydrateAuthors ask the follow graph;
+            // give it a real one over the rendering $wpdb double (follows
+            // nobody), so these tests isolate the name rule.
+            require_once __DIR__ . '/Stubs/rendering-wpdb.php';
+            $GLOBALS['wpdb'] = new \BCC\Core\Tests\Stubs\RenderingWpdb();
+            $graph = (new ReflectionClass(\BCC\Core\PeepSo\PeepSoGraphService::class))->newInstanceWithoutConstructor();
+            $prop  = new \ReflectionProperty(ActivityFeedService::class, 'graph');
+            $prop->setValue($svc, $graph);
+        }
         $m   = new ReflectionMethod(ActivityFeedService::class, 'hydrateAuthors');
         /** @var array<int, array<string, mixed>> $out */
-        $out = $m->invoke($svc, [1, 2, 3, 4], 0);
+        $out = $m->invoke($svc, [1, 2, 3, 4], $viewerId);
         return $out;
     }
 
@@ -109,5 +119,25 @@ final class FeedAuthorPublicIdentityTest extends TestCase
             self::assertNotSame($login, strtolower((string) $author['handle']), "handle of #$id");
             self::assertNotSame($login, strtolower((string) $author['display_name']), "name of #$id");
         }
+    }
+    // F-28: "Hide my real name" applies to feed authors too.
+
+    public function testAHiddenRealNameShowsAsHandleToOthers(): void
+    {
+        $GLOBALS['__fa_meta'][1]['bcc_privacy_real_name_hidden'] = '1';
+        self::assertSame('@alice', self::hydrate(99)[1]['display_name']);
+        self::assertSame('@alice', self::hydrate(0)[1]['display_name'], 'anonymous viewer');
+    }
+
+    public function testTheAuthorStillSeesTheirOwnName(): void
+    {
+        $GLOBALS['__fa_meta'][1]['bcc_privacy_real_name_hidden'] = '1';
+        self::assertSame('Alice Smith', self::hydrate(1)[1]['display_name']);
+    }
+
+    public function testAnUnsetOrFalseFlagShowsTheName(): void
+    {
+        $GLOBALS['__fa_meta'][1]['bcc_privacy_real_name_hidden'] = '0';
+        self::assertSame('Alice Smith', self::hydrate(99)[1]['display_name']);
     }
 }
