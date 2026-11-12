@@ -80,6 +80,43 @@ final class DegradationEventRegistrationTest extends TestCase
         }
     }
 
+    /**
+     * Calls this scan cannot read (a variable event, or a call split over
+     * lines) would silently escape the registration check. Only the two
+     * known variable-event call sites are allowed; any other unreadable call
+     * fails here, so it must be written as a one-line literal (or added to
+     * this list with its own registration test).
+     */
+    public function testEveryRecordCallIsReadableByTheScan(): void
+    {
+        $allowed = [
+            'BccMailer.php'                 => true, // record(self::SUBSYSTEM, $failureEvent) — own tests
+            'PolkadotSignatureVerifier.php' => true, // record('polkadot_verify', $event) — own tests
+        ];
+        $root = dirname(__DIR__) . '/src';
+        $it   = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, RecursiveDirectoryIterator::SKIP_DOTS));
+        $seen = 0;
+        foreach ($it as $file) {
+            if (!$file->isFile() || $file->getExtension() !== 'php') {
+                continue;
+            }
+            foreach (file($file->getPathname()) ?: [] as $i => $line) {
+                $code = ltrim($line);
+                if (!str_contains($code, 'DegradationMetrics::record(')
+                    || str_starts_with($code, '*') || str_starts_with($code, '//') || str_starts_with($code, '/*')) {
+                    continue; // not a call, or a docblock/comment mention
+                }
+                $seen++;
+                $readable = preg_match("/DegradationMetrics::record\('([a-z0-9_]+)'(?:,\s*'([a-z0-9_]+)')?\)/", $line) === 1;
+                self::assertTrue(
+                    $readable || isset($allowed[basename($file->getPathname())]),
+                    basename($file->getPathname()) . ':' . ($i + 1) . ': a record() call the registration scan cannot read — use a one-line literal subsystem and event'
+                );
+            }
+        }
+        self::assertGreaterThan(40, $seen);
+    }
+
     public function testTheGroupDoorsShareOneRegisteredEvent(): void
     {
         self::assertContains('group_writer_pending', self::registered()['peepso_absence'] ?? []);

@@ -573,6 +573,62 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * The user's raw gm_user_status in each of $groupIds — ANY status
+     * (member%, pending_admin, pending_user, banned, block_invites); a group
+     * with no row is absent from the result. One bounded query (≤ 200 ids,
+     * extra ids are ignored), for list surfaces (community cards, the
+     * profile Groups tab) that need the same join verdict as the group page
+     * without one read per group (F-244).
+     *
+     * FAIL-CLOSED: null when the read did not run, never [] — callers must
+     * not guess a Join from a failed read.
+     *
+     * @param int[] $groupIds
+     * @return array<int, string>|null group id => gm_user_status
+     */
+    public static function findUserMembershipStatuses(int $userId, array $groupIds): ?array
+    {
+        $groupIds = array_slice(
+            array_values(array_unique(array_filter(array_map('intval', $groupIds), static fn (int $id): bool => $id > 0))),
+            0,
+            200
+        );
+        if ($userId <= 0 || $groupIds === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $members      = self::membersTable();
+        $placeholders = implode(',', array_fill(0, count($groupIds), '%d'));
+
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT gm_group_id, gm_user_status
+               FROM {$members}
+              WHERE gm_user_id = %d
+                AND gm_group_id IN ({$placeholders})
+              ORDER BY gm_id ASC
+              LIMIT %d",
+            // 2× the ids: with no unique (user, group) index a pair can have
+            // a duplicate row, and a limit equal to the id count would let
+            // duplicates push a real group past it — read as "no row".
+            ...array_merge([$userId], $groupIds, [2 * count($groupIds)])
+        ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
+
+        $out = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (isset($row->gm_group_id, $row->gm_user_status)) {
+                // Lowest gm_id wins if a pair ever has two rows (no unique
+                // index): same row getMembershipStatus() reads first.
+                $out[(int) $row->gm_group_id] ??= (string) $row->gm_user_status;
+            }
+        }
+        return $out;
+    }
+
+    /**
      * Which of $groupIds the user is BANNED from (gm_user_status =
      * 'banned'). One bounded query; the holder and delegator discovery
      * lists use it so a banned group is shown as "removed" instead of
