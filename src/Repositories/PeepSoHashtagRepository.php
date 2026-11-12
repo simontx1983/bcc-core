@@ -46,6 +46,39 @@ final class PeepSoHashtagRepository
     }
 
     /**
+     * "This post carries #tag", by PeepSo's own rule
+     * (`PeepSo::hashtags_query_where`): the content is wrapped in spaces,
+     * tab / CR / LF / NBSP read as spaces, and the tag must stand as a whole
+     * word: `LIKE '% #tag %'`.
+     *
+     * ONE definition for every BCC reader that asks the question: the public
+     * trending recount ({@see getPublicTrending()}) and the tag feed
+     * (PeepSoActivityRepository::getActivities' `$hashtag`). F-268: the tag
+     * feed used a bare `LIKE '%#tag%'`, so `#eth` also matched `#ethereum`,
+     * `#eth2` and `#ethics`, the feed never agreed with the trending count,
+     * and `tag=039` matched every post with an apostrophe (stored as `&#039;`).
+     *
+     * @param string $contentColumn a trusted SQL column reference, e.g. `p.post_content`
+     * @return string SQL with exactly ONE `%s` placeholder; bind {@see matchParam()}
+     */
+    public static function matchSql(string $contentColumn): string
+    {
+        return "CONCAT(' ', REPLACE(REPLACE(REPLACE(REPLACE({$contentColumn}, CHAR(9), ' '), CHAR(13), ' '), CHAR(10), ' '), CHAR(194, 160 USING utf8mb4), ' '), ' ') LIKE %s";
+    }
+
+    /**
+     * The value bound to {@see matchSql()}'s placeholder. `esc_like` keeps a
+     * `_` or `%` inside a tag literal.
+     *
+     * @param string $tag tag text WITHOUT the leading '#'
+     */
+    public static function matchParam(string $tag): string
+    {
+        global $wpdb;
+        return '% #' . $wpdb->esc_like($tag) . ' %';
+    }
+
+    /**
      * Most-used hashtags, ordered by usage descending. Used by
      * GET /bcc/v1/hashtags/trending.
      *
@@ -237,14 +270,14 @@ final class PeepSoHashtagRepository
             return [];
         }
 
-        // PeepSo's normalisation (PeepSo::hashtags_query_where), on p.post_content.
-        $content = "CONCAT(' ', REPLACE(REPLACE(REPLACE(REPLACE(p.post_content, CHAR(9), ' '), CHAR(13), ' '), CHAR(10), ' '), CHAR(194, 160 USING utf8mb4), ' '), ' ')";
+        // PeepSo's match predicate, shared with the tag feed (F-268).
+        $match = self::matchSql('p.post_content');
 
         $sums   = [];
         $params = [];
         foreach ($names as $i => $name) {
-            $sums[]   = "COALESCE(SUM({$content} LIKE %s), 0) AS c{$i}";
-            $params[] = '% #' . $wpdb->esc_like($name) . ' %';
+            $sums[]   = "COALESCE(SUM({$match}), 0) AS c{$i}";
+            $params[] = self::matchParam($name);
         }
 
         $acts  = $wpdb->prefix . 'peepso_activities';
