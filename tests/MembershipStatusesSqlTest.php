@@ -51,8 +51,10 @@ final class StatusesWpdb
             $this->last_error = 'simulated failure';
             return false;
         }
-        $this->last_result = $this->rows;
-        return count($this->rows);
+        // Honour the statement's LIMIT, as MySQL would.
+        $rows = preg_match('/LIMIT (\d+)/', $sql, $m) === 1 ? array_slice($this->rows, 0, (int) $m[1]) : $this->rows;
+        $this->last_result = $rows;
+        return count($rows);
     }
 }
 
@@ -94,7 +96,7 @@ final class MembershipStatusesSqlTest extends TestCase
         $sql = $this->wpdb->queries[0];
         self::assertStringContainsString('SELECT gm_group_id, gm_user_status FROM wp_peepso_group_members', $sql);
         self::assertStringContainsString('WHERE gm_user_id = 7 AND gm_group_id IN (42,43)', $sql, 'deduplicated, non-positive ids dropped');
-        self::assertStringContainsString('LIMIT 200', $sql);
+        self::assertStringContainsString('LIMIT 4', $sql, '2 × the two ids');
         self::assertStringNotContainsString('gm_user_status =', $sql, 'every status, not only active ones');
     }
 
@@ -141,6 +143,31 @@ final class MembershipStatusesSqlTest extends TestCase
         PeepSoGroupRepository::findUserMembershipStatuses(7, range(1, 250));
 
         self::assertSame(200, substr_count($this->wpdb->queries[0], ',') + 1 - substr_count('gm_group_id, gm_user_status', ','));
+        self::assertStringContainsString('LIMIT 400', $this->wpdb->queries[0]);
+    }
+
+    /**
+     * No unique (user, group) index: a duplicated pair must not crowd a real
+     * group out of the result. The limit leaves room for one duplicate per
+     * id, so every group still comes back.
+     */
+    public function testADuplicatedPairDoesNotHideAnotherGroup(): void
+    {
+        $ids = range(1, 200);
+        // Group 1 has a duplicate row; the double honours the SQL LIMIT.
+        $rows = [(object) ['gm_group_id' => '1', 'gm_user_status' => 'member']];
+        foreach ($ids as $id) {
+            $rows[] = (object) ['gm_group_id' => (string) $id, 'gm_user_status' => 'member'];
+        }
+        $this->wpdb->rows = $rows;
+
+        $statuses = PeepSoGroupRepository::findUserMembershipStatuses(7, $ids);
+
+        preg_match('/LIMIT (\d+)/', $this->wpdb->queries[0], $m);
+        $limit = (int) ($m[1] ?? 0);
+        self::assertGreaterThanOrEqual(count($rows), $limit, 'room for every row, duplicate included');
+        self::assertCount(200, (array) $statuses, 'group 200 is still read, not "no row"');
+        self::assertSame('member', $statuses[200] ?? null);
     }
 
     public function testNoUserOrNoGroupsRunsNoQuery(): void

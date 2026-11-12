@@ -607,8 +607,11 @@ final class PeepSoGroupRepository
               WHERE gm_user_id = %d
                 AND gm_group_id IN ({$placeholders})
               ORDER BY gm_id ASC
-              LIMIT 200",
-            ...array_merge([$userId], $groupIds)
+              LIMIT %d",
+            // 2× the ids: with no unique (user, group) index a pair can have
+            // a duplicate row, and a limit equal to the id count would let
+            // duplicates push a real group past it — read as "no row".
+            ...array_merge([$userId], $groupIds, [2 * count($groupIds)])
         ));
         if ($ok === false || (string) $wpdb->last_error !== '') {
             return null;
