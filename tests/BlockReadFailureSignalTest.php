@@ -397,4 +397,51 @@ final class BlockReadFailureSignalTest extends TestCase
         $this->assertStringContainsString('OR (blk_user_id = %d', $this->wpdb->lastSqlFlat());
         $this->assertSame([7, 9, 9, 7], $this->wpdb->lastArgs());
     }
+    // ── F-331: the id-list readers ──────────────────────────────────
+
+    public function testAFailedIdListReadIsUnknownNotNoBlocks(): void
+    {
+        $this->wpdb->colToReturn  = ['41'];
+        $this->wpdb->errorOnQuery = 'MySQL server has gone away';
+
+        $this->assertNull(PeepSoBlockRepository::getBlockedIdsOrUnknown(7));
+        $this->assertNull(PeepSoBlockRepository::getBlockerIdsOrUnknown(7));
+    }
+
+    public function testTheLegacyIdListReadersStillFailOpen(): void
+    {
+        // Unchanged contract for existing callers (the feed): [] on failure.
+        $this->wpdb->colToReturn  = ['41'];
+        $this->wpdb->errorOnQuery = 'MySQL server has gone away';
+
+        $this->assertSame([], PeepSoBlockRepository::getBlockedIds(7));
+        $this->assertSame([], PeepSoBlockRepository::getBlockerIds(7));
+    }
+
+    public function testASuccessfulIdListReadReturnsThePositiveIdsInBothDirections(): void
+    {
+        $this->wpdb->colToReturn = ['41', '0', '43'];
+
+        $this->assertSame([41, 43], PeepSoBlockRepository::getBlockedIdsOrUnknown(7, 20));
+        $this->assertSame([41, 43], PeepSoBlockRepository::getBlockerIdsOrUnknown(7, 20));
+        $this->assertSame([41, 43], PeepSoBlockRepository::getBlockedIds(7, 20));
+        $this->assertSame([41, 43], PeepSoBlockRepository::getBlockerIds(7, 20));
+
+        $sql = array_column($this->wpdb->prepared, 'sql');
+        $this->assertStringContainsString('WHERE blk_user_id = %d', $sql[0], 'blocked: the viewer is the blocker');
+        $this->assertStringContainsString('WHERE blk_blocked_id = %d', $sql[1], 'blockers: the viewer is the blocked');
+        $this->assertStringContainsString('WHERE blk_user_id = %d', $sql[2], 'legacy getBlockedIds keeps its direction');
+        $this->assertStringContainsString('WHERE blk_blocked_id = %d', $sql[3], 'legacy getBlockerIds keeps its direction');
+        $this->assertSame([7, 20], $this->wpdb->prepared[0]['args']);
+        $this->assertSame(['', ''], array_slice($this->wpdb->errorSeenAtQuery, 0, 2), 'last_error cleared before each read');
+    }
+
+    public function testAnEmptyIdListIsEmptyNotUnknown(): void
+    {
+        $this->wpdb->colToReturn = [];
+
+        $this->assertSame([], PeepSoBlockRepository::getBlockedIdsOrUnknown(7));
+        $this->assertSame([], PeepSoBlockRepository::getBlockerIdsOrUnknown(7));
+        $this->assertSame([], PeepSoBlockRepository::getBlockedIdsOrUnknown(0), 'no user, no query');
+    }
 }

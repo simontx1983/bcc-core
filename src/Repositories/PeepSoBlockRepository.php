@@ -388,28 +388,40 @@ final class PeepSoBlockRepository
      */
     public static function getBlockedIds(int $blockerId, int $limit = 500): array
     {
+        return self::getBlockedIdsOrUnknown($blockerId, $limit) ?? [];
+    }
+
+    /**
+     * getBlockedIds() for callers that must not read a failed query as
+     * "blocks no one": NULL when the read did not run (F-331).
+     *
+     * getBlockedIds() was a get_col() read, which returns [] on a failed
+     * query (wpdb ALWAYS returns an array there), so a DB blip silently
+     * dropped every block from an exclusion list. bcc-trust's notification
+     * reads (F-296) must exclude blocked members or fail; they call this.
+     * The old method keeps its fail-OPEN answer by delegating with `?? []`.
+     *
+     * @return list<int>|null
+     */
+    public static function getBlockedIdsOrUnknown(int $blockerId, int $limit = 500): ?array
+    {
         if ($blockerId <= 0) {
             return [];
         }
         global $wpdb;
         $table = self::table();
 
-        $rows = $wpdb->get_col($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT blk_blocked_id FROM {$table}
               WHERE blk_user_id = %d
               LIMIT %d",
             $blockerId,
             $limit
-        ));
-
-        $ids = [];
-        foreach ($rows as $raw) {
-            $id = (int) $raw;
-            if ($id > 0) {
-                $ids[] = $id;
-            }
+        );
+        if (!self::runProbe($sql)) {
+            return null;
         }
-        return $ids;
+        return self::positiveIdsFromLastResult();
     }
 
     /**
@@ -420,22 +432,50 @@ final class PeepSoBlockRepository
      */
     public static function getBlockerIds(int $blockedId, int $limit = 500): array
     {
+        return self::getBlockerIdsOrUnknown($blockedId, $limit) ?? [];
+    }
+
+    /**
+     * getBlockerIds() that answers NULL when the read did not run (F-331);
+     * see getBlockedIdsOrUnknown().
+     *
+     * @return list<int>|null
+     */
+    public static function getBlockerIdsOrUnknown(int $blockedId, int $limit = 500): ?array
+    {
         if ($blockedId <= 0) {
             return [];
         }
         global $wpdb;
         $table = self::table();
 
-        $rows = $wpdb->get_col($wpdb->prepare(
+        $sql = $wpdb->prepare(
             "SELECT blk_user_id FROM {$table}
               WHERE blk_blocked_id = %d
               LIMIT %d",
             $blockedId,
             $limit
-        ));
+        );
+        if (!self::runProbe($sql)) {
+            return null;
+        }
+        return self::positiveIdsFromLastResult();
+    }
+
+    /**
+     * The first column of the probe's rows as positive ints (runProbe() has
+     * just confirmed they are this query's).
+     *
+     * @return list<int>
+     */
+    private static function positiveIdsFromLastResult(): array
+    {
+        global $wpdb;
+        /** @var list<string>|null $rows */
+        $rows = $wpdb->get_col(null);
 
         $ids = [];
-        foreach ($rows as $raw) {
+        foreach (($rows ?: []) as $raw) {
             $id = (int) $raw;
             if ($id > 0) {
                 $ids[] = $id;
