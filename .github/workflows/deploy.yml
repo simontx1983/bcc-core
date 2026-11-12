@@ -85,7 +85,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Deploying $PLUGIN @ $REF → $ENVIRONMENT ($SUBPATH)"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.t.outputs.ref }}
 
