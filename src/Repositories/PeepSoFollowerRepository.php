@@ -91,14 +91,23 @@ final class PeepSoFollowerRepository
         }
 
         // The viewer always sees THEMSELVES, and that must be in the SQL
-        // because a page carries many users. An unrecognised level DENIES:
-        // there is deliberately no admitting catch-all, the same posture
-        // as the per-post ladder.
+        // because a page carries many users.
+        //
+        // ⚠ The ladder is RANGE-based, the same decision as the per-post
+        // ladder in PeepSoActivityRepository: `<= 10` public, `<= 20`
+        // members, `<= 30` friends, anything above 30 DENIED. A stray
+        // level (15, or a future PeepSo rung) lands on the nearest
+        // STRICTER rung instead of falling to ELSE 0 and hiding the user
+        // from every list. Above 30 still denies, so 40 ("only me") is
+        // unaffected, and there is deliberately no admitting catch-all.
+        // NULL / <= 0 normalise to 10 first: a NULL level would otherwise
+        // match no `<=` arm and be denied.
+        $level = 'IF(pu.usr_profile_acc IS NULL OR pu.usr_profile_acc <= 0, 10, pu.usr_profile_acc)';
         $where = ' AND (CASE WHEN %d > 0 AND ' . $listedCol . ' = %d THEN 1'
-            . ' ELSE CASE IF(pu.usr_profile_acc IS NULL OR pu.usr_profile_acc <= 0, 10, pu.usr_profile_acc)'
-            .   ' WHEN 10 THEN 1'
-            .   ' WHEN 20 THEN IF(%d > 0, 1, 0)'
-            .   ' WHEN 30 THEN ' . $friendBranch
+            . ' ELSE CASE'
+            .   ' WHEN ' . $level . ' <= 10 THEN 1'
+            .   ' WHEN ' . $level . ' <= 20 THEN IF(%d > 0, 1, 0)'
+            .   ' WHEN ' . $level . ' <= 30 THEN ' . $friendBranch
             .   ' ELSE 0'
             . ' END END) = 1';
 
