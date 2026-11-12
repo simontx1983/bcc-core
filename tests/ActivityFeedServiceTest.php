@@ -35,6 +35,10 @@ namespace BCC\Core\Feed\Tests {
     {
         protected function setUp(): void
         {
+            require_once dirname(__DIR__) . '/tests/Stubs/nonopen-groups-seed.php';
+            // F-23 gate: default to "no group is non-open" so the rendered
+            // SQL is the pre-F-23 shape these tests pin.
+            \bcc_test_seed_nonopen_groups([]);
             $GLOBALS['__test_post_meta'] = [];
         }
 
@@ -96,6 +100,67 @@ namespace BCC\Core\Feed\Tests {
             // invariant as the SQL gate's NULL-passthrough.
             $GLOBALS['__test_post_meta'][123] = ['peepso_group_id' => '7'];
             self::assertFalse(self::isVisibleGlobally(123));
+        }
+
+        // ── F-23: the group's CURRENT privacy, retroactively ────────────
+
+        public function testPublicAllPostInANowClosedOrSecretGroupIsHidden(): void
+        {
+            \bcc_test_seed_nonopen_groups([7]);
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => '7',
+                '_bcc_post_visibility' => 'public_all',
+            ];
+            self::assertFalse(self::isVisibleGlobally(123));
+        }
+
+        public function testPublicAllPostInAnOpenGroupStaysVisible(): void
+        {
+            \bcc_test_seed_nonopen_groups([9]);
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => '7',
+                '_bcc_post_visibility' => 'public_all',
+            ];
+            self::assertTrue(self::isVisibleGlobally(123));
+        }
+
+        public function testAPostInTwoGroupsIsHiddenIfEitherIsNonOpen(): void
+        {
+            \bcc_test_seed_nonopen_groups([12]);
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => ['7', '12'],
+                '_bcc_post_visibility' => 'public_all',
+            ];
+            self::assertFalse(self::isVisibleGlobally(123));
+        }
+
+        public function testAFailedNonOpenLookupHidesGroupPostsButNotOthers(): void
+        {
+            // Cold cache + a failing query: the strict lookup returns null.
+            \BccTestPersistentCache::reset();
+            $prior = $GLOBALS['wpdb'] ?? null;
+            $GLOBALS['wpdb'] = new class {
+                public string $posts = 'wp_posts';
+                public string $postmeta = 'wp_postmeta';
+                public string $last_error = '';
+                /** @param mixed ...$a */
+                public function prepare(string $q, ...$a): string { return $q; }
+                public function query(string $q): bool { $this->last_error = 'simulated'; return false; }
+            };
+            try {
+                $GLOBALS['__test_post_meta'][123] = [
+                    'peepso_group_id'      => '7',
+                    '_bcc_post_visibility' => 'public_all',
+                ];
+                self::assertFalse(self::isVisibleGlobally(123), 'group post fails closed');
+                self::assertTrue(self::isVisibleGlobally(456), 'non-group post unaffected');
+            } finally {
+                if ($prior === null) {
+                    unset($GLOBALS['wpdb']);
+                } else {
+                    $GLOBALS['wpdb'] = $prior;
+                }
+            }
         }
 
         public function testZeroOrNegativePostIdIsNeverVisible(): void
