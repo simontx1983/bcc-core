@@ -379,8 +379,11 @@ namespace BCC\Core\Feed\Tests\PerPostVisibility {
             // so denied — correct, it is closer to "only me" than to
             // "friends", and widening must never admit what 40 hid.
             self::assertNull($this->rungFor(35, $sql));
-            // An unknown high value stays denied.
-            self::assertNull($this->rungFor(999, $sql));
+            // An unknown high value stays denied. 255 rather than a
+            // larger number because `act_access` is
+            // TINYINT(3) UNSIGNED: 255 is the real ceiling, and a test
+            // pinning 999 pins an input the column cannot hold.
+            self::assertNull($this->rungFor(255, $sql));
         }
 
         /**

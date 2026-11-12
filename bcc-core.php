@@ -6,7 +6,7 @@
  * Author:      Blue Collar Labs LLC
  * Text Domain: bcc-core
  * Requires at least: 5.8
- * Requires PHP: 7.4
+ * Requires PHP: 8.0
  * GitHub Plugin URI: https://github.com/simontx1983/bcc-core
  * Primary Branch: main
  */
