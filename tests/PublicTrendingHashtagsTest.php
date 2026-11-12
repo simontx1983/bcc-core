@@ -29,6 +29,9 @@ final class PublicTrendingHashtagsTest extends TestCase
     protected function setUp(): void
     {
         require_once __DIR__ . '/Stubs/public-trending-stubs.php';
+        require_once __DIR__ . '/Stubs/nonopen-groups-seed.php';
+        \BccTestPersistentCache::reset();
+        bcc_test_seed_nonopen_groups([]); // no non-open group unless a test says so
         $GLOBALS['wpdb'] = new \PublicTrendingFakeWpdb();
         $GLOBALS['__pt'] = ['transients' => [], 'ttl' => [], 'results' => [], 'sql' => []];
     }
@@ -97,10 +100,47 @@ final class PublicTrendingHashtagsTest extends TestCase
             'COALESCE(pu.usr_profile_acc, 10)',
             'IF(a_pub.act_access IS NULL OR a_pub.act_access <= 0, 10, a_pub.act_access)',
             'NOT EXISTS (SELECT 1 FROM wp_peepso_activities a_hid',
-            ') <> 10)',
+            // The feed's range ladder: <= 10 is public, anything above hides.
+            ' <= 10) AND NOT EXISTS',
+            ') > 10)',
         ] as $fragment) {
             self::assertStringContainsString($fragment, $recountSql);
         }
+    }
+
+    public function testNoNonOpenGroupAddsNoSyndicationClause(): void
+    {
+        $GLOBALS['__pt']['results'] = [self::candidates(['a']), self::totals([1])];
+
+        PeepSoHashtagRepository::getTrendingPubliclyVisible(5);
+
+        self::assertStringNotContainsString('gsg_', $GLOBALS['__pt']['sql'][1]);
+    }
+
+    /** F-23 / Gate 12: the shared GroupSyndicationGate predicate, its params bound after the LIKE ones. */
+    public function testTheSharedSyndicationGateIsAppliedWithItsParams(): void
+    {
+        bcc_test_seed_nonopen_groups([7, 9]);
+        $GLOBALS['__pt']['results'] = [self::candidates(['a']), self::totals([1])];
+
+        PeepSoHashtagRepository::getTrendingPubliclyVisible(5);
+
+        $gate = \BCC\Core\Feed\GroupSyndicationGate::sqlPredicate('wp_postmeta', [7, 9], 'p');
+        $rendered = (new \PublicTrendingFakeWpdb())->prepare($gate['where'], ...$gate['params']);
+        self::assertStringContainsString('AND ' . $rendered . ' AND EXISTS (SELECT 1 FROM wp_peepso_activities a_pub', $GLOBALS['__pt']['sql'][1]);
+        self::assertStringContainsString("IN ('7','9')", $GLOBALS['__pt']['sql'][1]);
+    }
+
+    /** The non-open lookup cannot answer → the gate's fail-closed form (only made-while-non-open group posts pass). */
+    public function testAnUnanswerableNonOpenLookupFailsClosed(): void
+    {
+        \BccTestPersistentCache::reset(); // cache miss → the lookup queries, and that query fails
+        $GLOBALS['__pt']['results'] = [self::candidates(['a']), false, self::totals([1])];
+
+        self::assertSame([['a', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(5)));
+
+        $gate = \BCC\Core\Feed\GroupSyndicationGate::sqlPredicate('wp_postmeta', null, 'p');
+        self::assertStringContainsString('AND ' . (string) preg_replace('/\s+/', ' ', $gate['where']) . ' AND EXISTS', $GLOBALS['__pt']['sql'][2]);
     }
 
     public function testTheRankingIsCachedOnceAndTheLimitOnlySlicesIt(): void
