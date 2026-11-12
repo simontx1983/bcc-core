@@ -62,6 +62,12 @@ final class PeepSoGroupWriter
      */
     public static function join(int $userId, int $groupId): bool
     {
+        return self::withMemberLock($groupId, $userId, static fn (): bool => self::joinUnlocked($userId, $groupId), false);
+    }
+
+    /** join() under the pair lock. */
+    private static function joinUnlocked(int $userId, int $groupId): bool
+    {
         if ($userId <= 0 || $groupId <= 0) {
             return false;
         }
@@ -144,6 +150,12 @@ final class PeepSoGroupWriter
      */
     public static function leave(int $userId, int $groupId): bool
     {
+        return self::withMemberLock($groupId, $userId, static fn (): bool => self::leaveUnlocked($userId, $groupId), false);
+    }
+
+    /** leave() under the pair lock. */
+    private static function leaveUnlocked(int $userId, int $groupId): bool
+    {
         if ($userId <= 0 || $groupId <= 0) {
             return false;
         }
@@ -193,6 +205,303 @@ final class PeepSoGroupWriter
         do_action('peepso_action_group_user_delete', $groupId, $userId);
 
         return true;
+    }
+
+    // ── Join requests and invitations (F-272) ───────────────────────────
+    //
+    // PeepSo's own states: `pending_admin` = the user asked to join a
+    // closed group and waits on an owner/manager; `pending_user` = an
+    // owner/manager invited the user, who has not answered yet.
+    //
+    // Every transition is ONE conditional statement
+    // (PeepSoGroupMembershipWriteRepository) that names the state it expects
+    // in its WHERE clause, so it is decided by the row's state AT WRITE TIME:
+    //   - a banned row is never touched, even by a ban that lands between our
+    //     read and our write (the F-266 class of bug);
+    //   - a raced transition (approve vs cancel, accept vs revoke) is a
+    //     conflict, never a silent overwrite;
+    //   - a pending row is created as pending in one INSERT — never "insert a
+    //     full member, then demote it", which left a full member behind when
+    //     the second step failed (an approval bypass).
+    // A failed statement is OUTCOME_UNAVAILABLE, never "nothing to change".
+    //
+    // The read before each write only picks the right outcome for the common
+    // case (banned → refused; wrong state → conflict) without writing; the
+    // write's own WHERE clause is what enforces the rule.
+    //
+    // Authorization (who may approve/invite) and the eligibility gates belong
+    // to the caller; these doors check row state only.
+    //
+    // Removing a pending row fires NO leave hook: the user never was a
+    // member, and `peepso_action_group_user_delete` subscribers treat it as
+    // a removal. PeepSo's notification hooks (join_request_send, …) are not
+    // fired either — BCC dispatches its own notifications.
+
+    /** The transition happened. */
+    public const OUTCOME_DONE = 'done';
+    /** The row is (or became) another, non-banned state. */
+    public const OUTCOME_CONFLICT = 'conflict';
+    /** The row is banned (or blocks invitations): never changed here. */
+    public const OUTCOME_REFUSED = 'refused';
+    /** PeepSo missing, invalid ids, a read or write that failed, or the pair lock was busy. */
+    public const OUTCOME_UNAVAILABLE = 'unavailable';
+
+    /** How long a membership write waits for its (user, group) pair lock. */
+    private const MEMBER_LOCK_WAIT_SECONDS = 2;
+
+    /**
+     * Ask to join a closed group: no row → `pending_admin`.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function requestJoin(int $userId, int $groupId): string
+    {
+        return self::createPending($userId, $groupId, 'pending_admin', null, __FUNCTION__);
+    }
+
+    /**
+     * Withdraw one's own request: `pending_admin` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function cancelJoinRequest(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_admin', __FUNCTION__);
+    }
+
+    /**
+     * An owner/manager approves a request: `pending_admin` → `member`.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function approveJoinRequest(int $userId, int $groupId, int $actorId): string
+    {
+        return self::promotePending($userId, $groupId, 'pending_admin', $actorId, __FUNCTION__);
+    }
+
+    /**
+     * An owner/manager denies a request: `pending_admin` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function denyJoinRequest(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_admin', __FUNCTION__);
+    }
+
+    /**
+     * Invite a user: no row → `pending_user`, recording the inviter.
+     * A user who already asked to join is a conflict: approve the request.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function invite(int $userId, int $groupId, int $inviterId): string
+    {
+        if ($inviterId <= 0) {
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        return self::createPending($userId, $groupId, 'pending_user', $inviterId, __FUNCTION__);
+    }
+
+    /**
+     * Withdraw an invitation: `pending_user` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function revokeInvite(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_user', __FUNCTION__);
+    }
+
+    /**
+     * The invitee accepts: `pending_user` → `member`.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function acceptInvite(int $userId, int $groupId): string
+    {
+        return self::promotePending($userId, $groupId, 'pending_user', null, __FUNCTION__);
+    }
+
+    /**
+     * The invitee declines: `pending_user` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function declineInvite(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_user', __FUNCTION__);
+    }
+
+    /**
+     * Shared guard: valid ids, PeepSo loaded, a membership read that ran,
+     * and no ban. Returns [stop, status]: stop is the OUTCOME_* the caller
+     * must return as is, or null — then status is the row's (null = no row).
+     *
+     * @return array{0: self::OUTCOME_*|null, 1: string|null}
+     */
+    private static function pendingPrecheck(int $userId, int $groupId, string $op): array
+    {
+        if ($userId <= 0 || $groupId <= 0) {
+            return [self::OUTCOME_UNAVAILABLE, null];
+        }
+        if (!class_exists('PeepSoGroupUsers')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_' . $op);
+            return [self::OUTCOME_UNAVAILABLE, null];
+        }
+
+        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatusOrFail($userId, $groupId);
+        if ($status === false) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group ' . $op . ' refused — membership read failed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
+            return [self::OUTCOME_UNAVAILABLE, null];
+        }
+        if ($status === 'banned') {
+            return [self::OUTCOME_REFUSED, null];
+        }
+        return [null, $status];
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function createPending(int $userId, int $groupId, string $status, ?int $inviterId, string $op): string
+    {
+        return self::withMemberLock($groupId, $userId, static fn (): string => self::createPendingUnlocked($userId, $groupId, $status, $inviterId, $op), self::OUTCOME_UNAVAILABLE);
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function createPendingUnlocked(int $userId, int $groupId, string $status, ?int $inviterId, string $op): string
+    {
+        [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($current === 'block_invites' && $status === 'pending_user') {
+            return self::OUTCOME_REFUSED;
+        }
+        if ($current !== null) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        $affected = \BCC\Core\Repositories\PeepSoGroupMembershipWriteRepository::insertPendingIfAbsent($userId, $groupId, $status, $inviterId);
+        if ($affected === false) {
+            self::logWriteFailure($op, $userId, $groupId);
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        // 0 = a row appeared between the read and the insert (possibly a ban).
+        return $affected === 1 ? self::OUTCOME_DONE : self::OUTCOME_CONFLICT;
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function removePending(int $userId, int $groupId, string $expected, string $op): string
+    {
+        return self::withMemberLock($groupId, $userId, static fn (): string => self::removePendingUnlocked($userId, $groupId, $expected, $op), self::OUTCOME_UNAVAILABLE);
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function removePendingUnlocked(int $userId, int $groupId, string $expected, string $op): string
+    {
+        [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($current !== $expected) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        $affected = \BCC\Core\Repositories\PeepSoGroupMembershipWriteRepository::deletePending($userId, $groupId, $expected);
+        if ($affected === false) {
+            self::logWriteFailure($op, $userId, $groupId);
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        // A pending row is not counted as a member: no count refresh needed.
+        return $affected === 1 ? self::OUTCOME_DONE : self::OUTCOME_CONFLICT;
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function promotePending(int $userId, int $groupId, string $expected, ?int $actorId, string $op): string
+    {
+        return self::withMemberLock($groupId, $userId, static fn (): string => self::promotePendingUnlocked($userId, $groupId, $expected, $actorId, $op), self::OUTCOME_UNAVAILABLE);
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function promotePendingUnlocked(int $userId, int $groupId, string $expected, ?int $actorId, string $op): string
+    {
+        [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($current !== $expected) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        $affected = \BCC\Core\Repositories\PeepSoGroupMembershipWriteRepository::promotePending($userId, $groupId, $expected, $actorId);
+        if ($affected === false) {
+            self::logWriteFailure($op, $userId, $groupId);
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        if ($affected !== 1) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        // Only after the row really became a member: refresh PeepSo's
+        // member-count meta (as the AJAX layer does) and fire the join hook.
+        if (class_exists('PeepSoGroupUsers')) {
+            (new \PeepSoGroupUsers($groupId))->update_members_count();
+        }
+        do_action('peepso_action_group_user_join', $groupId, $userId);
+        return self::OUTCOME_DONE;
+    }
+
+    /**
+     * Serialize every membership write for one (user, group) pair: join(),
+     * leave() and all eight F-272 doors run their read AND write under this
+     * one key. peepso_group_members has no unique (user, group) index, so
+     * without it a sweep auto-join racing a join request could leave TWO
+     * rows for the pair (and getMembershipStatusOrFail reads one, LIMIT 1).
+     * Callers that take their own outer lock must use a DIFFERENT key.
+     *
+     * ⚠ Residual: PeepSo's own UI/AJAX doors write without this lock. BCC's
+     * headless frontend does not use them.
+     *
+     * Not acquired (held elsewhere past the wait, or a lock error) → the
+     * caller's $onBusy value: fail closed, nothing written.
+     *
+     * @template T
+     * @param callable(): T $write
+     * @param T $onBusy
+     * @return T
+     */
+    private static function withMemberLock(int $groupId, int $userId, callable $write, mixed $onBusy): mixed
+    {
+        $key = self::memberLockKey($groupId, $userId);
+        if (!\BCC\Core\DB\AdvisoryLock::acquire($key, self::MEMBER_LOCK_WAIT_SECONDS)) {
+            \BCC\Core\Log\Logger::warning('[bcc-core] group membership write skipped — pair lock not acquired', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
+            return $onBusy;
+        }
+        try {
+            return $write();
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release($key);
+        }
+    }
+
+    /** The pair lock's key (≤ 64 chars for MySQL GET_LOCK). */
+    public static function memberLockKey(int $groupId, int $userId): string
+    {
+        return 'bcc_group_member_' . $groupId . '_' . $userId;
+    }
+
+    private static function logWriteFailure(string $op, int $userId, int $groupId): void
+    {
+        \BCC\Core\Log\Logger::error('[bcc-core] group ' . $op . ' failed — membership write did not run', [
+            'user_id'  => $userId,
+            'group_id' => $groupId,
+        ]);
     }
 
     /**

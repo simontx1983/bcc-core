@@ -1416,6 +1416,135 @@ final class PeepSoGroupRepository
         return (int) $wpdb->get_var($sql);
     }
 
+    /** PeepSo's two pending states (F-272): a join request, an invitation. */
+    public const PENDING_REQUEST = 'pending_admin';
+    public const PENDING_INVITE  = 'pending_user';
+
+    /**
+     * One group's open join requests (`pending_admin`) or outstanding
+     * invitations (`pending_user`), newest first. F-272 owner/manager lists.
+     *
+     * `requested_utc` is UNIX_TIMESTAMP(gm_joined): the row's creation time
+     * (gm_joined has no ON UPDATE), i.e. when the request or invitation was
+     * made — epoch seconds, tz-proof (see listGroupMembers' clock note).
+     * `invited_by_id` is null for a request.
+     *
+     * Bounded (§4): LIMIT ≤ 100, gm_id tiebreak for stable pages. Uncached
+     * for the same reason as listGroupMembers (PeepSo owns the writes).
+     *
+     * Fail-closed: null when the read did not run (a failure must not
+     * read as "no requests").
+     *
+     * @param self::PENDING_* $status
+     * @return list<object{user_id: numeric-string, invited_by_id: numeric-string|null, requested_utc: numeric-string}>|null
+     */
+    public static function listPendingMembers(int $groupId, string $status, int $offset, int $limit): ?array
+    {
+        if ($groupId <= 0 || $limit <= 0
+            || ($status !== self::PENDING_REQUEST && $status !== self::PENDING_INVITE)) {
+            return [];
+        }
+        $offset = max(0, $offset);
+        $limit  = min(100, $limit);
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT gm_user_id       AS user_id,
+                    gm_invited_by_id AS invited_by_id,
+                    UNIX_TIMESTAMP(gm_joined) AS requested_utc
+               FROM {$members}
+              WHERE gm_group_id    = %d
+                AND gm_user_status = %s
+              ORDER BY gm_joined DESC, gm_id DESC
+              LIMIT %d OFFSET %d",
+            $groupId,
+            $status,
+            $limit,
+            $offset
+        ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
+
+        /** @var list<object{user_id: numeric-string, invited_by_id: numeric-string|null, requested_utc: numeric-string}> */
+        return is_array($wpdb->last_result) ? array_values($wpdb->last_result) : [];
+    }
+
+    /**
+     * How many open requests or invitations one group has (the owner's
+     * pending badge, F-272). Same filter as listPendingMembers().
+     *
+     * Fail-closed: null when the read did not run.
+     *
+     * @param self::PENDING_* $status
+     */
+    public static function countPendingMembers(int $groupId, string $status): ?int
+    {
+        if ($groupId <= 0 || ($status !== self::PENDING_REQUEST && $status !== self::PENDING_INVITE)) {
+            return 0;
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT COUNT(*) AS n
+               FROM {$members}
+              WHERE gm_group_id    = %d
+                AND gm_user_status = %s",
+            $groupId,
+            $status
+        ));
+        if ($ok === false || (string) $wpdb->last_error !== '' || !isset($wpdb->last_result[0]->n)) {
+            return null;
+        }
+        return (int) $wpdb->last_result[0]->n;
+    }
+
+    /**
+     * The groups that invited this user and are waiting on an answer,
+     * newest first (F-272 "my invites" — the only way a secret group's
+     * invitee finds it). Bounded: LIMIT ≤ 100, gm_id tiebreak.
+     *
+     * Fail-closed: null when the read did not run.
+     *
+     * @return list<object{group_id: numeric-string, invited_by_id: numeric-string|null, invited_utc: numeric-string}>|null
+     */
+    public static function listUserPendingInvites(int $userId, int $offset, int $limit): ?array
+    {
+        if ($userId <= 0 || $limit <= 0) {
+            return [];
+        }
+        $offset = max(0, $offset);
+        $limit  = min(100, $limit);
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT gm_group_id      AS group_id,
+                    gm_invited_by_id AS invited_by_id,
+                    UNIX_TIMESTAMP(gm_joined) AS invited_utc
+               FROM {$members}
+              WHERE gm_user_id     = %d
+                AND gm_user_status = %s
+              ORDER BY gm_joined DESC, gm_id DESC
+              LIMIT %d OFFSET %d",
+            $userId,
+            self::PENDING_INVITE,
+            $limit,
+            $offset
+        ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
+
+        /** @var list<object{group_id: numeric-string, invited_by_id: numeric-string|null, invited_utc: numeric-string}> */
+        return is_array($wpdb->last_result) ? array_values($wpdb->last_result) : [];
+    }
+
     /**
      * Total count for the same filter set as listHalls(). Drives the
      * pagination.total / pagination.total_pages fields. Optional chain
