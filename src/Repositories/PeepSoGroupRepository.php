@@ -573,6 +573,90 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * Which of $groupIds the user is BANNED from (gm_user_status =
+     * 'banned'). One bounded query; the holder and delegator discovery
+     * lists use it so a banned group is shown as "removed" instead of
+     * offering a Join that the writer will refuse.
+     *
+     * A failed read returns [] ("no bans"). That is safe ONLY because this
+     * is display: the join door itself (PeepSoGroupWriter::join) refuses a
+     * banned row and a failed read on its own. Never gate a write on this.
+     *
+     * @param int[] $groupIds
+     * @return list<int>
+     */
+    public static function findUserBannedGroupIds(int $userId, array $groupIds): array
+    {
+        $groupIds = array_values(array_unique(array_filter(array_map('intval', $groupIds), static fn (int $id): bool => $id > 0)));
+        if ($userId <= 0 || $groupIds === []) {
+            return [];
+        }
+
+        global $wpdb;
+        $members      = self::membersTable();
+        $placeholders = implode(',', array_fill(0, count($groupIds), '%d'));
+
+        /** @var list<numeric-string> $rows */
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT gm_group_id
+               FROM {$members}
+              WHERE gm_user_id = %d
+                AND gm_group_id IN ({$placeholders})
+                AND gm_user_status = 'banned'
+              LIMIT 200",
+            ...array_merge([$userId], $groupIds)
+        ));
+
+        return array_values(array_map('intval', $rows));
+    }
+
+    /**
+     * getMembershipStatus() for the group WRITE doors: the same read, but a
+     * read that did not run returns FALSE instead of reading as "no row".
+     *
+     * Returns the gm_user_status string, null when the user has no row in
+     * the group, or false when the read failed. PeepSoGroupWriter::join()
+     * and ::leave() decide from this whether a 'banned' row is present; a
+     * failure that read as null would let join() flip a ban back to
+     * membership (PeepSo's member_join() modifies ANY existing row) and
+     * let leave() raw-DELETE the banned row. Both refuse on false.
+     *
+     * Uncached, bounded by the (user, group) pair (LIMIT 1).
+     */
+    public static function getMembershipStatusOrFail(int $userId, int $groupId): string|null|false
+    {
+        if ($userId <= 0 || $groupId <= 0) {
+            return null;
+        }
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        // query() + last_result, not get_var(): get_var() returns null for
+        // a failed read too, which is the ambiguity this method exists to
+        // remove. query() returns false on error; last_error is a second
+        // signal (query() can return false before flush()).
+        $queryOk = $wpdb->query($wpdb->prepare(
+            "SELECT gm_user_status
+               FROM {$members}
+              WHERE gm_user_id  = %d
+                AND gm_group_id = %d
+              LIMIT 1",
+            $userId,
+            $groupId
+        ));
+        if ($queryOk === false || (string) $wpdb->last_error !== '') {
+            return false;
+        }
+
+        $rows = is_array($wpdb->last_result) ? $wpdb->last_result : [];
+        if ($rows === [] || !isset($rows[0]->gm_user_status)) {
+            return null;
+        }
+        return (string) $rows[0]->gm_user_status;
+    }
+
+    /**
      * How many User-kind (member-created) groups this user CURRENTLY
      * owns. Backs the §21.2 ownership caps (Rank Phase 7): the
      * CapabilityResolver's custody gate compares this count against the
