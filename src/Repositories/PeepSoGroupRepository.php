@@ -1432,10 +1432,13 @@ final class PeepSoGroupRepository
      * Bounded (§4): LIMIT ≤ 100, gm_id tiebreak for stable pages. Uncached
      * for the same reason as listGroupMembers (PeepSo owns the writes).
      *
+     * Fail-closed: null when the read did not run (a failure must not
+     * read as "no requests").
+     *
      * @param self::PENDING_* $status
-     * @return list<object{user_id: numeric-string, invited_by_id: numeric-string|null, requested_utc: numeric-string}>
+     * @return list<object{user_id: numeric-string, invited_by_id: numeric-string|null, requested_utc: numeric-string}>|null
      */
-    public static function listPendingMembers(int $groupId, string $status, int $offset, int $limit): array
+    public static function listPendingMembers(int $groupId, string $status, int $offset, int $limit): ?array
     {
         if ($groupId <= 0 || $limit <= 0
             || ($status !== self::PENDING_REQUEST && $status !== self::PENDING_INVITE)) {
@@ -1447,8 +1450,7 @@ final class PeepSoGroupRepository
         global $wpdb;
         $members = self::membersTable();
 
-        /** @var list<object{user_id: numeric-string, invited_by_id: numeric-string|null, requested_utc: numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $ok = $wpdb->query($wpdb->prepare(
             "SELECT gm_user_id       AS user_id,
                     gm_invited_by_id AS invited_by_id,
                     UNIX_TIMESTAMP(gm_joined) AS requested_utc
@@ -1462,17 +1464,23 @@ final class PeepSoGroupRepository
             $limit,
             $offset
         ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
 
-        return $rows ?: [];
+        /** @var list<object{user_id: numeric-string, invited_by_id: numeric-string|null, requested_utc: numeric-string}> */
+        return is_array($wpdb->last_result) ? array_values($wpdb->last_result) : [];
     }
 
     /**
      * How many open requests or invitations one group has (the owner's
      * pending badge, F-272). Same filter as listPendingMembers().
      *
+     * Fail-closed: null when the read did not run.
+     *
      * @param self::PENDING_* $status
      */
-    public static function countPendingMembers(int $groupId, string $status): int
+    public static function countPendingMembers(int $groupId, string $status): ?int
     {
         if ($groupId <= 0 || ($status !== self::PENDING_REQUEST && $status !== self::PENDING_INVITE)) {
             return 0;
@@ -1481,14 +1489,18 @@ final class PeepSoGroupRepository
         global $wpdb;
         $members = self::membersTable();
 
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*)
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT COUNT(*) AS n
                FROM {$members}
               WHERE gm_group_id    = %d
                 AND gm_user_status = %s",
             $groupId,
             $status
         ));
+        if ($ok === false || (string) $wpdb->last_error !== '' || !isset($wpdb->last_result[0]->n)) {
+            return null;
+        }
+        return (int) $wpdb->last_result[0]->n;
     }
 
     /**
@@ -1496,9 +1508,11 @@ final class PeepSoGroupRepository
      * newest first (F-272 "my invites" — the only way a secret group's
      * invitee finds it). Bounded: LIMIT ≤ 100, gm_id tiebreak.
      *
-     * @return list<object{group_id: numeric-string, invited_by_id: numeric-string|null, invited_utc: numeric-string}>
+     * Fail-closed: null when the read did not run.
+     *
+     * @return list<object{group_id: numeric-string, invited_by_id: numeric-string|null, invited_utc: numeric-string}>|null
      */
-    public static function listUserPendingInvites(int $userId, int $offset, int $limit): array
+    public static function listUserPendingInvites(int $userId, int $offset, int $limit): ?array
     {
         if ($userId <= 0 || $limit <= 0) {
             return [];
@@ -1509,8 +1523,7 @@ final class PeepSoGroupRepository
         global $wpdb;
         $members = self::membersTable();
 
-        /** @var list<object{group_id: numeric-string, invited_by_id: numeric-string|null, invited_utc: numeric-string}>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare(
+        $ok = $wpdb->query($wpdb->prepare(
             "SELECT gm_group_id      AS group_id,
                     gm_invited_by_id AS invited_by_id,
                     UNIX_TIMESTAMP(gm_joined) AS invited_utc
@@ -1524,8 +1537,12 @@ final class PeepSoGroupRepository
             $limit,
             $offset
         ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
 
-        return $rows ?: [];
+        /** @var list<object{group_id: numeric-string, invited_by_id: numeric-string|null, invited_utc: numeric-string}> */
+        return is_array($wpdb->last_result) ? array_values($wpdb->last_result) : [];
     }
 
     /**

@@ -199,12 +199,26 @@ final class PeepSoGroupWriter
     //
     // PeepSo's own states: `pending_admin` = the user asked to join a
     // closed group and waits on an owner/manager; `pending_user` = an
-    // owner/manager invited the user, who has not answered yet. Each
-    // transition below acts ONLY when the row is in the state it expects,
-    // so none of them can touch a `banned` row (a ban must survive every
-    // door — see leave()) or overwrite a membership a concurrent request
-    // already changed. Authorization (who may approve/invite) and the
-    // eligibility gates belong to the caller; this is the write door.
+    // owner/manager invited the user, who has not answered yet.
+    //
+    // Every transition is ONE conditional statement
+    // (PeepSoGroupMembershipWriteRepository) that names the state it expects
+    // in its WHERE clause, so it is decided by the row's state AT WRITE TIME:
+    //   - a banned row is never touched, even by a ban that lands between our
+    //     read and our write (the F-266 class of bug);
+    //   - a raced transition (approve vs cancel, accept vs revoke) is a
+    //     conflict, never a silent overwrite;
+    //   - a pending row is created as pending in one INSERT — never "insert a
+    //     full member, then demote it", which left a full member behind when
+    //     the second step failed (an approval bypass).
+    // A failed statement is OUTCOME_UNAVAILABLE, never "nothing to change".
+    //
+    // The read before each write only picks the right outcome for the common
+    // case (banned → refused; wrong state → conflict) without writing; the
+    // write's own WHERE clause is what enforces the rule.
+    //
+    // Authorization (who may approve/invite) and the eligibility gates belong
+    // to the caller; these doors check row state only.
     //
     // Removing a pending row fires NO leave hook: the user never was a
     // member, and `peepso_action_group_user_delete` subscribers treat it as
@@ -213,11 +227,11 @@ final class PeepSoGroupWriter
 
     /** The transition happened. */
     public const OUTCOME_DONE = 'done';
-    /** The row is in another, non-banned state (already member / pending / none). */
+    /** The row is (or became) another, non-banned state. */
     public const OUTCOME_CONFLICT = 'conflict';
     /** The row is banned (or blocks invitations): never changed here. */
     public const OUTCOME_REFUSED = 'refused';
-    /** PeepSo missing, invalid ids, or the membership read failed. */
+    /** PeepSo missing, invalid ids, or a read or write that failed. */
     public const OUTCOME_UNAVAILABLE = 'unavailable';
 
     /**
@@ -227,21 +241,7 @@ final class PeepSoGroupWriter
      */
     public static function requestJoin(int $userId, int $groupId): string
     {
-        [$stop, $status] = self::pendingPrecheck($userId, $groupId, __FUNCTION__);
-        if ($stop !== null) {
-            return $stop;
-        }
-        if ($status !== null) {
-            return self::OUTCOME_CONFLICT;
-        }
-
-        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
-            return self::OUTCOME_UNAVAILABLE;
-        }
-        $member = new \PeepSoGroupUser($groupId, $userId);
-        $member->member_join();
-        $member->member_modify('pending_admin');
-        return self::OUTCOME_DONE;
+        return self::createPending($userId, $groupId, 'pending_admin', null, __FUNCTION__);
     }
 
     /**
@@ -285,24 +285,7 @@ final class PeepSoGroupWriter
         if ($inviterId <= 0) {
             return self::OUTCOME_UNAVAILABLE;
         }
-        [$stop, $status] = self::pendingPrecheck($userId, $groupId, __FUNCTION__);
-        if ($stop !== null) {
-            return $stop;
-        }
-        if ($status === 'block_invites') {
-            return self::OUTCOME_REFUSED;
-        }
-        if ($status !== null) {
-            return self::OUTCOME_CONFLICT;
-        }
-
-        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
-            return self::OUTCOME_UNAVAILABLE;
-        }
-        $member = new \PeepSoGroupUser($groupId, $userId);
-        $member->member_join();
-        $member->member_modify('pending_user', $inviterId);
-        return self::OUTCOME_DONE;
+        return self::createPending($userId, $groupId, 'pending_user', $inviterId, __FUNCTION__);
     }
 
     /**
@@ -347,7 +330,7 @@ final class PeepSoGroupWriter
         if ($userId <= 0 || $groupId <= 0) {
             return [self::OUTCOME_UNAVAILABLE, null];
         }
-        if (!class_exists('PeepSoGroupUser') || !class_exists('PeepSoGroupUsers')) {
+        if (!class_exists('PeepSoGroupUsers')) {
             \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_' . $op);
             return [self::OUTCOME_UNAVAILABLE, null];
         }
@@ -367,44 +350,83 @@ final class PeepSoGroupWriter
     }
 
     /** @return self::OUTCOME_* */
-    private static function removePending(int $userId, int $groupId, string $expected, string $op): string
+    private static function createPending(int $userId, int $groupId, string $status, ?int $inviterId, string $op): string
     {
-        [$stop, $status] = self::pendingPrecheck($userId, $groupId, $op);
+        [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
         if ($stop !== null) {
             return $stop;
         }
-        if ($status !== $expected) {
+        if ($current === 'block_invites' && $status === 'pending_user') {
+            return self::OUTCOME_REFUSED;
+        }
+        if ($current !== null) {
             return self::OUTCOME_CONFLICT;
         }
 
-        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
+        $affected = \BCC\Core\Repositories\PeepSoGroupMembershipWriteRepository::insertPendingIfAbsent($userId, $groupId, $status, $inviterId);
+        if ($affected === false) {
+            self::logWriteFailure($op, $userId, $groupId);
             return self::OUTCOME_UNAVAILABLE;
         }
-        // member_leave() refreshes the member count itself.
-        (new \PeepSoGroupUser($groupId, $userId))->member_leave();
-        return self::OUTCOME_DONE;
+        // 0 = a row appeared between the read and the insert (possibly a ban).
+        return $affected === 1 ? self::OUTCOME_DONE : self::OUTCOME_CONFLICT;
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function removePending(int $userId, int $groupId, string $expected, string $op): string
+    {
+        [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($current !== $expected) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        $affected = \BCC\Core\Repositories\PeepSoGroupMembershipWriteRepository::deletePending($userId, $groupId, $expected);
+        if ($affected === false) {
+            self::logWriteFailure($op, $userId, $groupId);
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        // A pending row is not counted as a member: no count refresh needed.
+        return $affected === 1 ? self::OUTCOME_DONE : self::OUTCOME_CONFLICT;
     }
 
     /** @return self::OUTCOME_* */
     private static function promotePending(int $userId, int $groupId, string $expected, ?int $actorId, string $op): string
     {
-        [$stop, $status] = self::pendingPrecheck($userId, $groupId, $op);
+        [$stop, $current] = self::pendingPrecheck($userId, $groupId, $op);
         if ($stop !== null) {
             return $stop;
         }
-        if ($status !== $expected) {
+        if ($current !== $expected) {
             return self::OUTCOME_CONFLICT;
         }
 
-        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
+        $affected = \BCC\Core\Repositories\PeepSoGroupMembershipWriteRepository::promotePending($userId, $groupId, $expected, $actorId);
+        if ($affected === false) {
+            self::logWriteFailure($op, $userId, $groupId);
             return self::OUTCOME_UNAVAILABLE;
         }
-        // member_modify() refreshes the member count itself.
-        (new \PeepSoGroupUser($groupId, $userId))->member_modify('member', null, $actorId);
+        if ($affected !== 1) {
+            return self::OUTCOME_CONFLICT;
+        }
 
-        // The user is now an active member: same hook as join().
+        // Only after the row really became a member: refresh PeepSo's
+        // member-count meta (as the AJAX layer does) and fire the join hook.
+        if (class_exists('PeepSoGroupUsers')) {
+            (new \PeepSoGroupUsers($groupId))->update_members_count();
+        }
         do_action('peepso_action_group_user_join', $groupId, $userId);
         return self::OUTCOME_DONE;
+    }
+
+    private static function logWriteFailure(string $op, int $userId, int $groupId): void
+    {
+        \BCC\Core\Log\Logger::error('[bcc-core] group ' . $op . ' failed — membership write did not run', [
+            'user_id'  => $userId,
+            'group_id' => $groupId,
+        ]);
     }
 
     /**

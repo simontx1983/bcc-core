@@ -41,6 +41,36 @@ namespace BCC\Core\Repositories {
     }
 }
 
+namespace BCC\Core\Repositories {
+    if (!class_exists(PeepSoGroupMembershipWriteRepository::class, false)) {
+        /**
+         * Fixture keys: insert_result / promote_result / delete_result
+         * (int 0|1, or false = the statement failed; default 1). Calls are
+         * recorded in writes[] as [method, ...args].
+         */
+        class PeepSoGroupMembershipWriteRepository
+        {
+            public static function insertPendingIfAbsent(int $userId, int $groupId, string $status, ?int $invitedBy): int|false
+            {
+                $GLOBALS['__bcc_gw_fixture']['writes'][] = ['insert', $userId, $groupId, $status, $invitedBy];
+                return $GLOBALS['__bcc_gw_fixture']['insert_result'] ?? 1;
+            }
+
+            public static function promotePending(int $userId, int $groupId, string $fromStatus, ?int $acceptedBy): int|false
+            {
+                $GLOBALS['__bcc_gw_fixture']['writes'][] = ['promote', $userId, $groupId, $fromStatus, $acceptedBy];
+                return $GLOBALS['__bcc_gw_fixture']['promote_result'] ?? 1;
+            }
+
+            public static function deletePending(int $userId, int $groupId, string $status): int|false
+            {
+                $GLOBALS['__bcc_gw_fixture']['writes'][] = ['delete', $userId, $groupId, $status];
+                return $GLOBALS['__bcc_gw_fixture']['delete_result'] ?? 1;
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Log {
     if (!class_exists(Logger::class, false)) {
         class Logger

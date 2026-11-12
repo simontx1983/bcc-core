@@ -14,11 +14,15 @@ use PHPUnit\Framework\TestCase;
 /**
  * F-272: join requests (`pending_admin`) and invitations (`pending_user`).
  *
- * Every transition acts only on the row state it expects. That keeps a
- * `banned` row untouchable through these doors (a ban must survive them all,
- * as it survives leave()) and makes a raced transition a conflict, never a
- * silent overwrite. A membership read that did not run refuses: it must not
- * read as "no row" while a banned row may be there.
+ * Every transition is one conditional write that names the state it
+ * expects, so it is decided by the row's state at WRITE time:
+ *   - a pending row is created as pending in one statement, never "insert a
+ *     full member, then demote" (that left a full member behind when the
+ *     second step failed — an approval bypass);
+ *   - a ban that lands between the read and the write is not overwritten
+ *     (the write matches 0 rows → conflict);
+ *   - a failed write is UNAVAILABLE, never success, and the join hook fires
+ *     only after a promotion that really happened.
  *
  * Same isolation as PeepSoGroupWriterLeaveGuardTest (stubs in a subprocess).
  */
@@ -34,6 +38,7 @@ final class PeepSoGroupWriterPendingTest extends TestCase
         $GLOBALS['__bcc_gw_fixture'] = [
             'status'              => null,
             'read_failed'         => false,
+            'writes'              => [],
             'member_join_calls'   => [],
             'member_leave_calls'  => [],
             'member_modify_calls' => [],
@@ -51,46 +56,53 @@ final class PeepSoGroupWriterPendingTest extends TestCase
 
     private static function assertNothingWritten(): void
     {
-        self::assertSame([], self::fx()['member_join_calls']);
-        self::assertSame([], self::fx()['member_leave_calls']);
-        self::assertSame([], self::fx()['member_modify_calls']);
+        self::assertSame([], self::fx()['writes']);
         self::assertSame([], self::fx()['actions']);
+        self::assertSame([], self::fx()['count_updates']);
+        self::assertNoPeepSoMemberCalls();
+    }
+
+    /** No door may go through PeepSo's member_join (it inserts a FULL member). */
+    private static function assertNoPeepSoMemberCalls(): void
+    {
+        self::assertSame([], self::fx()['member_join_calls']);
+        self::assertSame([], self::fx()['member_modify_calls']);
+        self::assertSame([], self::fx()['member_leave_calls']);
     }
 
     // ── happy paths ──────────────────────────────────────────────────
 
-    public function testRequestJoinCreatesAPendingAdminRow(): void
+    public function testRequestJoinInsertsAPendingAdminRowInOneStatement(): void
     {
         self::assertSame(PeepSoGroupWriter::OUTCOME_DONE, PeepSoGroupWriter::requestJoin(7, 42));
-        self::assertSame([[42, 7]], self::fx()['member_join_calls']);
-        self::assertSame([[42, 7, 'pending_admin', null, null]], self::fx()['member_modify_calls']);
+        self::assertSame([['insert', 7, 42, 'pending_admin', null]], self::fx()['writes']);
         self::assertSame([], self::fx()['actions'], 'a request is not a join: no join hook');
+        self::assertNoPeepSoMemberCalls();
     }
 
-    public function testInviteCreatesAPendingUserRowRecordingTheInviter(): void
+    public function testInviteInsertsAPendingUserRowRecordingTheInviter(): void
     {
         self::assertSame(PeepSoGroupWriter::OUTCOME_DONE, PeepSoGroupWriter::invite(7, 42, 3));
-        self::assertSame([[42, 7]], self::fx()['member_join_calls']);
-        self::assertSame([[42, 7, 'pending_user', 3, null]], self::fx()['member_modify_calls']);
-        self::assertSame([], self::fx()['actions']);
+        self::assertSame([['insert', 7, 42, 'pending_user', 3]], self::fx()['writes']);
+        self::assertNoPeepSoMemberCalls();
     }
 
-    public function testApproveMakesTheRequesterAMemberAndFiresTheJoinHook(): void
+    public function testApprovePromotesRefreshesTheCountAndFiresTheJoinHook(): void
     {
         $GLOBALS['__bcc_gw_fixture']['status'] = 'pending_admin';
 
         self::assertSame(PeepSoGroupWriter::OUTCOME_DONE, PeepSoGroupWriter::approveJoinRequest(7, 42, 3));
-        self::assertSame([[42, 7, 'member', null, 3]], self::fx()['member_modify_calls']);
+        self::assertSame([['promote', 7, 42, 'pending_admin', 3]], self::fx()['writes']);
+        self::assertSame([42], self::fx()['count_updates']);
         self::assertSame([['peepso_action_group_user_join', 42, 7]], self::fx()['actions']);
-        self::assertSame([], self::fx()['member_join_calls']);
     }
 
-    public function testAcceptMakesTheInviteeAMemberAndFiresTheJoinHook(): void
+    public function testAcceptPromotesAndFiresTheJoinHook(): void
     {
         $GLOBALS['__bcc_gw_fixture']['status'] = 'pending_user';
 
         self::assertSame(PeepSoGroupWriter::OUTCOME_DONE, PeepSoGroupWriter::acceptInvite(7, 42));
-        self::assertSame([[42, 7, 'member', null, null]], self::fx()['member_modify_calls']);
+        self::assertSame([['promote', 7, 42, 'pending_user', null]], self::fx()['writes']);
         self::assertSame([['peepso_action_group_user_join', 42, 7]], self::fx()['actions']);
     }
 
@@ -106,17 +118,103 @@ final class PeepSoGroupWriterPendingTest extends TestCase
     }
 
     #[DataProvider('removals')]
-    public function testRemovingAPendingRowDeletesItWithoutTheLeaveHook(string $method, string $expected): void
+    public function testRemovingAPendingRowIsAConditionalDeleteWithoutTheLeaveHook(string $method, string $expected): void
     {
         $GLOBALS['__bcc_gw_fixture']['status'] = $expected;
 
         self::assertSame(PeepSoGroupWriter::OUTCOME_DONE, PeepSoGroupWriter::$method(7, 42));
-        self::assertSame([[42, 7]], self::fx()['member_leave_calls']);
+        self::assertSame([['delete', 7, 42, $expected]], self::fx()['writes']);
         // The user never was a member; the delete hook means "removed".
+        self::assertSame([], self::fx()['actions']);
+        self::assertNoPeepSoMemberCalls();
+    }
+
+    // ── finding 1: no full-member path, even when the write fails ────
+
+    /** @return array<string, array{string, list<int>}> */
+    public static function creations(): array
+    {
+        return [
+            'requestJoin' => ['requestJoin', [7, 42]],
+            'invite'      => ['invite', [7, 42, 3]],
+        ];
+    }
+
+    /** @param list<int> $args */
+    #[DataProvider('creations')]
+    public function testAFailedInsertIsUnavailableAndNeverLeavesAFullMember(string $method, array $args): void
+    {
+        $GLOBALS['__bcc_gw_fixture']['insert_result'] = false;
+
+        self::assertSame(PeepSoGroupWriter::OUTCOME_UNAVAILABLE, PeepSoGroupWriter::$method(...$args));
+        // The only write attempted was the pending insert: no member_join
+        // (a full member) was ever created to be "demoted" afterwards.
+        self::assertCount(1, self::fx()['writes']);
+        self::assertSame('insert', self::fx()['writes'][0][0]);
+        self::assertNoPeepSoMemberCalls();
         self::assertSame([], self::fx()['actions']);
     }
 
-    // ── a ban is never touched ───────────────────────────────────────
+    // ── finding 2: a failed write is never success; hook only after it ─
+
+    /** @return array<string, array{string, list<int>, string, string}> */
+    public static function failedWrites(): array
+    {
+        return [
+            'approve, promote fails' => ['approveJoinRequest', [7, 42, 3], 'pending_admin', 'promote_result'],
+            'accept, promote fails'  => ['acceptInvite', [7, 42], 'pending_user', 'promote_result'],
+            'cancel, delete fails'   => ['cancelJoinRequest', [7, 42], 'pending_admin', 'delete_result'],
+            'deny, delete fails'     => ['denyJoinRequest', [7, 42], 'pending_admin', 'delete_result'],
+            'revoke, delete fails'   => ['revokeInvite', [7, 42], 'pending_user', 'delete_result'],
+            'decline, delete fails'  => ['declineInvite', [7, 42], 'pending_user', 'delete_result'],
+        ];
+    }
+
+    /** @param list<int> $args */
+    #[DataProvider('failedWrites')]
+    public function testAFailedWriteIsUnavailableAndFiresNothing(string $method, array $args, string $status, string $resultKey): void
+    {
+        $GLOBALS['__bcc_gw_fixture']['status']   = $status;
+        $GLOBALS['__bcc_gw_fixture'][$resultKey] = false;
+
+        self::assertSame(PeepSoGroupWriter::OUTCOME_UNAVAILABLE, PeepSoGroupWriter::$method(...$args));
+        self::assertSame([], self::fx()['actions'], 'no join hook for a promotion that did not happen');
+        self::assertSame([], self::fx()['count_updates']);
+    }
+
+    // ── finding 3: the state at WRITE time decides (race controls) ────
+
+    /** @return array<string, array{string, list<int>, ?string, string}> */
+    public static function racedWrites(): array
+    {
+        return [
+            // read: no row; by the insert, a row exists (e.g. a ban landed)
+            'request vs concurrent ban' => ['requestJoin', [7, 42], null, 'insert_result'],
+            'invite vs concurrent row'  => ['invite', [7, 42, 3], null, 'insert_result'],
+            // read: pending; by the write, the row changed (banned, cancelled, revoked)
+            'approve vs concurrent ban'    => ['approveJoinRequest', [7, 42, 3], 'pending_admin', 'promote_result'],
+            'accept vs concurrent revoke'  => ['acceptInvite', [7, 42], 'pending_user', 'promote_result'],
+            'deny vs concurrent ban'       => ['denyJoinRequest', [7, 42], 'pending_admin', 'delete_result'],
+            'decline vs concurrent ban'    => ['declineInvite', [7, 42], 'pending_user', 'delete_result'],
+            'cancel vs concurrent approve' => ['cancelJoinRequest', [7, 42], 'pending_admin', 'delete_result'],
+            'revoke vs concurrent accept'  => ['revokeInvite', [7, 42], 'pending_user', 'delete_result'],
+        ];
+    }
+
+    /** @param list<int> $args */
+    #[DataProvider('racedWrites')]
+    public function testAWriteThatMatchesNoRowIsAConflictNotSuccess(string $method, array $args, ?string $status, string $resultKey): void
+    {
+        $GLOBALS['__bcc_gw_fixture']['status']   = $status;
+        $GLOBALS['__bcc_gw_fixture'][$resultKey] = 0;
+
+        self::assertSame(PeepSoGroupWriter::OUTCOME_CONFLICT, PeepSoGroupWriter::$method(...$args));
+        self::assertSame([], self::fx()['actions']);
+        self::assertSame([], self::fx()['count_updates']);
+        self::assertNoPeepSoMemberCalls();
+    }
+
+    // ── a ban seen at read time is never written ─────────────────────
 
     /** @return array<string, array{string, list<int>}> */
     public static function everyTransition(): array
@@ -154,7 +252,7 @@ final class PeepSoGroupWriterPendingTest extends TestCase
         self::assertNothingWritten();
     }
 
-    // ── wrong state = conflict, nothing written ──────────────────────
+    // ── wrong state at read time = conflict, nothing written ─────────
 
     /** @return array<string, array{string, list<int>, ?string}> */
     public static function wrongStates(): array
