@@ -610,34 +610,25 @@ final class PeepSoActivityRepository
             // meta_value is varchar — compare against the literal string.
             $where[] = "(gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')";
 
-            // F-23: the group's CURRENT privacy, retroactively. 'public_all'
-            // was the author's choice while the group was open; once the
-            // group turns closed or secret, ALL its posts leave every read
-            // behind this gate (the global and hot feeds), for everyone,
-            // members included. Members still see them in the group's own
-            // feed ($onlyForGroupId path, which never reaches here).
-            //
-            // Per-post NOT EXISTS, same shape and reason as the restricted-
-            // group clause below: a post with two peepso_group_id rows is
-            // dropped if EITHER group is non-open.
+            // F-23 + Gate 12: the shared group-syndication rule. A post in
+            // a group that is closed or secret NOW drops from every read
+            // behind this gate (global / hot / tag), for everyone, unless it
+            // was made public_all while the group was ALREADY non-open (a
+            // deliberate syndication: "public_all wins"). No record = made
+            // while open = dropped. Members still see everything in the
+            // group's own feed ($onlyForGroupId path, never here).
             //
             // FAIL CLOSED: the strict lookup returns null when it cannot
-            // answer (query error, or more non-open groups than the cap).
-            // Then every group-tagged post is dropped from this read rather
-            // than trusting a short list.
-            $nonOpenGroupIds = PeepSoGroupRepository::getNonOpenGroupIdsStrict();
-            if ($nonOpenGroupIds === null) {
-                $where[] = 'NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' no_pm'
-                         . ' WHERE no_pm.post_id = p.ID'
-                         . ' AND no_pm.meta_key = \'peepso_group_id\')';
-            } elseif ($nonOpenGroupIds !== []) {
-                $noPlaceholders = implode(',', array_fill(0, count($nonOpenGroupIds), '%s'));
-                $where[]        = 'NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' no_pm'
-                                . ' WHERE no_pm.post_id = p.ID'
-                                . ' AND no_pm.meta_key = \'peepso_group_id\''
-                                . ' AND no_pm.meta_value IN (' . $noPlaceholders . '))';
-                foreach ($nonOpenGroupIds as $gid) {
-                    $params[] = (string) (int) $gid;
+            // answer (query error, or over its cap); the predicate then
+            // admits only posts recorded as made while non-open.
+            $syndication = \BCC\Core\Feed\GroupSyndicationGate::sqlPredicate(
+                $wpdb->postmeta,
+                PeepSoGroupRepository::getNonOpenGroupIdsStrict()
+            );
+            if ($syndication['where'] !== '') {
+                $where[] = $syndication['where'];
+                foreach ($syndication['params'] as $param) {
+                    $params[] = $param;
                 }
             }
         }

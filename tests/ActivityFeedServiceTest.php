@@ -102,8 +102,48 @@ namespace BCC\Core\Feed\Tests {
             self::assertFalse(self::isVisibleGlobally(123));
         }
 
-        // ── F-23: the group's CURRENT privacy, retroactively ────────────
+        // ── F-23 (option B) + Gate 12 ───────────────────────────────────
+        // A post made while the group was OPEN (or with no record) drops
+        // once the group is closed or secret; one made public_all while the
+        // group was ALREADY non-open keeps syndicating.
 
+        public function testPublicAllMadeWhileNonOpenKeepsSyndicating(): void
+        {
+            \bcc_test_seed_nonopen_groups([7]);
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'                  => '7',
+                '_bcc_post_visibility'             => 'public_all',
+                '_bcc_post_group_privacy_at_post'  => '1',
+            ];
+            self::assertTrue(self::isVisibleGlobally(123));
+        }
+
+        public function testPublicAllMadeWhileOpenDropsOnceTheGroupCloses(): void
+        {
+            \bcc_test_seed_nonopen_groups([7]);
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'                  => '7',
+                '_bcc_post_visibility'             => 'public_all',
+                '_bcc_post_group_privacy_at_post'  => '0',
+            ];
+            self::assertFalse(self::isVisibleGlobally(123));
+        }
+
+        public function testMadeWhileNonOpenSurvivesAFailedLookup(): void
+        {
+            // Deliberate non-open syndication is allowed whatever the
+            // group's state is now, so it needs no lookup at all.
+            \BccTestPersistentCache::reset();
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'                  => '7',
+                '_bcc_post_visibility'             => 'public_all',
+                '_bcc_post_group_privacy_at_post'  => '2',
+            ];
+            self::assertTrue(self::isVisibleGlobally(123));
+        }
+
+        // No record (posts written before the record existed): treated
+        // as made while open, so it drops.
         public function testPublicAllPostInANowClosedOrSecretGroupIsHidden(): void
         {
             \bcc_test_seed_nonopen_groups([7]);

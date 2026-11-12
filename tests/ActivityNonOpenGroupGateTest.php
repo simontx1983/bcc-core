@@ -13,10 +13,12 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
     require_once __DIR__ . '/Stubs/nonopen-groups-seed.php';
 
     /**
-     * F-23: once a group turns closed or secret, ALL its posts leave every
-     * read behind the global-feed gate (the global and hot feeds), for
-     * everyone, retroactively, even posts marked 'public_all' while the
-     * group was open. The group's own feed is unchanged.
+     * F-23 (option B) + Gate 12: once a group turns closed or secret, the
+     * posts made while it was OPEN (or with no record) leave every read
+     * behind the global-feed gate, for everyone. A post made public_all
+     * while the group was ALREADY non-open keeps syndicating ("public_all
+     * wins"). The group's own feed is unchanged. The rule itself is
+     * GroupSyndicationGate; this pins that the repository applies it.
      *
      * Asserts the STATEMENT (the $wpdb double renders SQL; it cannot
      * filter rows): which predicate reaches SQL on which path.
@@ -24,11 +26,15 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
     #[CoversMethod(PeepSoActivityRepository::class, 'getActivities')]
     final class ActivityNonOpenGroupGateTest extends TestCase
     {
-        private const NON_OPEN_7_9 = "NOT EXISTS (SELECT 1 FROM wp_postmeta no_pm WHERE no_pm.post_id = p.ID"
-            . " AND no_pm.meta_key = 'peepso_group_id' AND no_pm.meta_value IN ('7','9'))";
+        /** Gate 12 escape: a post recorded as made while its group was already non-open. */
+        private const MADE_WHILE_NON_OPEN = "EXISTS (SELECT 1 FROM wp_postmeta gsg_at WHERE gsg_at.post_id = p.ID"
+            . " AND gsg_at.meta_key = '_bcc_post_group_privacy_at_post' AND gsg_at.meta_value IN ('1','2'))";
 
-        private const ANY_GROUP = "NOT EXISTS (SELECT 1 FROM wp_postmeta no_pm WHERE no_pm.post_id = p.ID"
-            . " AND no_pm.meta_key = 'peepso_group_id')";
+        private const NON_OPEN_7_9 = "(NOT EXISTS (SELECT 1 FROM wp_postmeta gsg_g WHERE gsg_g.post_id = p.ID"
+            . " AND gsg_g.meta_key = 'peepso_group_id' AND gsg_g.meta_value IN ('7','9')) OR " . self::MADE_WHILE_NON_OPEN . ")";
+
+        private const ANY_GROUP = "(NOT EXISTS (SELECT 1 FROM wp_postmeta gsg_g WHERE gsg_g.post_id = p.ID"
+            . " AND gsg_g.meta_key = 'peepso_group_id') OR " . self::MADE_WHILE_NON_OPEN . ")";
 
         /** @var mixed */
         private $priorWpdb;
@@ -73,7 +79,7 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
 
             PeepSoActivityRepository::getActivities(null, null, null, null, 10);
 
-            self::assertStringNotContainsString('no_pm', self::sql());
+            self::assertStringNotContainsString('gsg_', self::sql());
         }
 
         public function testAFailedLookupDropsEveryGroupTaggedPost(): void
@@ -85,7 +91,7 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
             PeepSoActivityRepository::getActivities(null, null, null, null, 10);
 
             self::assertStringContainsString(self::ANY_GROUP, self::sql());
-            self::assertStringNotContainsString('no_pm.meta_value IN', self::sql());
+            self::assertStringNotContainsString('gsg_g.meta_value IN', self::sql());
         }
 
         public function testTheGroupsOwnFeedIsUnchanged(): void
@@ -95,7 +101,7 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
 
             PeepSoActivityRepository::getActivities(null, null, null, null, 10, null, null, 7);
 
-            self::assertStringNotContainsString('no_pm', self::sql());
+            self::assertStringNotContainsString('gsg_', self::sql());
         }
 
         public function testARelaxedViewerAccessReadKeepsItsOwnRule(): void
@@ -113,7 +119,7 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
                 viewerId: 5
             );
 
-            self::assertStringNotContainsString('no_pm', self::sql());
+            self::assertStringNotContainsString('gsg_', self::sql());
         }
     }
 

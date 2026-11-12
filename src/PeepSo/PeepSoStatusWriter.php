@@ -172,6 +172,18 @@ final class PeepSoStatusWriter
 
         update_post_meta($postId, 'peepso_group_id', (string) $groupId);
         update_post_meta($postId, '_bcc_post_visibility', $visibility);
+        // F-23 / Gate 12: record the group's privacy at the moment the
+        // visibility is stamped, so a public_all post made while the group
+        // was ALREADY closed or secret keeps syndicating, while one made
+        // while it was open drops if the group later closes
+        // (\BCC\Core\Feed\GroupSyndicationGate). An unreadable privacy is
+        // recorded as open ('0'), the direction that drops rather than
+        // leaks.
+        $privacy = get_post_meta($groupId, 'peepso_group_privacy', true);
+        $privacy = is_scalar($privacy) && in_array((string) $privacy, ['0', '1', '2'], true)
+            ? (string) $privacy
+            : '0';
+        update_post_meta($postId, \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST, $privacy);
         do_action('peepso_groups_new_post', $groupId, $postId);
     }
 
