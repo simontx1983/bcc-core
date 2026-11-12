@@ -374,10 +374,11 @@ final class Throttle
             // A /24 covers 256 IPs → one bucket per household/office, preventing
             // unbounded DB growth from rotating IPs (mobile, VPN, Tor).
             //
-            // CROSS-PLUGIN BOUNDARY: bcc-trust's IpResolver knows about
-            // Cloudflare / trusted-proxy / X-Forwarded-For headers and
-            // produces a more accurate client IP than bcc-core's local
-            // fallback. Today bcc-trust is always present alongside
+            // CROSS-PLUGIN BOUNDARY: bcc-trust's IpResolver is the one IP
+            // source every bcc-trust consumer (votes, fingerprints, audit,
+            // RateLimiter) uses, so anonymous throttle keys follow it too.
+            // It honours the Cloudflare opt-in, and delegates back to
+            // clientIp() here when trusted proxies are declared (F-125). Today bcc-trust is always present alongside
             // bcc-core in production, but this class_exists() guard is
             // intentional: it preserves the architectural seam so
             // bcc-core can theoretically run standalone (test fixtures,
@@ -584,6 +585,47 @@ final class Throttle
     private const CF_RANGES_TTL       = 604800; // 7 days.
 
     /**
+     * The operator-declared trusted proxies (F-125): BCC_TRUSTED_PROXY_IPS
+     * (comma-separated exact IPs), else the bcc_trusted_proxy_ips filter (an
+     * array of IP literals; anything else is ignored, fail-closed). Empty when
+     * none is declared — the production default.
+     *
+     * Public so bcc-trust's IpResolver resolves through THIS resolver when a
+     * proxy is declared, instead of ignoring the setting (F-125).
+     *
+     * @return list<string>
+     */
+    public static function trustedProxies(): array
+    {
+        if (defined('BCC_TRUSTED_PROXY_IPS') && BCC_TRUSTED_PROXY_IPS !== '') {
+            return array_map('trim', explode(',', (string) BCC_TRUSTED_PROXY_IPS));
+        }
+
+        /** @var mixed $filtered */
+        $filtered = function_exists('apply_filters') ? apply_filters('bcc_trusted_proxy_ips', null) : null;
+        if (is_array($filtered) && !empty($filtered)) {
+            return array_values(array_filter(array_map(
+                static fn($v) => is_string($v) ? trim($v) : '',
+                $filtered
+            )));
+        }
+        return [];
+    }
+
+    /**
+     * The client IP as this resolver sees it (Modes 1–4: declared proxies,
+     * then the Cloudflare opt-in, then REMOTE_ADDR). 'invalid_remote' when
+     * REMOTE_ADDR is not a valid IP.
+     *
+     * Public for bcc-trust's IpResolver (F-125), which delegates here only
+     * when trustedProxies() is non-empty.
+     */
+    public static function clientIp(): string
+    {
+        return self::getClientIp();
+    }
+
+    /**
      * Extract the real client IP behind reverse proxies.
      *
      * Four modes, in order of preference:
@@ -609,10 +651,13 @@ final class Throttle
             return 'invalid_remote';
         }
 
-        // ── Mode 1: Explicit trusted proxy allowlist (constant) ─────────
-        if (defined('BCC_TRUSTED_PROXY_IPS') && BCC_TRUSTED_PROXY_IPS !== '') {
-            $trusted = array_map('trim', explode(',', BCC_TRUSTED_PROXY_IPS));
-
+        // ── Modes 1/2: declared trusted proxies (constant, else filter) ──
+        // See trustedProxies(). When an allowlist exists, a request from a
+        // listed proxy resolves through its X-Forwarded-For (right-walk);
+        // any other request is treated as direct. Either way Mode 3 is not
+        // consulted, exactly as before.
+        $trusted = self::trustedProxies();
+        if ($trusted !== []) {
             if (self::isTrustedProxy($remoteAddr, $trusted)) {
                 $ip = self::extractProxyClientIp($trusted);
                 if ($ip !== null) {
@@ -622,29 +667,6 @@ final class Throttle
 
             // REMOTE_ADDR not in allowlist — treat request as direct.
             return $remoteAddr;
-        }
-
-        // ── Mode 2: Filter-based override ───────────────────────────────
-        // Allows host configs to inject a trusted-proxy list from wp-config
-        // or a mu-plugin without requiring the constant. Must be an array
-        // of IP literals; non-array returns are ignored (fail-closed).
-        /** @var mixed $filtered */
-        $filtered = apply_filters('bcc_trusted_proxy_ips', null);
-        if (is_array($filtered) && !empty($filtered)) {
-            $trusted = array_values(array_filter(array_map(
-                static fn($v) => is_string($v) ? trim($v) : '',
-                $filtered
-            )));
-
-            if (!empty($trusted)) {
-                if (self::isTrustedProxy($remoteAddr, $trusted)) {
-                    $ip = self::extractProxyClientIp($trusted);
-                    if ($ip !== null) {
-                        return $ip;
-                    }
-                }
-                return $remoteAddr;
-            }
         }
 
         // ── Mode 3: Cloudflare auto-detect (operator opt-in + validated) ─
