@@ -8,7 +8,10 @@
  *
  * Fixture shape ($GLOBALS['__bcc_gw_fixture']):
  *   status            ?string  what getMembershipStatus() reports for the row
+ *   read_failed       bool     getMembershipStatusOrFail() returns false
  *   member_join_calls list<array{int,int}>  [groupId, userId] per call
+ *   member_leave_calls list<array{int,int}> [groupId, userId] per call
+ *   member_modify_calls list<array>         [groupId, userId, role, invitedBy, acceptedBy]
  *   count_updates     list<int>             group ids whose counter refreshed
  *   actions           list<array>           do_action invocations
  *   warnings          list<string>          Logger::warning messages
@@ -77,6 +80,12 @@ namespace {
             public function member_leave(): void
             {
                 $GLOBALS['__bcc_gw_fixture']['member_leave_calls'][] = [$this->groupId, $this->userId];
+            }
+
+            public function member_modify(string $role, ?int $invitedBy = null, ?int $acceptedBy = null): bool
+            {
+                $GLOBALS['__bcc_gw_fixture']['member_modify_calls'][] = [$this->groupId, $this->userId, $role, $invitedBy, $acceptedBy];
+                return true;
             }
         }
     }

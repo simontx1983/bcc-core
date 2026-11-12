@@ -195,6 +195,218 @@ final class PeepSoGroupWriter
         return true;
     }
 
+    // ── Join requests and invitations (F-272) ───────────────────────────
+    //
+    // PeepSo's own states: `pending_admin` = the user asked to join a
+    // closed group and waits on an owner/manager; `pending_user` = an
+    // owner/manager invited the user, who has not answered yet. Each
+    // transition below acts ONLY when the row is in the state it expects,
+    // so none of them can touch a `banned` row (a ban must survive every
+    // door — see leave()) or overwrite a membership a concurrent request
+    // already changed. Authorization (who may approve/invite) and the
+    // eligibility gates belong to the caller; this is the write door.
+    //
+    // Removing a pending row fires NO leave hook: the user never was a
+    // member, and `peepso_action_group_user_delete` subscribers treat it as
+    // a removal. PeepSo's notification hooks (join_request_send, …) are not
+    // fired either — BCC dispatches its own notifications.
+
+    /** The transition happened. */
+    public const OUTCOME_DONE = 'done';
+    /** The row is in another, non-banned state (already member / pending / none). */
+    public const OUTCOME_CONFLICT = 'conflict';
+    /** The row is banned (or blocks invitations): never changed here. */
+    public const OUTCOME_REFUSED = 'refused';
+    /** PeepSo missing, invalid ids, or the membership read failed. */
+    public const OUTCOME_UNAVAILABLE = 'unavailable';
+
+    /**
+     * Ask to join a closed group: no row → `pending_admin`.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function requestJoin(int $userId, int $groupId): string
+    {
+        [$stop, $status] = self::pendingPrecheck($userId, $groupId, __FUNCTION__);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($status !== null) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        $member = new \PeepSoGroupUser($groupId, $userId);
+        $member->member_join();
+        $member->member_modify('pending_admin');
+        return self::OUTCOME_DONE;
+    }
+
+    /**
+     * Withdraw one's own request: `pending_admin` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function cancelJoinRequest(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_admin', __FUNCTION__);
+    }
+
+    /**
+     * An owner/manager approves a request: `pending_admin` → `member`.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function approveJoinRequest(int $userId, int $groupId, int $actorId): string
+    {
+        return self::promotePending($userId, $groupId, 'pending_admin', $actorId, __FUNCTION__);
+    }
+
+    /**
+     * An owner/manager denies a request: `pending_admin` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function denyJoinRequest(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_admin', __FUNCTION__);
+    }
+
+    /**
+     * Invite a user: no row → `pending_user`, recording the inviter.
+     * A user who already asked to join is a conflict: approve the request.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function invite(int $userId, int $groupId, int $inviterId): string
+    {
+        if ($inviterId <= 0) {
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        [$stop, $status] = self::pendingPrecheck($userId, $groupId, __FUNCTION__);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($status === 'block_invites') {
+            return self::OUTCOME_REFUSED;
+        }
+        if ($status !== null) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        $member = new \PeepSoGroupUser($groupId, $userId);
+        $member->member_join();
+        $member->member_modify('pending_user', $inviterId);
+        return self::OUTCOME_DONE;
+    }
+
+    /**
+     * Withdraw an invitation: `pending_user` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function revokeInvite(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_user', __FUNCTION__);
+    }
+
+    /**
+     * The invitee accepts: `pending_user` → `member`.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function acceptInvite(int $userId, int $groupId): string
+    {
+        return self::promotePending($userId, $groupId, 'pending_user', null, __FUNCTION__);
+    }
+
+    /**
+     * The invitee declines: `pending_user` → no row.
+     *
+     * @return self::OUTCOME_*
+     */
+    public static function declineInvite(int $userId, int $groupId): string
+    {
+        return self::removePending($userId, $groupId, 'pending_user', __FUNCTION__);
+    }
+
+    /**
+     * Shared guard: valid ids, PeepSo loaded, a membership read that ran,
+     * and no ban. Returns [stop, status]: stop is the OUTCOME_* the caller
+     * must return as is, or null — then status is the row's (null = no row).
+     *
+     * @return array{0: self::OUTCOME_*|null, 1: string|null}
+     */
+    private static function pendingPrecheck(int $userId, int $groupId, string $op): array
+    {
+        if ($userId <= 0 || $groupId <= 0) {
+            return [self::OUTCOME_UNAVAILABLE, null];
+        }
+        if (!class_exists('PeepSoGroupUser') || !class_exists('PeepSoGroupUsers')) {
+            \BCC\Core\Observability\DegradationMetrics::record('peepso_absence', 'group_writer_' . $op);
+            return [self::OUTCOME_UNAVAILABLE, null];
+        }
+
+        $status = \BCC\Core\Repositories\PeepSoGroupRepository::getMembershipStatusOrFail($userId, $groupId);
+        if ($status === false) {
+            \BCC\Core\Log\Logger::error('[bcc-core] group ' . $op . ' refused — membership read failed', [
+                'user_id'  => $userId,
+                'group_id' => $groupId,
+            ]);
+            return [self::OUTCOME_UNAVAILABLE, null];
+        }
+        if ($status === 'banned') {
+            return [self::OUTCOME_REFUSED, null];
+        }
+        return [null, $status];
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function removePending(int $userId, int $groupId, string $expected, string $op): string
+    {
+        [$stop, $status] = self::pendingPrecheck($userId, $groupId, $op);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($status !== $expected) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        // member_leave() refreshes the member count itself.
+        (new \PeepSoGroupUser($groupId, $userId))->member_leave();
+        return self::OUTCOME_DONE;
+    }
+
+    /** @return self::OUTCOME_* */
+    private static function promotePending(int $userId, int $groupId, string $expected, ?int $actorId, string $op): string
+    {
+        [$stop, $status] = self::pendingPrecheck($userId, $groupId, $op);
+        if ($stop !== null) {
+            return $stop;
+        }
+        if ($status !== $expected) {
+            return self::OUTCOME_CONFLICT;
+        }
+
+        if (!class_exists('PeepSoGroupUser')) { // narrows the type for PHPStan; pendingPrecheck() checked it
+            return self::OUTCOME_UNAVAILABLE;
+        }
+        // member_modify() refreshes the member count itself.
+        (new \PeepSoGroupUser($groupId, $userId))->member_modify('member', null, $actorId);
+
+        // The user is now an active member: same hook as join().
+        do_action('peepso_action_group_user_join', $groupId, $userId);
+        return self::OUTCOME_DONE;
+    }
+
     /**
      * Create a new plain peepso-group owned by $ownerId.
      *
