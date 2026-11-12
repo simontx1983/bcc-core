@@ -113,6 +113,12 @@ register_activation_hook(__FILE__, function () {
 // wp-config.php.
 \BCC\Core\Admin\EnvBanner::register();
 
+// ── PeepSo version lock (F-176) ─────────────────────────────────
+// Read-only: an admin notice + Site Health test when PeepSo core and an
+// active add-on differ in the segments PeepSo's version lock compares
+// (the add-on then silently registers nothing on web requests).
+\BCC\Core\Admin\PeepSoVersionLockNotice::register();
+
 // ── Shared admin look + menu layout ─────────────────────────────
 // AdminTheme: one light "paper" stylesheet + body.bcc-admin on every
 // ?page=bcc-* screen. AdminMenu: three top-level menus (Moderation /
