@@ -141,6 +141,24 @@ final class FeedItemNormalizer
     ];
 
     /**
+     * BCC modules whose activity rows must NOT count toward a member's
+     * activity streaks or contribution score (F-345, user decision
+     * 2026-11-12).
+     *
+     *   206 = review_reply (bcc-trust PeepSoActivityWriter): the reviewed
+     *         party's one public response to a review. Counting it would
+     *         let a page owner farm streaks by answering reviews.
+     *
+     * ⚠ Kept in lockstep with bcc-trust's module ids, like MODULE_TO_KIND.
+     * 206 is also deliberately ABSENT from MODULE_TO_KIND, which keeps it out
+     * of every feed (publicFeedModuleIds). Applied by
+     * PeepSoActivityRepository::aggregateByDay() / aggregateByModule().
+     *
+     * @var list<int>
+     */
+    public const NON_CONTRIBUTING_MODULE_IDS = [206];
+
+    /**
      * Numeric `act_module_id` values permitted to become PUBLIC feed
      * items. The single canonical allowlist enforced by BOTH the global
      * feed candidate query ({@see \BCC\Core\Repositories\PeepSoActivityRepository::getActivities()})
