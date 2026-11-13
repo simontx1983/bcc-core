@@ -380,6 +380,49 @@ final class PeepSoBlockRepository
     }
 
     /**
+     * One keyset page of ALL block rows, oldest first (F-261 backfill: every
+     * existing block pair must have its follows removed). Pass the last
+     * `id` seen as $afterId; an empty page means done.
+     *
+     * Bounded: LIMIT ≤ 500 per page, ordered by the blk_id primary key.
+     * FAIL-CLOSED: null when the read did not run, never [] — a backfill
+     * must not mistake a failure for "no more blocks".
+     *
+     * @return list<array{id: int, blocker: int, blocked: int}>|null
+     */
+    public static function listBlockPairsAfter(int $afterId, int $limit = 500): ?array
+    {
+        $afterId = max(0, $afterId);
+        $limit   = max(1, min(500, $limit));
+
+        global $wpdb;
+        $table = self::table();
+
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT blk_id, blk_user_id, blk_blocked_id FROM {$table}
+              WHERE blk_id > %d
+              ORDER BY blk_id ASC
+              LIMIT %d",
+            $afterId,
+            $limit
+        ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
+
+        $out = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            $id      = (int) ($row->blk_id ?? 0);
+            $blocker = (int) ($row->blk_user_id ?? 0);
+            $blocked = (int) ($row->blk_blocked_id ?? 0);
+            if ($id > 0 && $blocker > 0 && $blocked > 0) {
+                $out[] = ['id' => $id, 'blocker' => $blocker, 'blocked' => $blocked];
+            }
+        }
+        return $out;
+    }
+
+    /**
      * IDs of users $blockerId is blocking. Bounded by LIMIT to keep
      * the feed-exclusion merge predictable; users with > 500 blocks
      * are pathological and almost certainly an abuse signal.
