@@ -105,7 +105,32 @@ final class PeepSoStatusWriter
         // via the same accessor PeepSo's UI uses.
         $activity = \PeepSoActivity::get_instance();
 
-        $postId = $activity->add_post($authorId, $authorId, $stripped);
+        // F-291 — honour the member's DEFAULT POST AUDIENCE on their own
+        // wall. Without `act_access` in $extra, PeepSo falls back to the
+        // author's PROFILE accessibility (activity.php:232) and then
+        // OVERWRITES `peepso_last_used_post_privacy` with that value
+        // (:260), so the stored setting was not merely ignored — it was
+        // clobbered by the next post, and the member watched their own
+        // choice revert.
+        //
+        // Passing the stored value makes that overwrite a no-op, because
+        // what PeepSo writes back is what we just handed it. That is why
+        // this fix needs no second field and no migration.
+        //
+        // ⚠ GROUP POSTS ARE EXCLUDED (user decision, 2026-11-12). Inside
+        // a group the ROOM is the audience — the ratified §F-02 carve-out
+        // — and a personal default applied there would empty a Hall of
+        // the posts of any member who set "only me". Group creates keep
+        // PeepSo's existing behaviour exactly.
+        $extra = [];
+        if ($groupId <= 0) {
+            $audience = self::storedDefaultAudience($authorId);
+            if ($audience !== null) {
+                $extra['act_access'] = $audience;
+            }
+        }
+
+        $postId = $activity->add_post($authorId, $authorId, $stripped, $extra);
 
         if ($postId === false || (int) $postId <= 0) {
             return ['ok' => false, 'reason' => 'persist_failed'];
@@ -131,6 +156,50 @@ final class PeepSoStatusWriter
             'post_id' => $postId,
             'act_id'  => $actId,
         ];
+    }
+
+    /**
+     * The member's stored DEFAULT POST AUDIENCE, or null to leave
+     * PeepSo's own behaviour untouched (F-291).
+     *
+     * Reads `peepso_last_used_post_privacy`, the field BCC's profile-prefs
+     * endpoint writes and reads as "default post audience". PeepSo calls
+     * it "last used" and rewrites it after every own-wall post; passing it
+     * back in is what reconciles the two.
+     *
+     * ⚠ RETURNS NULL RATHER THAN A DEFAULT in two cases, and both are
+     * deliberate:
+     *   - UNSET — the member never chose. Inventing a value here would
+     *     change the audience of every existing account's next post.
+     *   - UNRECOGNISED — a value outside PeepSo's ladder. Writing it would
+     *     be worse than ignoring it: §F-02's read gate denies an unknown
+     *     level, so the post would be visible to NOBODY, including its
+     *     author, with no setting that explains why.
+     * In both cases null means "pass no `act_access`", and PeepSo applies
+     * the author's profile level exactly as it does today.
+     *
+     * The ladder is PeepSo's: 10 public, 20 site members, 30 friends,
+     * 40 author only (`PeepSo::ACCESS_*`, plus 30 from peepso-friends).
+     */
+    private static function storedDefaultAudience(int $authorId): ?int
+    {
+        $raw = get_user_meta($authorId, 'peepso_last_used_post_privacy', true);
+        if (!is_scalar($raw)) {
+            return null;
+        }
+
+        // ⚠ A CLEAN INTEGER ONLY. `(int)` alone reads '10.5' as 10 and so
+        // hands back PUBLIC — inventing a PERMISSIVE meaning for a
+        // malformed privacy value, which is the one direction never to
+        // guess in. ctype_digit also rejects '-10' and any stray text.
+        $trimmed = trim((string) $raw);
+        if ($trimmed === '' || !ctype_digit($trimmed)) {
+            return null;
+        }
+
+        $value = (int) $trimmed;
+
+        return in_array($value, [10, 20, 30, 40], true) ? $value : null;
     }
 
     /**

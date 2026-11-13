@@ -14,8 +14,31 @@ if (!class_exists('PeepSoActivity')) {
     {
         public const MODULE_ID = 1;
         public static function get_instance(): self { return new self(); }
-        /** @return int|false */
-        public function add_post(int $post_id, int $user_id, string $kind = '') { return false; }
+        /**
+         * ⚠ CORRECTED 2026-11-12 (F-291). This stub was
+         * `add_post(int $post_id, int $user_id, string $kind = '')`, which
+         * was wrong twice over and is worth spelling out, because a stub is
+         * read as documentation:
+         *
+         *   - it OMITTED `$extra`, so passing the array PeepSo actually
+         *     supports was reported as an arity error;
+         *   - its parameter NAMES misdescribed the call. The first argument
+         *     is the wall OWNER's user id and the second the AUTHOR's user
+         *     id — not a post id — and the third is the post CONTENT, not a
+         *     "kind". Anyone trusting those names would have written a
+         *     silently wrong call.
+         *
+         * Real signature (peepso/activity/classes/activity.php:135):
+         * `add_post($owner, $author, $content, $extra = array())`.
+         * `$extra['act_access']` is what sets the row's privacy level; when
+         * it is absent PeepSo falls back to the AUTHOR's profile
+         * accessibility and then overwrites
+         * `peepso_last_used_post_privacy` with whatever it used.
+         *
+         * @param array<string, mixed> $extra
+         * @return int|false
+         */
+        public function add_post(int $owner, int $author, string $content, array $extra = []) { return false; }
         /**
          * @param array<string, mixed> $extra
          * @return int|false
