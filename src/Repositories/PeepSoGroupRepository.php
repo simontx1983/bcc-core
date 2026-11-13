@@ -617,15 +617,38 @@ final class PeepSoGroupRepository
             return null;
         }
 
-        $out = [];
+        // F-354: no unique (user, group) index, so a pair can carry a stale
+        // duplicate. Rows arrive in gm_id order; per group the best-ranked
+        // row wins and the lowest gm_id breaks a tie, so the answer never
+        // depends on which duplicate happened to be inserted first:
+        //   banned  >  active (member%)  >  anything else (pending_*, …)
+        // A ban outranks membership (fail closed, and the write doors
+        // refuse on any banned row); membership outranks a stale pending
+        // or invite row left beside it.
+        $out  = [];
+        $rank = [];
         foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
-            if (isset($row->gm_group_id, $row->gm_user_status)) {
-                // Lowest gm_id wins if a pair ever has two rows (no unique
-                // index): same row getMembershipStatus() reads first.
-                $out[(int) $row->gm_group_id] ??= (string) $row->gm_user_status;
+            if (!isset($row->gm_group_id, $row->gm_user_status)) {
+                continue;
+            }
+            $groupId = (int) $row->gm_group_id;
+            $status  = (string) $row->gm_user_status;
+            $r       = self::statusRank($status);
+            if (!isset($rank[$groupId]) || $r < $rank[$groupId]) {
+                $rank[$groupId] = $r;
+                $out[$groupId]  = $status;
             }
         }
         return $out;
+    }
+
+    /** F-354 duplicate-row precedence: lower wins. */
+    private static function statusRank(string $status): int
+    {
+        if ($status === 'banned') {
+            return 0;
+        }
+        return str_starts_with($status, 'member') ? 1 : 2;
     }
 
     /**

@@ -6,6 +6,7 @@ namespace BCC\Core\Repositories\Tests\MembershipStatuses;
 
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use PHPUnit\Framework\Attributes\CoversMethod;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /** `$wpdb` double: renders placeholders, models query() + last_result + last_error. */
@@ -127,15 +128,53 @@ final class MembershipStatusesSqlTest extends TestCase
         self::assertNull(PeepSoGroupRepository::findUserMembershipStatuses(7, [42]));
     }
 
-    public function testTheFirstRowWinsIfAPairHasTwo(): void
+    /**
+     * F-354: a pair with a duplicate row gets the same answer whichever row
+     * is older — banned over active over anything else, the lowest gm_id
+     * (the rows' order) breaking a tie. Still one bounded read.
+     *
+     * @return array<string, array{list<string>, string}>
+     */
+    public static function duplicatePairs(): array
+    {
+        return [
+            'stale request, then joined'   => [['pending_admin', 'member'], 'member'],
+            'joined, then stale request'   => [['member', 'pending_admin'], 'member'],
+            'stale invite beside an owner' => [['pending_user', 'member_owner'], 'member_owner'],
+            'read-only is still active'    => [['block_invites', 'member_readonly'], 'member_readonly'],
+            'ban over membership'          => [['member', 'banned'], 'banned'],
+            'ban over membership, older'   => [['banned', 'member'], 'banned'],
+            'two active: lowest gm_id'     => [['member_moderator', 'member'], 'member_moderator'],
+            'two inactive: lowest gm_id'   => [['pending_user', 'pending_admin'], 'pending_user'],
+        ];
+    }
+
+    /** @param list<string> $statuses in gm_id order */
+    #[DataProvider('duplicatePairs')]
+    public function testADuplicatedPairResolvesDeterministically(array $statuses, string $expected): void
+    {
+        $this->wpdb->rows = array_map(
+            static fn (string $s): object => (object) ['gm_group_id' => '42', 'gm_user_status' => $s],
+            $statuses
+        );
+
+        self::assertSame([42 => $expected], PeepSoGroupRepository::findUserMembershipStatuses(7, [42]));
+        self::assertCount(1, $this->wpdb->queries, 'one read, no follow-up per duplicate');
+        self::assertStringContainsString('ORDER BY gm_id ASC', $this->wpdb->queries[0]);
+    }
+
+    public function testOneGroupsDuplicateDoesNotChangeAnother(): void
     {
         $this->wpdb->rows = [
-            (object) ['gm_group_id' => '42', 'gm_user_status' => 'banned'],
+            (object) ['gm_group_id' => '42', 'gm_user_status' => 'pending_admin'],
+            (object) ['gm_group_id' => '43', 'gm_user_status' => 'pending_admin'],
             (object) ['gm_group_id' => '42', 'gm_user_status' => 'member'],
         ];
 
-        self::assertSame([42 => 'banned'], PeepSoGroupRepository::findUserMembershipStatuses(7, [42]));
-        self::assertStringContainsString('ORDER BY gm_id ASC', $this->wpdb->queries[0]);
+        self::assertSame(
+            [42 => 'member', 43 => 'pending_admin'],
+            PeepSoGroupRepository::findUserMembershipStatuses(7, [42, 43])
+        );
     }
 
     public function testAtMostTwoHundredGroupsAreAskedFor(): void
