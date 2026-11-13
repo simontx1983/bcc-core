@@ -384,13 +384,34 @@ final class PeepSoBlockRepository
      * existing block pair must have its follows removed). Pass the last
      * `id` seen as $afterId; an empty page means done.
      *
-     * Bounded: LIMIT ≤ 500 per page, ordered by the blk_id primary key.
-     * FAIL-CLOSED: null when the read did not run, never [] — a backfill
-     * must not mistake a failure for "no more blocks".
+     * ⚠ Prefer {@see listBlockPairsPage()}: this drops malformed rows, so a
+     * cursor taken from the last RETURNED id cannot step past a page made
+     * only of dropped rows. Kept for callers already on it.
      *
      * @return list<array{id: int, blocker: int, blocked: int}>|null
      */
     public static function listBlockPairsAfter(int $afterId, int $limit = 500): ?array
+    {
+        $page = self::listBlockPairsPage($afterId, $limit);
+        return $page === null ? null : $page['pairs'];
+    }
+
+    /**
+     * One keyset page of ALL block rows with an EXACT cursor.
+     *
+     * `next` is the highest RAW blk_id the page read — including rows
+     * dropped as malformed (a zero blocker or blocked) — so a page made
+     * only of dropped rows still moves the walk forward. `done` is true
+     * only when the read returned no rows at all.
+     *
+     * Bounded: LIMIT ≤ 500 per page, ordered by the blk_id primary key.
+     * FAIL-CLOSED: null when the read did not run, and null when rows came
+     * back but none carried a blk_id past $afterId (a cursor that cannot
+     * advance would loop forever) — never a page that reads as "done".
+     *
+     * @return array{pairs: list<array{id: int, blocker: int, blocked: int}>, next: int, done: bool}|null
+     */
+    public static function listBlockPairsPage(int $afterId, int $limit = 500): ?array
     {
         $afterId = max(0, $afterId);
         $limit   = max(1, min(500, $limit));
@@ -410,16 +431,26 @@ final class PeepSoBlockRepository
             return null;
         }
 
-        $out = [];
-        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+        $rows = is_array($wpdb->last_result) ? $wpdb->last_result : [];
+        if ($rows === []) {
+            return ['pairs' => [], 'next' => $afterId, 'done' => true];
+        }
+
+        $out  = [];
+        $next = $afterId;
+        foreach ($rows as $row) {
             $id      = (int) ($row->blk_id ?? 0);
             $blocker = (int) ($row->blk_user_id ?? 0);
             $blocked = (int) ($row->blk_blocked_id ?? 0);
+            $next    = max($next, $id);
             if ($id > 0 && $blocker > 0 && $blocked > 0) {
                 $out[] = ['id' => $id, 'blocker' => $blocker, 'blocked' => $blocked];
             }
         }
-        return $out;
+        if ($next <= $afterId) {
+            return null;
+        }
+        return ['pairs' => $out, 'next' => $next, 'done' => false];
     }
 
     /**

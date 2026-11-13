@@ -61,6 +61,7 @@ final class BlockPairsWpdb
  * bound, the shape, and FAIL-CLOSED: a failed read is null, never "done".
  */
 #[CoversMethod(PeepSoBlockRepository::class, 'listBlockPairsAfter')]
+#[CoversMethod(PeepSoBlockRepository::class, 'listBlockPairsPage')]
 final class BlockPairsKeysetSqlTest extends TestCase
 {
     /** @var mixed */
@@ -124,5 +125,61 @@ final class BlockPairsKeysetSqlTest extends TestCase
         $this->wpdb->fail = true;
 
         self::assertNull(PeepSoBlockRepository::listBlockPairsAfter(0));
+    }
+
+    public function testThePageCursorIsTheHighestRawIdEvenWhenEveryRowIsDropped(): void
+    {
+        $this->wpdb->rows = [
+            (object) ['blk_id' => '12', 'blk_user_id' => '0', 'blk_blocked_id' => '9'],
+            (object) ['blk_id' => '13', 'blk_user_id' => '7', 'blk_blocked_id' => '0'],
+        ];
+
+        self::assertSame(
+            ['pairs' => [], 'next' => 13, 'done' => false],
+            PeepSoBlockRepository::listBlockPairsPage(11),
+            'a page of only malformed rows still moves the walk past them'
+        );
+    }
+
+    public function testThePageCursorCoversADroppedLastRow(): void
+    {
+        $this->wpdb->rows = [
+            (object) ['blk_id' => '5', 'blk_user_id' => '7', 'blk_blocked_id' => '9'],
+            (object) ['blk_id' => '8', 'blk_user_id' => '0', 'blk_blocked_id' => '9'],
+        ];
+
+        self::assertSame(
+            ['pairs' => [['id' => 5, 'blocker' => 7, 'blocked' => 9]], 'next' => 8, 'done' => false],
+            PeepSoBlockRepository::listBlockPairsPage(0)
+        );
+    }
+
+    public function testOnlyAnEmptyReadIsDone(): void
+    {
+        self::assertSame(['pairs' => [], 'next' => 99, 'done' => true], PeepSoBlockRepository::listBlockPairsPage(99));
+    }
+
+    public function testAPageThatCannotAdvanceTheCursorIsNullNotALoop(): void
+    {
+        $this->wpdb->rows = [(object) ['blk_id' => null, 'blk_user_id' => '7', 'blk_blocked_id' => '9']];
+
+        self::assertNull(PeepSoBlockRepository::listBlockPairsPage(4));
+    }
+
+    public function testAFailedPageReadIsNull(): void
+    {
+        $this->wpdb->fail = true;
+
+        self::assertNull(PeepSoBlockRepository::listBlockPairsPage(0));
+    }
+
+    public function testThePageReadIsTheSameBoundedKeysetQuery(): void
+    {
+        PeepSoBlockRepository::listBlockPairsPage(-3, 10000);
+
+        self::assertStringContainsString(
+            'SELECT blk_id, blk_user_id, blk_blocked_id FROM wp_peepso_blocks WHERE blk_id > 0 ORDER BY blk_id ASC LIMIT 500',
+            $this->wpdb->queries[0]
+        );
     }
 }
