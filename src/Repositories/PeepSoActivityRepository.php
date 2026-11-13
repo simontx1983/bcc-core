@@ -1022,6 +1022,21 @@ final class PeepSoActivityRepository
     private const MIN_PEER_POOL = 5;
 
     /**
+     * F-345: the SQL fragment that keeps non-contributing modules (review
+     * replies) out of the streak / contribution aggregates below. Built from
+     * FeedItemNormalizer::NON_CONTRIBUTING_MODULE_IDS; the ids are cast to
+     * int, so inlining them is safe (no user input reaches this string).
+     */
+    private static function nonContributingExclusion(): string
+    {
+        $ids = array_map('intval', \BCC\Core\Feed\FeedItemNormalizer::NON_CONTRIBUTING_MODULE_IDS);
+        if ($ids === []) {
+            return '';
+        }
+        return ' AND a.act_module_id NOT IN (' . implode(',', $ids) . ')';
+    }
+
+    /**
      * Aggregate one user's activities into a sparse day-keyed map.
      * Used by the §4.4 shift-log endpoint to render the 52-week grid.
      *
@@ -1052,7 +1067,7 @@ final class PeepSoActivityRepository
                INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
               WHERE p.post_author    = %d
                 AND p.post_status    = \'publish\'
-                AND p.post_date_gmt >= %s
+                AND p.post_date_gmt >= %s' . self::nonContributingExclusion() . '
               GROUP BY DATE(p.post_date_gmt)
               ORDER BY day DESC
               LIMIT %d',
@@ -1106,7 +1121,7 @@ final class PeepSoActivityRepository
                INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
               WHERE p.post_author    = %d
                 AND p.post_status    = \'publish\'
-                AND p.post_date_gmt >= %s
+                AND p.post_date_gmt >= %s' . self::nonContributingExclusion() . '
               GROUP BY a.act_module_id
               LIMIT 50',
             $userId,
