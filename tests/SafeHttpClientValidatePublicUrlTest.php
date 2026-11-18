@@ -289,4 +289,53 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
             sprintf('%s should be judged %s', $ip, $expected ? 'public' : 'NOT public')
         );
     }
+
+    /**
+     * ⚠⚠ THE CIDR FALLBACK ON ITS OWN, because nothing else can evidence it
+     * here.
+     *
+     * CGNAT and 198.18/15 are denied twice over on this runtime: by
+     * `FILTER_FLAG_GLOBAL_RANGE` and by `matchesDeniedIpv4Range()`. So every
+     * URL-level and `isPublicIp()` assertion about them passes on PHP 8.2+
+     * EVEN WITHOUT the fallback — they would only fail on the 8.0/8.1 hosts
+     * the fallback exists for, and no 8.0 runtime is available to test on.
+     *
+     * A mutation control confirmed exactly that: with the fallback reverted,
+     * the four CGNAT/benchmark vectors still passed. Calling the fallback
+     * directly is what makes the version-independent denial a tested claim
+     * rather than a comment, and it is the only assertion in this file that
+     * would catch the fallback being deleted.
+     *
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function cidrFallbackVerdicts(): array
+    {
+        return [
+            'CGNAT low'              => ['100.64.0.1',      true],
+            'CGNAT high'             => ['100.127.255.254', true],
+            'benchmark low'          => ['198.18.0.1',      true],
+            'benchmark high'         => ['198.19.255.254',  true],
+            // Boundaries — one bit out and these would be caught too.
+            'just below CGNAT'       => ['100.63.255.255',  false],
+            'just above CGNAT'       => ['100.128.0.0',     false],
+            'just below benchmark'   => ['198.17.255.255',  false],
+            'just above benchmark'   => ['198.20.0.1',      false],
+            // Ordinary public space, and a v6 address it must ignore.
+            'public v4'              => ['93.184.216.34',   false],
+            'v6 is not its business' => ['2606:4700::1111', false],
+        ];
+    }
+
+    #[DataProvider('cidrFallbackVerdicts')]
+    public function testCidrFallbackDeniesIndependentlyOfGlobalRange(string $ip, bool $denied): void
+    {
+        $ref = new ReflectionMethod(SafeHttpClient::class, 'matchesDeniedIpv4Range');
+        $ref->setAccessible(true);
+
+        self::assertSame(
+            $denied,
+            $ref->invoke(null, $ip),
+            sprintf('%s should %sbe denied by the CIDR fallback', $ip, $denied ? '' : 'NOT ')
+        );
+    }
 }
