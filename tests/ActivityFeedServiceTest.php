@@ -246,6 +246,52 @@ namespace BCC\Core\Feed\Tests {
             return $out;
         }
 
+        // ── F-350: body.text is plain text, whatever PeepSo stored ──────
+
+        /** PeepSo linkifies URLs at write time; the reader must see the URL, not the tag. */
+        public function testAPeepSoLinkifiedUrlComesBackAsItsText(): void
+        {
+            $stored = 'check this <a class="ps-media__link ps-media-link" href="https://example.org/x" rel="nofollow" target="_blank">example.org/x</a> out';
+
+            self::assertSame('check this example.org/x out', ActivityFeedService::plainTextFromStoredContent($stored));
+        }
+
+        /** A literal `<` the user typed is stored as `&lt;` and must survive as text. */
+        public function testAStrayLessThanIsKeptAsText(): void
+        {
+            self::assertSame('2 < 3 & 4 > 1', ActivityFeedService::plainTextFromStoredContent('2 &lt; 3 &amp; 4 &gt; 1'));
+        }
+
+        public function testNoMarkupSurvivesSoNothingCanBeInjected(): void
+        {
+            $out = ActivityFeedService::plainTextFromStoredContent(
+                'hi<script>alert(1)</script><style>p{}</style><img src=x onerror=alert(2)><iframe src="//evil"></iframe> there'
+            );
+
+            self::assertSame('hi there', $out);
+            self::assertStringNotContainsString('<', $out);
+        }
+
+        /** An entity-encoded tag the user TYPED is their text — shown, never executed (the client renders text). */
+        public function testATypedTagIsShownAsText(): void
+        {
+            self::assertSame('<b>bold</b>', ActivityFeedService::plainTextFromStoredContent('&lt;b&gt;bold&lt;/b&gt;'));
+        }
+
+        public function testPlainTextAndLineBreaksAreUnchanged(): void
+        {
+            $text = "line one\nline two — with ünïcode and an @handle";
+
+            self::assertSame($text, ActivityFeedService::plainTextFromStoredContent($text));
+        }
+
+        public function testSeveralLinksAndLineBreaks(): void
+        {
+            $stored = "a <a class=\"ps-media__link\" href=\"https://x.io\">x.io</a>\nb <a class=\"ps-media__link\" href=\"https://y.io/p?q=1&amp;r=2\">https://y.io/p?q=1&amp;r=2</a>";
+
+            self::assertSame("a x.io\nb https://y.io/p?q=1&r=2", ActivityFeedService::plainTextFromStoredContent($stored));
+        }
+
         public function testIsStatusModuleTruthTable(): void
         {
             // PeepSo native writes '1' — but PeepSoActivity isn't loaded
