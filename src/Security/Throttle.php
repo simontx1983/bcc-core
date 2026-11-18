@@ -424,8 +424,11 @@ final class Throttle
         $key = self::bucketKey($action, $key);
 
         if (class_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter')) {
-            if (method_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter', 'releaseByKey')) {
-                \BCC\Trust\Core\Security\RateLimiter::releaseByKey($key, $window);
+            // Feature-detected: releaseByKey() ships in a later bcc-trust
+            // than this bcc-core may run beside.
+            $release = ['\\BCC\\Trust\\Core\\Security\\RateLimiter', 'releaseByKey'];
+            if (is_callable($release)) {
+                call_user_func($release, $key, $window);
             }
             return;
         }
