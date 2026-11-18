@@ -43,6 +43,12 @@ namespace BCC\Core\Feed\Tests\WallModuleFilter {
         /** PeepSo module id for a BCC review. */
         private const MODULE_REVIEW = 202;
 
+        /** PeepSo's direct messages: never a public feed module. */
+        private const MODULE_DM = 6;
+
+        /** PeepSo's polls: never a public feed module. */
+        private const MODULE_POLL = 30;
+
         /** @var mixed */
         private $priorWpdb;
 
@@ -197,6 +203,45 @@ namespace BCC\Core\Feed\Tests\WallModuleFilter {
             $out = $this->wall([]);
 
             self::assertSame(0, $out['queries'], 'no candidate query for an empty allowlist');
+            self::assertSame([], $out['payload']['items']);
+            self::assertFalse($out['payload']['pagination']['has_more']);
+            self::assertNull($out['payload']['pagination']['next_cursor']);
+        }
+
+        /**
+         * Anti-vacuity control for the two ceiling tests below: they only
+         * prove something while DMs and polls really are outside the public
+         * feed.
+         */
+        public function testDirectMessagesAndPollsAreNotPublicFeedModules(): void
+        {
+            self::assertNotContains(self::MODULE_DM, FeedItemNormalizer::publicFeedModuleIds());
+            self::assertNotContains(self::MODULE_POLL, FeedItemNormalizer::publicFeedModuleIds());
+        }
+
+        /**
+         * The caller's list can only NARROW the public feed, never widen it.
+         * The repository honours an explicit list verbatim, so core cuts it
+         * down first: a module outside publicFeedModuleIds() never reaches
+         * the query, even when a caller names it.
+         */
+        public function testAModuleOutsideThePublicFeedNeverReachesTheQuery(): void
+        {
+            $clause = self::moduleClause($this->wall([1, self::MODULE_DM, self::MODULE_POLL])['sql']);
+
+            self::assertSame("act_module_id IN ('1')", $clause, 'only the public module survives');
+        }
+
+        /**
+         * A list with NOTHING public left in it means "nothing", not
+         * "everything". It must not fall back to null, which is core's
+         * default gate (every public module).
+         */
+        public function testAListWithNothingPublicReturnsNothingRatherThanEverything(): void
+        {
+            $out = $this->wall([self::MODULE_DM]);
+
+            self::assertSame(0, $out['queries'], 'a wall asked for DMs only is an empty wall, not the default wall');
             self::assertSame([], $out['payload']['items']);
             self::assertFalse($out['payload']['pagination']['has_more']);
             self::assertNull($out['payload']['pagination']['next_cursor']);

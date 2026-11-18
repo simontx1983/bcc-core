@@ -304,6 +304,23 @@ final class SafeHttpClient
             );
         }
 
+        // ⚠⚠ The pin is host:PORT (`CURLOPT_RESOLVE`), so matching the host
+        // ALONE is not enough. A same-host batch URL on a different port
+        // would be fetched carrying a pin that does not apply to it, and
+        // cURL would quietly fall back to its own DNS lookup — reopening
+        // exactly the rebinding window this path exists to close. The scheme
+        // is compared too: it decides the default port, and a batch that
+        // silently mixes https with http is not the batch the caller meant
+        // to issue. Not reachable from today's one caller
+        // (`CosmosFetcher::lcdGetBatch` builds every URL from one base), so
+        // this closes a latent hole rather than a live bug.
+        $firstParsed     = parse_url($first);
+        $canonicalParsed = is_array($firstParsed) ? $firstParsed : [];
+        $canonicalScheme = strtolower(
+            is_string($canonicalParsed['scheme'] ?? null) ? $canonicalParsed['scheme'] : ''
+        );
+        $canonicalPort   = self::portOf($canonicalParsed);
+
         $timeout  = self::batchTimeout($args);
         $maxBytes = self::batchMaxBytes($args);
         $headers  = self::batchHeaders($args);
@@ -317,7 +334,12 @@ final class SafeHttpClient
         // host is rejected here, BEFORE a socket is opened, so it can never be
         // fetched against the wrong pin. This split is pure (no I/O) and so is
         // the unit-testable core of the same-host enforcement.
-        [$fetchable, $results] = self::partitionByCanonicalHost($urls, $canonicalHost);
+        [$fetchable, $results] = self::partitionByCanonicalOrigin(
+            $urls,
+            $canonicalHost,
+            $canonicalScheme,
+            $canonicalPort
+        );
 
         // Drain fetchable URLs in bounded waves.
         foreach (array_chunk($fetchable, self::BATCH_MAX_CONCURRENCY, true) as $wave) {
@@ -332,28 +354,57 @@ final class SafeHttpClient
     }
 
     /**
-     * Split a batch of URLs into the fetchable set (host matches the single
-     * validated host) and a pre-computed WP_Error result map for the rest.
+     * Split a batch of URLs into the fetchable set (same ORIGIN as the single
+     * validated URL) and a pre-computed WP_Error result map for the rest.
      *
-     * Pure — no DNS, no sockets. This is the same-host-enforcement gate: a URL
-     * whose host differs from `$canonicalHost`, or which has no host at all, is
-     * rejected as a WP_Error at its OWN index without touching the others, so a
-     * caller cannot smuggle a second unvalidated host into the batch.
+     * Pure — no DNS, no sockets. This is the same-origin enforcement gate: a
+     * URL whose scheme, host or effective port differs from the canonical
+     * one, or which has no host at all, is rejected as a WP_Error at its OWN
+     * index without touching the others, so a caller cannot smuggle a second
+     * unvalidated destination into the batch.
      *
-     * @param list<string> $urls          index-aligned URL list (0-based, contiguous)
-     * @param string       $canonicalHost lowercase host from the validated first URL
+     * ⚠⚠ IT COMPARES THE PORT BECAUSE THE PIN IS host:PORT. This used to
+     * compare the host alone, which meant a same-host, different-port URL was
+     * handed a `CURLOPT_RESOLVE` entry that did not match it — cURL ignores a
+     * non-matching entry and resolves the name itself, so that one URL went
+     * out UNPINNED and a DNS rebinding could land it anywhere. The scheme is
+     * compared for two reasons: it determines the default port (so comparing
+     * ports without it would let `http://h` and `https://h:80` pass as one
+     * origin), and a batch mixing TLS with cleartext is not one the caller
+     * meant to issue.
+     *
+     * ⚠ All three mismatches keep the EXISTING `ssrf_host_mismatch` code
+     * rather than introducing a new one — nothing outside this class reads
+     * these codes, and a new code would be a behaviour change for callers
+     * that is not needed to close the hole. The MESSAGE names which rule
+     * fired, and the tests assert the message, not just the code.
+     *
+     * @param list<string> $urls            index-aligned URL list (0-based, contiguous)
+     * @param string       $canonicalHost   lowercase host from the validated first URL
+     * @param string       $canonicalScheme lowercase scheme from the same URL
+     * @param int          $canonicalPort   effective port of the same URL ({@see portOf()})
      * @return array{0: array<int, string>, 1: array<int, \WP_Error>}
      *         [ index→URL to fetch, index→WP_Error already-rejected ]
      */
-    private static function partitionByCanonicalHost(array $urls, string $canonicalHost): array
-    {
+    private static function partitionByCanonicalOrigin(
+        array $urls,
+        string $canonicalHost,
+        string $canonicalScheme,
+        int $canonicalPort
+    ): array {
         /** @var array<int, string> $fetchable */
         $fetchable = [];
         /** @var array<int, \WP_Error> $rejected */
         $rejected = [];
 
         foreach ($urls as $i => $url) {
-            $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+            $parsed = parse_url($url);
+            if (!is_array($parsed)) {
+                $rejected[$i] = new \WP_Error('ssrf_invalid_url', 'Invalid URL: unparseable');
+                continue;
+            }
+
+            $host = strtolower(is_string($parsed['host'] ?? null) ? $parsed['host'] : '');
             if ($host === '') {
                 $rejected[$i] = new \WP_Error('ssrf_invalid_url', 'Invalid URL: missing host');
                 continue;
@@ -365,6 +416,25 @@ final class SafeHttpClient
                 );
                 continue;
             }
+
+            $scheme = strtolower(is_string($parsed['scheme'] ?? null) ? $parsed['scheme'] : '');
+            if ($scheme !== $canonicalScheme) {
+                $rejected[$i] = new \WP_Error(
+                    'ssrf_host_mismatch',
+                    "Batch URL scheme '{$scheme}' does not match the validated scheme '{$canonicalScheme}'"
+                );
+                continue;
+            }
+
+            $port = self::portOf($parsed);
+            if ($port !== $canonicalPort) {
+                $rejected[$i] = new \WP_Error(
+                    'ssrf_host_mismatch',
+                    "Batch URL port {$port} does not match the validated port {$canonicalPort}"
+                );
+                continue;
+            }
+
             $fetchable[$i] = $url;
         }
 
@@ -398,7 +468,7 @@ final class SafeHttpClient
 
         try {
             foreach ($wave as $i => $url) {
-                // Guaranteed non-empty by partitionByCanonicalHost (every
+                // Guaranteed non-empty by partitionByCanonicalOrigin (every
                 // fetchable URL has a host), but narrow the type for the
                 // non-empty-string CURLOPT_URL contract.
                 if ($url === '') {
@@ -820,15 +890,22 @@ final class SafeHttpClient
      * cannot drift apart.
      *
      * ⚠⚠ `NO_PRIV_RANGE | NO_RES_RANGE` IS NOT ENOUGH, AND `GLOBAL_RANGE`
-     * DOES NOT FINISH THE JOB. Measured on PHP 8.2.30 with all three flags
-     * set, every one of these is ALLOWED while naming a private or metadata
-     * IPv4 that a relay actually delivers to:
+     * DOES NOT FINISH THE JOB. Measured on PHP 8.1.23, 8.2.30 AND 8.3.29
+     * with every flag the runtime offers, each of these is ALLOWED while
+     * naming a private or metadata IPv4 that a relay actually delivers to:
      *
-     *   2002:0a00:0001::1      6to4           carrying 10.0.0.1
-     *   2002:a9fe:a9fe::1      6to4           carrying 169.254.169.254
-     *   64:ff9b::0a00:0001     NAT64   /96    carrying 10.0.0.1
-     *   64:ff9b:1::0a00:0001   NAT64   /48    carrying 10.0.0.1  (RFC 8215)
+     *   2002:0a00:0001::1      6to4            carrying 10.0.0.1        †
+     *   2002:a9fe:a9fe::1      6to4            carrying 169.254.169.254 †
+     *   64:ff9b::0a00:0001     NAT64   /96     carrying 10.0.0.1
+     *   64:ff9b:1::0a00:0001   NAT64   /48     carrying 10.0.0.1  (RFC 8215)
      *   ::0a00:0001            IPv4-compatible carrying 10.0.0.1
+     *
+     * ⚠ † holds on 8.0–8.2 ONLY. PHP 8.3's `GLOBAL_RANGE` refuses ALL of
+     * `2002::/16` — public 6to4 included — so on 8.3 the flags happen to
+     * cover those two rows, and the decode below is what covers them on every
+     * earlier version. The NAT64 and IPv4-compatible rows are allowed on all
+     * three versions. None of this is version-gated: the decode runs
+     * regardless, and layering can only ever refuse more.
      *
      * ⚠⚠ WORSE, `filter_var()`'s VERDICT DEPENDS ON NOTATION. The SAME
      * SIXTEEN BYTES get opposite answers:
@@ -853,7 +930,10 @@ final class SafeHttpClient
      * 8.0, so it is applied only when present — referencing an undefined
      * constant is a fatal `Error` on PHP 8, not a notice. CGNAT 100.64/10
      * and benchmark 198.18/15 no longer depend on it either way: they are
-     * denied explicitly by {@see matchesDeniedIpv4Range()} on every version.
+     * denied explicitly by {@see matchesDeniedIpv4Range()} on every version,
+     * and Teredo `2001::/32` by {@see matchesDeniedPrefix()} for exactly the
+     * same reason — it was measured ALLOWED on 8.1.23 and is denied by the
+     * flags only from 8.2 onward.
      * The embedded-IPv4 decode and the denied-prefix list are both ours and
      * version-independent too.
      *
@@ -907,9 +987,18 @@ final class SafeHttpClient
      * ⚠ `fec0::/10` — deprecated site-local unicast (RFC 3879). Deprecated
      * is not the same as unroutable, and the range flags still admit it.
      *
-     * ⚠ Matching is on BITS, not bytes, because neither of these lands on a
-     * byte boundary in a way a `substr()` compare can express — /48 is six
-     * whole bytes but /10 is not, and the earlier byte-compare bug came
+     * ⚠ `2001::/32` — Teredo (RFC 4380). Its embedded IPv4 is in two places
+     * and one of them is inverted: the relay server's address sits in bytes
+     * 4–7 and the client's own in the last four, BITWISE-COMPLEMENTED. A
+     * decode would need two unpackings and a `~`; refusing the prefix needs
+     * neither. ⚠⚠ It is NOT "already refused", which is what this file
+     * claimed before: `GLOBAL_RANGE` denies it from PHP 8.2 on, but it was
+     * measured ALLOWED on 8.1.23, and this plugin declares 8.0. Same shape
+     * as CGNAT — listed here so the verdict does not depend on the runtime.
+     *
+     * ⚠ Matching is on BITS, not bytes, because not all of these land on a
+     * byte boundary in a way a `substr()` compare can express — /48 and /32
+     * are whole bytes but /10 is not, and the earlier byte-compare bug came
      * from exactly that kind of shortcut.
      *
      * @return bool True when $ip falls inside a denied prefix.
@@ -924,6 +1013,7 @@ final class SafeHttpClient
         /** @var list<array{0: string, 1: int}> $denied prefix bytes, bit length */
         $denied = [
             ["\x00\x64\xff\x9b\x00\x01", 48], // 64:ff9b:1::/48 — RFC 8215 local-use NAT64
+            ["\x20\x01\x00\x00",         32], // 2001::/32      — Teredo (RFC 4380)
             ["\xfe\xc0",                 10], // fec0::/10      — deprecated site-local
         ];
 
