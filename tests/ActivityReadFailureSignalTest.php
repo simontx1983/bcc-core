@@ -70,11 +70,16 @@ final class ActivityReadFailureSignalTest extends TestCase
         self::listRead(true);
     }
 
-    /** Every existing caller: the historical answer, unchanged. */
+    /**
+     * Every existing caller: the historical answer, unchanged. Called the
+     * way they call it, WITHOUT the argument, so the default is what is
+     * pinned (bcc-trust's BlogService and FeedColdStartService do this).
+     */
     public function testAFailedListReadIsStillEmptyForACallerThatDoesNotAsk(): void
     {
         $this->wpdb->errorOnQuery = self::DRIVER_ERROR;
 
+        self::assertSame([], PeepSoActivityRepository::getActivities([3], null, null, null, 1));
         self::assertSame([], self::listRead(false));
     }
 
