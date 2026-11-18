@@ -841,6 +841,17 @@ add_filter('bcc_system_health', function (array $health): array {
         //                             sustained counts mean the captcha is
         //                             not protecting anything.
         'auth_throttle' => ['wallet_login_ceiling', 'oauth_login_ceiling', 'login_failure_spike', 'turnstile_unavailable'],
+        // password_breach_check — bcc-trust BreachedPasswordCheck (#712): the
+        // leaked-password refusal at sign-up, reset and password change asks
+        // the Pwned Passwords range API (k-anonymity, 2 s timeout).
+        //   `unavailable` — that lookup failed (transport error, non-200,
+        //                   empty body or exception), so the password was
+        //                   ACCEPTED unchecked: the check fails open by
+        //                   design. Counted per password set, so an outage
+        //                   alerts once enough members set one. Steady state
+        //                   zero; sustained counts mean breached passwords
+        //                   are getting through.
+        'password_breach_check' => ['unavailable'],
     ]);
 
     return $health;
