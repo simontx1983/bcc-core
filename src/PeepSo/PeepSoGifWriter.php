@@ -104,41 +104,59 @@ final class PeepSoGifWriter
             return ['ok' => false, 'reason' => 'invalid_url'];
         }
 
-        // ─── Drive PeepSo's write path via $_POST ────────────────────
-        // The `after_add_post` hook (peepso/classes/giphy.php:409) reads
-        // these keys post-add_post. We capture the pre-call state with
-        // `array_key_exists` so the restore can faithfully distinguish
-        // "key was absent" from "key was present with null".
-        $hadType    = array_key_exists('type', $_POST);
-        $hadGiphy   = array_key_exists('giphy', $_POST);
-        $prevType   = $hadType  ? $_POST['type']  : null;
-        $prevGiphy  = $hadGiphy ? $_POST['giphy'] : null;
-
-        $_POST['type']  = 'giphy';
-        $_POST['giphy'] = $urlTrimmed;
-
-        try {
-            // PeepSo's add_post may reject strictly empty content, but
-            // the giphy plugin's `activity_allow_empty_content` filter
-            // (peepso/classes/giphy.php:276) explicitly allows empty
-            // when `$_POST['giphy']` is set. So we can pass through the
-            // user's caption verbatim — a single space pad isn't needed.
-            $captionTrimmed = trim($caption);
-
-            $postId = \PeepSoActivity::get_instance()->add_post(
+        // ⚠⚠ F-361 — the write goes through the GUARD, never straight to
+        // add_post. PeepSo's `peepso_activity_after_add_post` listeners read
+        // the CURRENT REQUEST — query string FIRST — with no authorization of
+        // their own, so without this a create carrying
+        // `?group_id=<a secret group>&module_id=8` lands stamped as that
+        // group's post and notifies its followers, while BCC's group gate
+        // never ran because BCC was never told about a group.
+        // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
+        //
+        // @mentions are KEPT: `PeepSoTags::after_save_post` derives them from
+        // the post CONTENT and permission-gates each notification, so it is
+        // the one listener on that hook that is not request-driven.
+        //
+        // `PeepSoGiphy::after_add_post` is kept here and nowhere else: it is
+        // request-driven, but THIS writer is the thing driving it.
+        //
+        // ⚠ The two keys this writer drives are PINNED by the guard rather
+        // than assigned here, so a query string cannot outrank them and the
+        // raw body cannot supply them. The guard restores the request
+        // afterwards, which is why this writer no longer carries its own
+        // capture/restore pair — the §11 extraction its `restorePostKey()`
+        // docblock pre-registered as `PostSuperglobalGuard`.
+        //
+        // PeepSo's add_post may reject strictly empty content, but the giphy
+        // plugin's `activity_allow_empty_content` filter
+        // (peepso/classes/giphy.php:276) explicitly allows empty when
+        // `$_POST['giphy']` is set. So we pass the user's caption verbatim —
+        // no single-space pad needed.
+        $postId = PeepSoAddPostGuard::around(
+            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_GIPHY],
+            ['type' => 'giphy', 'giphy' => $urlTrimmed],
+            static fn () => \PeepSoActivity::get_instance()->add_post(
                 $authorId,
                 $authorId,
-                $captionTrimmed
-            );
-        } finally {
-            self::restorePostKey('type',  $hadType,  $prevType);
-            self::restorePostKey('giphy', $hadGiphy, $prevGiphy);
-        }
+                trim($caption)
+            )
+        );
 
         if ($postId === false || (int) $postId <= 0) {
             return ['ok' => false, 'reason' => 'persist_failed'];
         }
         $postId = (int) $postId;
+
+        // Backstop for a detach that did not work: if a listener stamped this
+        // post anyway, destroy it and fail rather than serve it as
+        // legitimate. ⚠ Runs BEFORE attachToGroup(), which is where BCC
+        // applies its OWN, gated stamp — so a stamp seen here is always
+        // someone else's. ⚠ It cannot un-send a notification that listener
+        // already fired; the detach above is the fix, this is the net.
+        $hijacked = PeepSoAddPostGuard::failClosedIfHijacked($postId, $groupId);
+        if ($hijacked !== null) {
+            return ['ok' => false, 'reason' => $hijacked];
+        }
 
         // ─── Resolve act_id ──────────────────────────────────────────
         // GIF posts share act_module_id=1 with status posts (PeepSo's
@@ -160,27 +178,6 @@ final class PeepSoGifWriter
             'post_id' => $postId,
             'act_id'  => $actId,
         ];
-    }
-
-    /**
-     * Reset a $_POST key to its pre-call state. `$wasPresent` is the
-     * `array_key_exists` boolean captured before the call — without
-     * it, "absent" and "present-with-null" are indistinguishable from
-     * a `null === ?` check, which would silently unset a key that the
-     * caller had explicitly null'd.
-     *
-     * Duplicated from PeepSoPhotoWriter::restorePostKey (~6 lines).
-     * Acceptable per §11 on second occurrence; if a third writer ever
-     * adds the same pattern, extract to a shared `PostSuperglobalGuard`
-     * helper at that point.
-     */
-    private static function restorePostKey(string $key, bool $wasPresent, mixed $previous): void
-    {
-        if (!$wasPresent) {
-            unset($_POST[$key]);
-            return;
-        }
-        $_POST[$key] = $previous;
     }
 
     /**

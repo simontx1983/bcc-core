@@ -44,6 +44,25 @@ if (!class_exists('PeepSoActivity')) {
          * @return int|false
          */
         public function add_comment(int $parent_post_id, int $author_id, string $content, array $extra = []) { return false; }
+        /**
+         * ⚠ Takes a WP_POST ID, not an act_id, despite PeepSo's own
+         * parameter name — it queries `wp_posts` by it
+         * (peepso/activity/classes/activity.php:777) and deletes the
+         * activity row(s) alongside the post. That matters because
+         * `wp_delete_post()` does NOT remove the activity row (PeepSo's
+         * `before_delete_post` cleanup at peepso.php:2887 only fires for
+         * BLOG posts), so this is the only call that leaves nothing behind.
+         *
+         * ⚠ It also deletes nested replies and every row whose
+         * `act_repost_id` matches — harmless on a post created moments ago,
+         * destructive on an established one. See
+         * {@see \BCC\Core\PeepSo\PeepSoCommentWriter} on why the comment
+         * path uses `wp_trash_post` instead.
+         *
+         * @param int $post_id
+         * @return void
+         */
+        public function delete_post($post_id) {}
     }
 }
 

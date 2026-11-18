@@ -201,57 +201,76 @@ final class PeepSoPhotoWriter
         }
         unset($ext); // ext was for diagnostics; the .jpg suffix above is canonical
 
-        // ─── Drive PeepSo's two-step write via $_POST ────────────────
-        // The activity_insert_data filter and after_add_post hook both
-        // read $_POST. We set the keys, call add_post, restore in
-        // try/finally so a request never leaks photo state to a
-        // later call within the same request lifecycle.
+        // ⚠⚠ F-361 — the write goes through the GUARD, never straight to
+        // add_post. PeepSo's `peepso_activity_after_add_post` listeners read
+        // the CURRENT REQUEST — query string FIRST — with no authorization of
+        // their own, so without this a create carrying
+        // `?group_id=<a secret group>&module_id=8` lands stamped as that
+        // group's post and notifies its followers, while BCC's group gate
+        // never ran because BCC was never told about a group.
+        // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
         //
-        // We capture the pre-call state with `array_key_exists` so the
-        // restore can faithfully distinguish "key was absent" from
-        // "key was present with null" (rare in practice but the
-        // distinction matters for any caller that explicitly nulled
-        // a $_POST key for its own filter chain).
-        $hadType    = array_key_exists('type', $_POST);
-        $hadFiles   = array_key_exists('files', $_POST);
-        $hadModule  = array_key_exists('module_id', $_POST);
-        $prevType   = $hadType   ? $_POST['type']      : null;
-        $prevFiles  = $hadFiles  ? $_POST['files']     : null;
-        $prevModule = $hadModule ? $_POST['module_id'] : null;
+        // @mentions are KEPT: `PeepSoTags::after_save_post` derives them from
+        // the post CONTENT and permission-gates each notification, so it is
+        // the one listener on that hook that is not request-driven.
+        //
+        // ⚠⚠ THIS WRITER IS THE SHARPEST CASE. It sets
+        // `$_POST['module_id'] = 4` to drive PeepSo's photo path — and
+        // `PeepSoInput::int()` reads `$_GET` FIRST, so a request carrying
+        // `?module_id=8` OUTRANKED the value this writer had just set.
+        // The hijack was not merely "a stray parameter is also read": the
+        // integration surface the writer depends on was itself overridable
+        // from the query string.
+        //
+        // `PeepSoSharePhotos::after_add_post` is kept here and nowhere else:
+        // it is request-driven, but THIS writer is the thing driving it.
+        // ⚠ `after_add_post_album` is NOT kept — it takes `module_id` and an
+        // owner filter from the request to CREATE an album, and this writer
+        // never posts an album.
+        //
+        // ⚠ The three keys this writer drives are PINNED by the guard rather
+        // than assigned here — that is the whole fix for this writer, since
+        // assigning them is exactly what `?module_id=8` used to beat. The
+        // tmp-file catch stays inside the callable: `around()` adds a
+        // `finally`, it does not take this writer's `catch` away.
+        //
+        // ⚠ `files` is pinned to a LIST. Its reader calls `count()` on it,
+        // so a bare string would be a PHP 8 TypeError.
+        $postId = PeepSoAddPostGuard::around(
+            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_PHOTOS],
+            [
+                'type'      => 'photo',
+                'files'     => [$hashName],
+                'module_id' => \PeepSoSharePhotos::MODULE_ID,
+            ],
+            static function () use ($authorId, $caption, $tmpJpg, $isGif) {
+                try {
+                    // PeepSo's add_post may reject a strictly empty content
+                    // string. Photo-only posts are a real social use case, so
+                    // we pad with a single space when the caption is empty —
+                    // PeepSo accepts that and the rendered card filters
+                    // whitespace back out via trim() at display time.
+                    $captionTrimmed   = trim($caption);
+                    $contentForPeepSo = $captionTrimmed === '' ? ' ' : $captionTrimmed;
 
-        $_POST['type']      = 'photo';
-        $_POST['files']     = [$hashName];
-        $_POST['module_id'] = \PeepSoSharePhotos::MODULE_ID;
-
-        try {
-            // PeepSo's add_post may reject a strictly empty content
-            // string. Photo-only posts are a real social use case, so
-            // we pad with a single space when the caption is empty —
-            // PeepSo accepts that and the rendered card filters whitespace
-            // back out via trim() at display time.
-            $captionTrimmed = trim($caption);
-            $contentForPeepSo = $captionTrimmed === '' ? ' ' : $captionTrimmed;
-
-            $postId = \PeepSoActivity::get_instance()->add_post(
-                $authorId,
-                $authorId,
-                $contentForPeepSo
-            );
-        } catch (\Throwable $e) {
-            // add_post threw (not just returned false) — the staged tmp
-            // files would leak because the false-branch cleanup below is
-            // never reached. Clean here, then rethrow; $_POST restore
-            // still runs via finally.
-            @unlink($tmpJpg);
-            if ($isGif) {
-                @unlink(self::replaceExtension($tmpJpg, 'gif'));
+                    return \PeepSoActivity::get_instance()->add_post(
+                        $authorId,
+                        $authorId,
+                        $contentForPeepSo
+                    );
+                } catch (\Throwable $e) {
+                    // add_post threw (not just returned false) — the staged
+                    // tmp files would leak because the false-branch cleanup
+                    // after the guard is never reached. Clean here, then
+                    // rethrow; the guard's finally still restores state.
+                    @unlink($tmpJpg);
+                    if ($isGif) {
+                        @unlink(self::replaceExtension($tmpJpg, 'gif'));
+                    }
+                    throw $e;
+                }
             }
-            throw $e;
-        } finally {
-            self::restorePostKey('type',      $hadType,   $prevType);
-            self::restorePostKey('files',     $hadFiles,  $prevFiles);
-            self::restorePostKey('module_id', $hadModule, $prevModule);
-        }
+        );
 
         if ($postId === false || (int) $postId <= 0) {
             // Cleanup — staged tmp files would otherwise leak.
@@ -262,6 +281,17 @@ final class PeepSoPhotoWriter
             return ['ok' => false, 'reason' => 'persist_failed'];
         }
         $postId = (int) $postId;
+
+        // Backstop for a detach that did not work: if a listener stamped this
+        // post anyway, destroy it and fail rather than serve it as
+        // legitimate. ⚠ Runs BEFORE attachToGroup(), which is where BCC
+        // applies its OWN, gated stamp — so a stamp seen here is always
+        // someone else's. ⚠ It cannot un-send a notification that listener
+        // already fired; the detach above is the fix, this is the net.
+        $hijacked = PeepSoAddPostGuard::failClosedIfHijacked($postId, $groupId);
+        if ($hijacked !== null) {
+            return ['ok' => false, 'reason' => $hijacked];
+        }
 
         // ─── Resolve act_id + photo_id ───────────────────────────────
         // PeepSo's activity_insert_data filter stamped act_module_id=4
@@ -292,22 +322,6 @@ final class PeepSoPhotoWriter
             'act_id'   => $actId,
             'photo_id' => $photoId,
         ];
-    }
-
-    /**
-     * Reset a $_POST key to its pre-call state. `$wasPresent` is the
-     * `array_key_exists` boolean captured before the call — without
-     * it, "absent" and "present-with-null" are indistinguishable from
-     * a `null === ?` check, which would silently unset a key that the
-     * caller had explicitly null'd.
-     */
-    private static function restorePostKey(string $key, bool $wasPresent, mixed $previous): void
-    {
-        if (!$wasPresent) {
-            unset($_POST[$key]);
-            return;
-        }
-        $_POST[$key] = $previous;
     }
 
     private static function replaceExtension(string $path, string $newExt): string
