@@ -21,7 +21,10 @@ jobs:
 
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
-          php-version: '8.2'
+          # Matches production and staging (8.3.30). Was '8.2' with nothing
+          # depending on it — see docs/environment.md: a green check from the
+          # one environment that does not match production is false confidence.
+          php-version: '8.3'
           # gmp is required by EthSignatureVerifier (secp256k1 ecrecover).
           extensions: mbstring, gmp
           tools: composer:v2
