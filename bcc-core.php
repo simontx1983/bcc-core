@@ -824,7 +824,23 @@ add_filter('bcc_system_health', function (array $health): array {
         // tripped, so EVERY identity on that route is refused for the rest of
         // the minute — a flood, or the ceiling set too low for real traffic.
         // Expected steady state zero; any activation is worth a look.
-        'auth_throttle' => ['wallet_login_ceiling', 'oauth_login_ceiling'],
+        //
+        // The /auth/login captcha step-up (bcc-trust LoginStepUp /
+        // TurnstileVerifier) adds two:
+        //   `login_failure_spike`   — a failed sign-in while more than 50
+        //                             have failed site-wide in 5 min, which
+        //                             turns the captcha on for everyone.
+        //                             Counted per failure, so a real wave
+        //                             crosses DegradationAlerter's threshold.
+        //                             Steady state zero; any count is a
+        //                             credential-stuffing or brute-force wave.
+        //   `turnstile_unavailable` — a step-up check could not reach
+        //                             Turnstile (or it rejected our secret),
+        //                             so that sign-in FAILED OPEN to the
+        //                             login throttles. Steady state zero;
+        //                             sustained counts mean the captcha is
+        //                             not protecting anything.
+        'auth_throttle' => ['wallet_login_ceiling', 'oauth_login_ceiling', 'login_failure_spike', 'turnstile_unavailable'],
     ]);
 
     return $health;
