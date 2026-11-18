@@ -851,10 +851,11 @@ final class SafeHttpClient
      *
      * ⚠ `FILTER_FLAG_GLOBAL_RANGE` is PHP 8.2+ and this plugin declares PHP
      * 8.0, so it is applied only when present — referencing an undefined
-     * constant is a fatal `Error` on PHP 8, not a notice. On 8.0/8.1 the
-     * ranges only GLOBAL_RANGE knows (CGNAT 100.64/10, benchmark 198.18/15)
-     * stay allowed; the embedded-IPv4 decode below is ours and works on
-     * every version, so the metadata/private reach is closed regardless.
+     * constant is a fatal `Error` on PHP 8, not a notice. CGNAT 100.64/10
+     * and benchmark 198.18/15 no longer depend on it either way: they are
+     * denied explicitly by {@see matchesDeniedIpv4Range()} on every version.
+     * The embedded-IPv4 decode and the denied-prefix list are both ours and
+     * version-independent too.
      *
      * ⚠ Recursion is bounded at one level: the recursive call is handed a
      * dotted IPv4, which has no embedded form and returns from the check
@@ -872,12 +873,144 @@ final class SafeHttpClient
             return false;
         }
 
+        if (self::matchesDeniedPrefix($ip) || self::matchesDeniedIpv4Range($ip)) {
+            return false;
+        }
+
         $embedded = self::embeddedIpv4($ip);
         if ($embedded !== null) {
             return self::isPublicIp($embedded);
         }
 
         return true;
+    }
+
+    /**
+     * Prefixes refused OUTRIGHT, without looking at what they contain.
+     *
+     * Two different reasons to be on this list, and they are worth keeping
+     * straight:
+     *
+     * ⚠⚠ `64:ff9b:1::/48` — RFC 8215's LOCAL-USE NAT64 prefix. It is on
+     * this list rather than in {@see embeddedIpv4()} because its IPv4 is
+     * not at a fixed offset: RFC 6052 §2.2 lays the address out differently
+     * per prefix length, so for a /48 the four IPv4 bytes are SPLIT across
+     * bytes 6–8 and 9–11, skipping the byte-8 `u` octet. A tail decode
+     * silently misses every one of these, which is exactly the bug this
+     * replaces — the previous table entry compared twelve bytes and so only
+     * ever matched the single /96 whose bytes 6–11 are zero, while
+     * `64:ff9b:1:1234:5678:9abc:a00:1` and `64:ff9b:1:a9:fe00:a9fe::`
+     * sailed through. Refusing the whole /48 needs no layout knowledge at
+     * all, and costs nothing: a LOCAL-USE prefix is never a legitimate
+     * destination for an outbound fetch.
+     *
+     * ⚠ `fec0::/10` — deprecated site-local unicast (RFC 3879). Deprecated
+     * is not the same as unroutable, and the range flags still admit it.
+     *
+     * ⚠ Matching is on BITS, not bytes, because neither of these lands on a
+     * byte boundary in a way a `substr()` compare can express — /48 is six
+     * whole bytes but /10 is not, and the earlier byte-compare bug came
+     * from exactly that kind of shortcut.
+     *
+     * @return bool True when $ip falls inside a denied prefix.
+     */
+    private static function matchesDeniedPrefix(string $ip): bool
+    {
+        $packed = @inet_pton($ip);
+        if ($packed === false || strlen($packed) !== 16) {
+            return false; // IPv4 is handled by the flags + the CIDR fallback.
+        }
+
+        /** @var list<array{0: string, 1: int}> $denied prefix bytes, bit length */
+        $denied = [
+            ["\x00\x64\xff\x9b\x00\x01", 48], // 64:ff9b:1::/48 — RFC 8215 local-use NAT64
+            ["\xfe\xc0",                 10], // fec0::/10      — deprecated site-local
+        ];
+
+        foreach ($denied as [$prefix, $bits]) {
+            if (self::sharesBitPrefix($packed, $prefix, $bits)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether the first $bits of $packed equal the first $bits of $prefix.
+     *
+     * Whole bytes are compared directly; a trailing partial byte is masked
+     * so a /10 means ten bits and not "two bytes, near enough".
+     */
+    private static function sharesBitPrefix(string $packed, string $prefix, int $bits): bool
+    {
+        $wholeBytes = intdiv($bits, 8);
+        $oddBits    = $bits % 8;
+
+        if (strlen($prefix) < $wholeBytes + ($oddBits > 0 ? 1 : 0)) {
+            return false; // Malformed table entry — refuse to guess.
+        }
+
+        if ($wholeBytes > 0 && substr($packed, 0, $wholeBytes) !== substr($prefix, 0, $wholeBytes)) {
+            return false;
+        }
+
+        if ($oddBits === 0) {
+            return true;
+        }
+
+        $mask = (0xFF << (8 - $oddBits)) & 0xFF;
+
+        return (ord($packed[$wholeBytes]) & $mask) === (ord($prefix[$wholeBytes]) & $mask);
+    }
+
+    /**
+     * IPv4 ranges denied without relying on `FILTER_FLAG_GLOBAL_RANGE`.
+     *
+     * ⚠ Applied UNCONDITIONALLY, not only when the constant is missing.
+     * `GLOBAL_RANGE` denies these two as well, so on PHP 8.2+ this is
+     * redundant and cannot change a verdict — and that is the point: one
+     * code path on every supported runtime beats a second behavioural mode
+     * that only ever runs on versions nothing here is tested against.
+     *
+     * ⚠ This does NOT make the whole helper version-independent. The flag
+     * still covers reserved ranges beyond these two (RFC 5737
+     * documentation blocks, for instance), so a PHP 8.0/8.1 host remains
+     * weaker than an 8.2+ one. These two are listed because they are the
+     * ones with a plausible route to internal infrastructure: CGNAT is live
+     * carrier space and 198.18/15 is used for real benchmark rigs.
+     *
+     * @return bool True when $ip is an IPv4 address inside a denied range.
+     */
+    private static function matchesDeniedIpv4Range(string $ip): bool
+    {
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            return false;
+        }
+
+        $addr = ip2long($ip);
+        if ($addr === false) {
+            return false;
+        }
+
+        /** @var list<array{0: string, 1: string}> $ranges network, mask */
+        $ranges = [
+            ['100.64.0.0', '255.192.0.0'], // RFC 6598 CGNAT   100.64.0.0/10
+            ['198.18.0.0', '255.254.0.0'], // RFC 2544 bench   198.18.0.0/15
+        ];
+
+        foreach ($ranges as [$network, $mask]) {
+            $net  = ip2long($network);
+            $bits = ip2long($mask);
+            if ($net === false || $bits === false) {
+                continue;
+            }
+            if (($addr & $bits) === $net) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -890,14 +1023,25 @@ final class SafeHttpClient
      * Covers the four transition forms that a relay or NAT64 translator will
      * actually forward to the embedded address:
      *
-     *   2002::/16        6to4, IPv4 in bytes 2–5   (RFC 3056)
-     *   64:ff9b::/96     NAT64 well-known prefix   (RFC 6052)
-     *   64:ff9b:1::/48   NAT64 local-use prefix    (RFC 8215)
-     *   ::/96            IPv4-compatible, deprecated but still parsed
+     *   2002::/16         6to4, IPv4 in bytes 2–5  (RFC 3056)
+     *   64:ff9b::/96      NAT64 well-known prefix  (RFC 6052)
+     *   ::/96             IPv4-compatible, deprecated but still parsed
+     *   ::ffff:0:0:0/96   SIIT IPv4-translatable   (RFC 6052 §2.2)
      *
      * `::ffff:0:0/96` (IPv4-mapped) is listed too. The flags already refuse
      * it in both spellings today, and it is included so the set is decided
      * by this table rather than by which range PHP happens to cover.
+     *
+     * ⚠ `::ffff:0:0:0/96` IS A DIFFERENT PREFIX FROM `::ffff:0:0/96`, and
+     * the resemblance is a trap: the mapped form puts `ffff` in bytes 10–11
+     * and the translatable form puts it in bytes 8–9, so `::ffff:0:a9fe:a9fe`
+     * reached the metadata endpoint while `::ffff:a9fe:a9fe` was refused.
+     * Both rows are needed.
+     *
+     * ⚠ `64:ff9b:1::/48` is NOT here any more — see
+     * {@see matchesDeniedPrefix()}. Its IPv4 is split across bytes 6–8 and
+     * 9–11 per RFC 6052 §2.2 rather than sitting in the tail, so a tail
+     * decode cannot see it and the whole prefix is refused instead.
      *
      * ⚠ Teredo (`2001:0::/32`) is deliberately ABSENT. Its embedded client
      * IPv4 is stored bitwise-complemented, so decoding it would need a
@@ -918,10 +1062,10 @@ final class SafeHttpClient
         }
 
         $tailPrefixes = [
-            "\x00\x64\xff\x9b" . str_repeat("\x00", 8), // 64:ff9b::/96
-            "\x00\x64\xff\x9b\x00\x01" . str_repeat("\x00", 6), // 64:ff9b:1::/48
-            str_repeat("\x00", 12),                     // ::/96
-            str_repeat("\x00", 10) . "\xff\xff",        // ::ffff:0:0/96
+            "\x00\x64\xff\x9b" . str_repeat("\x00", 8),            // 64:ff9b::/96
+            str_repeat("\x00", 12),                                // ::/96
+            str_repeat("\x00", 10) . "\xff\xff",                   // ::ffff:0:0/96
+            str_repeat("\x00", 8) . "\xff\xff" . str_repeat("\x00", 2), // ::ffff:0:0:0/96
         ];
 
         foreach ($tailPrefixes as $prefix) {

@@ -159,13 +159,14 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
     }
 
     /**
-     * The IPv4 ranges only `FILTER_FLAG_GLOBAL_RANGE` knows about.
+     * CGNAT and the benchmark range, at the URL level.
      *
-     * ⚠ SKIPPED BELOW PHP 8.2, where the constant does not exist. The
-     * plugin declares PHP 8.0, so `isPublicIp()` applies the flag only when
-     * present and these ranges stay allowed on an older runtime — asserted
-     * as a skip rather than quietly omitted, so the gap is visible in the
-     * run output instead of being invisible.
+     * ⚠ NO LONGER SKIPPED BELOW PHP 8.2. The first round applied
+     * `FILTER_FLAG_GLOBAL_RANGE` when present and skipped this test
+     * otherwise, which left these two ranges open on a PHP 8.0/8.1 host —
+     * and the plugin declares 8.0. They are now denied explicitly by CIDR
+     * on every version, so the assertion is unconditional and the skip
+     * would have been hiding a real gap rather than documenting one.
      *
      * @return array<string, array{0: string}>
      */
@@ -179,12 +180,8 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
     }
 
     #[DataProvider('globalRangeOnlyUrls')]
-    public function testGlobalRangeOnlyIpv4IsBlockedWhereSupported(string $url): void
+    public function testCgnatAndBenchmarkIpv4AreBlockedOnEveryVersion(string $url): void
     {
-        if (!defined('FILTER_FLAG_GLOBAL_RANGE')) {
-            self::markTestSkipped('FILTER_FLAG_GLOBAL_RANGE requires PHP 8.2+');
-        }
-
         $result = SafeHttpClient::validatePublicUrl($url);
 
         self::assertInstanceOf(WP_Error::class, $result, "expected block for {$url}");
@@ -225,6 +222,37 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
             'NAT64 /48 -> 10.0.0.1'       => ['64:ff9b:1::0a00:0001', false],
             'IPv4-compatible -> 10.0.0.1' => ['::0a00:0001',          false],
             'IPv4-mapped -> metadata'     => ['::ffff:a9fe:a9fe',     false],
+
+            // ⚠ SIIT ::ffff:0:0:0/96 is a DIFFERENT prefix from the mapped
+            // ::ffff:0:0/96 above — `ffff` sits in bytes 8-9 rather than
+            // 10-11. The first round refused the mapped form and admitted
+            // this one, so both spellings are pinned.
+            'SIIT -> metadata'            => ['::ffff:0:a9fe:a9fe',   false],
+            'SIIT -> 10.0.0.1'            => ['::ffff:0:a00:1',       false],
+
+            // ⚠⚠ RFC 8215 local-use NAT64, refused as a WHOLE /48. Its
+            // IPv4 is split across bytes 6-8 and 9-11 (RFC 6052 §2.2), not
+            // in the tail, so round one's twelve-byte compare matched only
+            // the single /96 with zero middle bytes and let all of these
+            // through. Each was measured as ALLOWED before this fix.
+            'RFC8215 /48 scattered'       => ['64:ff9b:1:1234:5678:9abc:a00:1', false],
+            'RFC8215 /48 layout 10.0.0.1' => ['64:ff9b:1:a00:0:100::', false],
+            'RFC8215 /48 layout metadata' => ['64:ff9b:1:a9:fe00:a9fe::', false],
+            'RFC8215 /48 abcd'            => ['64:ff9b:1:abcd::a00:1', false],
+            'RFC8215 /48 bare prefix'     => ['64:ff9b:1::',          false],
+
+            // Deprecated site-local (RFC 3879) — deprecated is not
+            // unroutable, and the range flags still admit it.
+            'site-local fec0::/10 low'    => ['fec0::1',              false],
+            'site-local fec0::/10 high'   => ['feff::1',              false],
+
+            // CGNAT + benchmark, denied explicitly rather than via
+            // GLOBAL_RANGE, so the verdict no longer depends on PHP 8.2.
+            'CGNAT 100.64/10 low'         => ['100.64.0.1',           false],
+            'CGNAT 100.64/10 high'        => ['100.127.255.254',      false],
+            'benchmark 198.18/15 low'     => ['198.18.0.1',           false],
+            'benchmark 198.18/15 high'    => ['198.19.255.254',       false],
+
             // Already refused before the fix — must stay refused.
             'loopback v6'                 => ['::1',                  false],
             'ULA fc00::/7'                => ['fd00::1',              false],
@@ -237,6 +265,15 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
             'public v6'                   => ['2606:4700::1111',      true],
             'public v6 (other)'           => ['2001:4860:4860::8888', true],
             '6to4 wrapping a PUBLIC v4'   => ['2002:5db8:d822::1',    true],
+
+            // ⚠⚠ BOUNDARY CONTROLS — these are what keep the new denials
+            // from being quietly too wide. Without them, a /32 written
+            // where a /48 was meant, or a mask off by one bit, would pass
+            // every assertion above.
+            'just outside the /48'        => ['64:ff9b:2::1',         true],
+            'just below CGNAT'            => ['100.63.255.255',       true],
+            'just below benchmark'        => ['198.17.255.255',       true],
+            'just above benchmark'        => ['198.20.0.1',           true],
         ];
     }
 
