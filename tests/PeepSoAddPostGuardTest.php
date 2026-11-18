@@ -150,14 +150,14 @@ final class PeepSoAddPostGuardTest extends TestCase
     }
 
     /**
-     * ⚠⚠ THE RAW-BODY LEG, which is why the guard PINS rather than UNSETS.
+     * The raw request body cannot route the post either.
      *
-     * `post()` returns its `$default` when the key is not set, and `int()`'s
-     * default IS `raw_input()` — so `unset($_POST['group_id'])` is precisely
-     * what opens `parse_str(file_get_contents('php://input'))`. Pinning the
-     * key to a neutral value keeps `isset()` true, so the raw body is never
-     * consulted. An earlier draft of this guard unset the keys and would have
-     * failed this test.
+     * ⚠ MEASURED: for a DROPPED listener this is carried by the detach, not
+     * by the pin — a mutation that replaced the neutral pins with the writer's
+     * intent alone left this test green, because the group listener was not
+     * there to read anything. {@see testTheRawBodyCannotReachEvenAKeptListener()}
+     * is where the pin's raw-body protection is actually observable. Both are
+     * kept: this one pins the end-to-end behaviour, that one pins the reason.
      */
     public function testTheRawRequestBodyCannotRouteThePostEither(): void
     {
@@ -166,6 +166,53 @@ final class PeepSoAddPostGuardTest extends TestCase
         PeepSoStatusWriter::createSelfStatus(self::AUTHOR, 'hello');
 
         self::assertArrayNotHasKey('peepso_group_id', $this->meta());
+    }
+
+    /**
+     * ⚠⚠ THE RAW-BODY LEG AGAINST A LISTENER WE KEEP — the only place the PIN
+     * itself is observable, and the reason it pins rather than unsets.
+     *
+     * `post()` returns its `$default` when the key is not set, and `int()`'s
+     * default IS `raw_input()`. So `unset($_POST['anon_id'])` is PRECISELY
+     * what opens `parse_str(file_get_contents('php://input'))`; pinning it to
+     * 0 keeps `isset()` true and the raw body is never consulted.
+     *
+     * It has to be a KEPT listener to show this. For a dropped one there is
+     * no reader left, so the detach hides whether the pin works at all —
+     * which a mutation control demonstrated by surviving every other test in
+     * this file.
+     */
+    public function testTheRawBodyCannotReachEvenAKeptListener(): void
+    {
+        $GLOBALS['__bcc_apg']['raw'] = ['anon_id' => '777'];
+
+        PeepSoAddPostGuard::around(
+            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_PHOTOS],
+            ['type' => 'photo', 'files' => ['abc.jpg'], 'module_id' => 4],
+            static fn () => \PeepSoActivity::get_instance()->add_post(self::AUTHOR, self::AUTHOR, 'x')
+        );
+
+        self::assertContains(
+            'PeepSoSharePhotos::after_add_post',
+            $this->ran(),
+            'the photo listener was dropped, so this says nothing about the raw body'
+        );
+        self::assertSame([], $GLOBALS['__bcc_apg']['anon'], 'the raw body reached a kept listener');
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY for the test above: show the raw body DOES reach that
+     * listener when the key is merely absent rather than pinned. Without
+     * this, the assertion could hold because nothing reads `anon_id` at all.
+     */
+    public function testTheFixtureRawBodyReachesAKeptListenerWhenNotPinned(): void
+    {
+        $GLOBALS['__bcc_apg']['raw'] = ['anon_id' => '777'];
+        $_POST = ['type' => 'photo', 'files' => ['abc.jpg'], 'module_id' => 4];
+
+        (new \PeepSoSharePhotos())->after_add_post(self::POST_ID, 777);
+
+        self::assertSame([777], $GLOBALS['__bcc_apg']['anon']);
     }
 
     /**
