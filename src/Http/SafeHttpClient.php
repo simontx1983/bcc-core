@@ -42,8 +42,10 @@ final class SafeHttpClient
      * Hostnames blocked outright before DNS resolution.
      *
      * The IP literal path also rejects link-local (169.254/16) via
-     * FILTER_FLAG_NO_RES_RANGE, which covers the numeric forms of every
-     * cloud metadata service — but hostnames are cheap to short-circuit
+     * {@see isPublicIp()}, which covers the numeric forms of every cloud
+     * metadata service — including the IPv6 transition forms that embed
+     * one, which the range flags alone let through — but hostnames are
+     * cheap to short-circuit
      * before we pay for DNS, and catch DNS-rebinding setups that route a
      * normal-looking hostname to 169.254.169.254 at connect time.
      */
@@ -666,9 +668,40 @@ final class SafeHttpClient
             return new \WP_Error('ssrf_blocked', 'Blocked request to cloud metadata endpoint');
         }
 
+        // ⚠⚠ UNWRAP AN IPv6 LITERAL BEFORE JUDGING IT. `parse_url()` hands
+        // back the brackets ("[::1]", not "::1"), and `FILTER_VALIDATE_IP`
+        // refuses the bracketed form — so EVERY IPv6 literal used to fall
+        // past the branch below and land in the hostname/DNS path, where
+        // `gethostbyname("[::1]")` fails and the URL was refused as
+        // "resolves to no public IP addresses".
+        //
+        // That was fail-CLOSED, so not a hole on its own: no IPv6 literal
+        // reached the network, public ones included. But it silently made
+        // the literal check dead code for the whole family, which is
+        // exactly the family `isPublicIp()` exists to judge, and it refused
+        // legitimate public IPv6 literals as a side effect.
+        //
+        // ⚠ The brackets are stripped ONLY when what is inside is a real IP.
+        // RFC 3986 permits them around an IPv6 literal and nothing else, so
+        // "[evil.com]" is a malformed URL rather than a hostname to go and
+        // resolve — unwrapping it unconditionally would hand the DNS path a
+        // name the URL never legally contained.
+        if (strlen($host) > 1 && $host[0] === '[' && substr($host, -1) === ']') {
+            $inner = substr($host, 1, -1);
+            if (filter_var($inner, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) === false) {
+                return new \WP_Error('ssrf_invalid_url', 'Invalid URL: malformed IPv6 literal host');
+            }
+            $host = $inner;
+        }
+
         // If host is already an IP literal, validate it directly.
+        //
+        // ⚠ This is the ATTACKER-SPELLED path — the host arrives exactly as
+        // it was written in the URL, so {@see isPublicIp()} judges the bytes
+        // rather than the text. The flags alone used to let an IPv6 address
+        // carrying 169.254.169.254 straight through.
         if (filter_var($host, FILTER_VALIDATE_IP)) {
-            if (!filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            if (!self::isPublicIp($host)) {
                 return new \WP_Error('ssrf_blocked', "Blocked request to private/reserved IP: {$host}");
             }
             return null; // IP literal — no DNS to pin.
@@ -751,9 +784,10 @@ final class SafeHttpClient
      * Resolve a host to its first valid public IP (A or AAAA).
      *
      * Collects both A and AAAA records and returns the first entry that
-     * passes FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE. This
-     * closes mixed-record attacks where an A record passes validation but
-     * cURL picks a private AAAA at connect time.
+     * {@see isPublicIp()} accepts. This closes mixed-record attacks where an
+     * A record passes validation but cURL picks a private AAAA at connect
+     * time — and, since that helper decodes IPv4-embedding IPv6 forms, an
+     * AAAA record whose address merely WRAPS a private one.
      *
      * Note: PHP's userland resolver has no per-call timeout knob; the OS
      * resolver timeout applies (typically 5s). Callers combine this with
@@ -762,10 +796,8 @@ final class SafeHttpClient
      */
     private static function resolvePublicIp(string $host): ?string
     {
-        $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
-
         $ipv4 = gethostbyname($host);
-        if ($ipv4 !== $host && filter_var($ipv4, FILTER_VALIDATE_IP, $flags)) {
+        if ($ipv4 !== $host && self::isPublicIp($ipv4)) {
             return $ipv4;
         }
 
@@ -773,13 +805,293 @@ final class SafeHttpClient
         if (is_array($aaaaRecords)) {
             foreach ($aaaaRecords as $record) {
                 $ipv6 = $record['ipv6'] ?? '';
-                if ($ipv6 !== '' && filter_var($ipv6, FILTER_VALIDATE_IP, $flags)) {
+                if ($ipv6 !== '' && self::isPublicIp($ipv6)) {
                     return $ipv6;
                 }
             }
         }
 
         return null;
+    }
+
+    /**
+     * The ONE place an IP is judged public — shared by the IP-literal path in
+     * {@see validateAndPinUrl()} and by {@see resolvePublicIp()}, so the two
+     * cannot drift apart.
+     *
+     * ⚠⚠ `NO_PRIV_RANGE | NO_RES_RANGE` IS NOT ENOUGH, AND `GLOBAL_RANGE`
+     * DOES NOT FINISH THE JOB. Measured on PHP 8.2.30 with all three flags
+     * set, every one of these is ALLOWED while naming a private or metadata
+     * IPv4 that a relay actually delivers to:
+     *
+     *   2002:0a00:0001::1      6to4           carrying 10.0.0.1
+     *   2002:a9fe:a9fe::1      6to4           carrying 169.254.169.254
+     *   64:ff9b::0a00:0001     NAT64   /96    carrying 10.0.0.1
+     *   64:ff9b:1::0a00:0001   NAT64   /48    carrying 10.0.0.1  (RFC 8215)
+     *   ::0a00:0001            IPv4-compatible carrying 10.0.0.1
+     *
+     * ⚠⚠ WORSE, `filter_var()`'s VERDICT DEPENDS ON NOTATION. The SAME
+     * SIXTEEN BYTES get opposite answers:
+     *
+     *   64:ff9b::10.0.0.1      blocked   (dotted-quad tail)
+     *   64:ff9b::0a00:0001     ALLOWED   (identical bytes, hex tail)
+     *
+     * `validateAndPinUrl()` takes the host straight out of the URL, so the
+     * attacker chooses how to spell it. That is why the embedded-IPv4 test
+     * below reads the BYTES from `inet_pton()` and never the string.
+     *
+     * ⚠ The string check is deliberately KEPT rather than replaced by a
+     * normalise-then-check: PHP blanket-rejects a dotted-quad tail under
+     * these flags, including on plainly public addresses
+     * (`2606:4700::1.1.1.1` is blocked), and normalising would turn that
+     * into a pass. Layering only ever blocks more, so this change cannot
+     * open something that is refused today. The cost is that an unusually
+     * spelled public address stays refused, which for an outbound link
+     * fetcher is the right side to err on.
+     *
+     * ⚠ `FILTER_FLAG_GLOBAL_RANGE` is PHP 8.2+ and this plugin declares PHP
+     * 8.0, so it is applied only when present — referencing an undefined
+     * constant is a fatal `Error` on PHP 8, not a notice. CGNAT 100.64/10
+     * and benchmark 198.18/15 no longer depend on it either way: they are
+     * denied explicitly by {@see matchesDeniedIpv4Range()} on every version.
+     * The embedded-IPv4 decode and the denied-prefix list are both ours and
+     * version-independent too.
+     *
+     * ⚠ Recursion is bounded at one level: the recursive call is handed a
+     * dotted IPv4, which has no embedded form and returns from the check
+     * above it. IPv4 range policy therefore lives in exactly one place
+     * instead of being re-listed here.
+     */
+    private static function isPublicIp(string $ip): bool
+    {
+        $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+        if (defined('FILTER_FLAG_GLOBAL_RANGE')) {
+            $flags |= FILTER_FLAG_GLOBAL_RANGE;
+        }
+
+        if (filter_var($ip, FILTER_VALIDATE_IP, $flags) === false) {
+            return false;
+        }
+
+        if (self::matchesDeniedPrefix($ip) || self::matchesDeniedIpv4Range($ip)) {
+            return false;
+        }
+
+        $embedded = self::embeddedIpv4($ip);
+        if ($embedded !== null) {
+            return self::isPublicIp($embedded);
+        }
+
+        return true;
+    }
+
+    /**
+     * Prefixes refused OUTRIGHT, without looking at what they contain.
+     *
+     * Two different reasons to be on this list, and they are worth keeping
+     * straight:
+     *
+     * ⚠⚠ `64:ff9b:1::/48` — RFC 8215's LOCAL-USE NAT64 prefix. It is on
+     * this list rather than in {@see embeddedIpv4()} because its IPv4 is
+     * not at a fixed offset: RFC 6052 §2.2 lays the address out differently
+     * per prefix length, so for a /48 the four IPv4 bytes are SPLIT across
+     * bytes 6–8 and 9–11, skipping the byte-8 `u` octet. A tail decode
+     * silently misses every one of these, which is exactly the bug this
+     * replaces — the previous table entry compared twelve bytes and so only
+     * ever matched the single /96 whose bytes 6–11 are zero, while
+     * `64:ff9b:1:1234:5678:9abc:a00:1` and `64:ff9b:1:a9:fe00:a9fe::`
+     * sailed through. Refusing the whole /48 needs no layout knowledge at
+     * all, and costs nothing: a LOCAL-USE prefix is never a legitimate
+     * destination for an outbound fetch.
+     *
+     * ⚠ `fec0::/10` — deprecated site-local unicast (RFC 3879). Deprecated
+     * is not the same as unroutable, and the range flags still admit it.
+     *
+     * ⚠ Matching is on BITS, not bytes, because neither of these lands on a
+     * byte boundary in a way a `substr()` compare can express — /48 is six
+     * whole bytes but /10 is not, and the earlier byte-compare bug came
+     * from exactly that kind of shortcut.
+     *
+     * @return bool True when $ip falls inside a denied prefix.
+     */
+    private static function matchesDeniedPrefix(string $ip): bool
+    {
+        $packed = @inet_pton($ip);
+        if ($packed === false || strlen($packed) !== 16) {
+            return false; // IPv4 is handled by the flags + the CIDR fallback.
+        }
+
+        /** @var list<array{0: string, 1: int}> $denied prefix bytes, bit length */
+        $denied = [
+            ["\x00\x64\xff\x9b\x00\x01", 48], // 64:ff9b:1::/48 — RFC 8215 local-use NAT64
+            ["\xfe\xc0",                 10], // fec0::/10      — deprecated site-local
+        ];
+
+        foreach ($denied as [$prefix, $bits]) {
+            if (self::sharesBitPrefix($packed, $prefix, $bits)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether the first $bits of $packed equal the first $bits of $prefix.
+     *
+     * Whole bytes are compared directly; a trailing partial byte is masked
+     * so a /10 means ten bits and not "two bytes, near enough".
+     */
+    private static function sharesBitPrefix(string $packed, string $prefix, int $bits): bool
+    {
+        $wholeBytes = intdiv($bits, 8);
+        $oddBits    = $bits % 8;
+
+        if (strlen($prefix) < $wholeBytes + ($oddBits > 0 ? 1 : 0)) {
+            return false; // Malformed table entry — refuse to guess.
+        }
+
+        if ($wholeBytes > 0 && substr($packed, 0, $wholeBytes) !== substr($prefix, 0, $wholeBytes)) {
+            return false;
+        }
+
+        if ($oddBits === 0) {
+            return true;
+        }
+
+        $mask = (0xFF << (8 - $oddBits)) & 0xFF;
+
+        return (ord($packed[$wholeBytes]) & $mask) === (ord($prefix[$wholeBytes]) & $mask);
+    }
+
+    /**
+     * IPv4 ranges denied without relying on `FILTER_FLAG_GLOBAL_RANGE`.
+     *
+     * ⚠ Applied UNCONDITIONALLY, not only when the constant is missing.
+     * `GLOBAL_RANGE` denies these two as well, so on PHP 8.2+ this is
+     * redundant and cannot change a verdict — and that is the point: one
+     * code path on every supported runtime beats a second behavioural mode
+     * that only ever runs on versions nothing here is tested against.
+     *
+     * ⚠ This does NOT make the whole helper version-independent. The flag
+     * still covers reserved ranges beyond these two (RFC 5737
+     * documentation blocks, for instance), so a PHP 8.0/8.1 host remains
+     * weaker than an 8.2+ one. These two are listed because they are the
+     * ones with a plausible route to internal infrastructure: CGNAT is live
+     * carrier space and 198.18/15 is used for real benchmark rigs.
+     *
+     * @return bool True when $ip is an IPv4 address inside a denied range.
+     */
+    private static function matchesDeniedIpv4Range(string $ip): bool
+    {
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            return false;
+        }
+
+        $addr = ip2long($ip);
+        if ($addr === false) {
+            return false;
+        }
+
+        /** @var list<array{0: string, 1: string}> $ranges network, mask */
+        $ranges = [
+            ['100.64.0.0', '255.192.0.0'], // RFC 6598 CGNAT   100.64.0.0/10
+            ['198.18.0.0', '255.254.0.0'], // RFC 2544 bench   198.18.0.0/15
+        ];
+
+        foreach ($ranges as [$network, $mask]) {
+            $net  = ip2long($network);
+            $bits = ip2long($mask);
+            if ($net === false || $bits === false) {
+                continue;
+            }
+            if (($addr & $bits) === $net) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * The IPv4 an IPv6 address carries inside it, or null if it carries none.
+     *
+     * Decided on the sixteen bytes from `inet_pton()`, so the answer is the
+     * same however the address was spelled — see the notation note on
+     * {@see isPublicIp()} for why that matters.
+     *
+     * Covers the four transition forms that a relay or NAT64 translator will
+     * actually forward to the embedded address:
+     *
+     *   2002::/16         6to4, IPv4 in bytes 2–5  (RFC 3056)
+     *   64:ff9b::/96      NAT64 well-known prefix  (RFC 6052)
+     *   ::/96             IPv4-compatible, deprecated but still parsed
+     *   ::ffff:0:0:0/96   SIIT IPv4-translatable   (RFC 6052 §2.2)
+     *
+     * `::ffff:0:0/96` (IPv4-mapped) is listed too. The flags already refuse
+     * it in both spellings today, and it is included so the set is decided
+     * by this table rather than by which range PHP happens to cover.
+     *
+     * ⚠ `::ffff:0:0:0/96` IS A DIFFERENT PREFIX FROM `::ffff:0:0/96`, and
+     * the resemblance is a trap: the mapped form puts `ffff` in bytes 10–11
+     * and the translatable form puts it in bytes 8–9, so `::ffff:0:a9fe:a9fe`
+     * reached the metadata endpoint while `::ffff:a9fe:a9fe` was refused.
+     * Both rows are needed.
+     *
+     * ⚠ `64:ff9b:1::/48` is NOT here any more — see
+     * {@see matchesDeniedPrefix()}. Its IPv4 is split across bytes 6–8 and
+     * 9–11 per RFC 6052 §2.2 rather than sitting in the tail, so a tail
+     * decode cannot see it and the whole prefix is refused instead.
+     *
+     * ⚠ Teredo (`2001:0::/32`) is deliberately ABSENT. Its embedded client
+     * IPv4 is stored bitwise-complemented, so decoding it would need a
+     * different rule than the four above — and it does not need one: the
+     * whole prefix is already refused as reserved, which is a stronger
+     * answer than inspecting what it contains.
+     */
+    private static function embeddedIpv4(string $ip): ?string
+    {
+        $packed = @inet_pton($ip);
+        if ($packed === false || strlen($packed) !== 16) {
+            return null; // Not IPv6 (or unparseable) — nothing embedded.
+        }
+
+        // 6to4 is the one form that does NOT carry the IPv4 in the tail.
+        if (substr($packed, 0, 2) === "\x20\x02") {
+            return self::ipv4FromBytes(substr($packed, 2, 4));
+        }
+
+        $tailPrefixes = [
+            "\x00\x64\xff\x9b" . str_repeat("\x00", 8),            // 64:ff9b::/96
+            str_repeat("\x00", 12),                                // ::/96
+            str_repeat("\x00", 10) . "\xff\xff",                   // ::ffff:0:0/96
+            str_repeat("\x00", 8) . "\xff\xff" . str_repeat("\x00", 2), // ::ffff:0:0:0/96
+        ];
+
+        foreach ($tailPrefixes as $prefix) {
+            if (substr($packed, 0, 12) === $prefix) {
+                return self::ipv4FromBytes(substr($packed, 12, 4));
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Four raw bytes as a dotted IPv4, or null if they cannot be rendered.
+     *
+     * Split out so {@see embeddedIpv4()} has one return shape and PHPStan
+     * sees a `?string` rather than `inet_ntop()`'s `string|false`.
+     */
+    private static function ipv4FromBytes(string $bytes): ?string
+    {
+        if (strlen($bytes) !== 4) {
+            return null;
+        }
+
+        $rendered = @inet_ntop($bytes);
+
+        return $rendered === false ? null : $rendered;
     }
 
     /**
