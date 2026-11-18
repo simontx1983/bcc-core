@@ -549,6 +549,9 @@ final class PeepSoGroupRepository
      * Used by the leave path to refuse owner removal — PeepSo's
      * member_leave is unconditional on status, so the caller must
      * gate the call.
+     *
+     * A duplicated pair (no unique index) resolves by {@see statusRank()},
+     * the same row {@see findUserMembershipStatuses()} reports (F-354).
      */
     public static function getMembershipStatus(int $userId, int $groupId): ?string
     {
@@ -559,17 +562,20 @@ final class PeepSoGroupRepository
         global $wpdb;
         $members = self::membersTable();
 
-        $row = $wpdb->get_var($wpdb->prepare(
+        /** @var list<string> $statuses */
+        $statuses = $wpdb->get_col($wpdb->prepare(
             "SELECT gm_user_status
                FROM {$members}
               WHERE gm_user_id  = %d
                 AND gm_group_id = %d
-              LIMIT 1",
+              ORDER BY gm_id ASC
+              LIMIT %d",
             $userId,
-            $groupId
+            $groupId,
+            self::PAIR_ROW_CAP
         ));
 
-        return $row !== null ? (string) $row : null;
+        return self::rankedStatus(array_map('strval', $statuses));
     }
 
     /**
@@ -642,6 +648,29 @@ final class PeepSoGroupRepository
         return $out;
     }
 
+    /**
+     * The pair's winning status: best {@see statusRank()}, the first (lowest
+     * gm_id) row breaking a tie. null for no rows.
+     *
+     * @param list<string> $statuses in gm_id order
+     */
+    private static function rankedStatus(array $statuses): ?string
+    {
+        $best = null;
+        foreach ($statuses as $status) {
+            if ($best === null || self::statusRank($status) < self::statusRank($best)) {
+                $best = $status;
+            }
+        }
+        return $best;
+    }
+
+    /**
+     * Rows read for ONE (user, group) pair. A pair normally has one row; the
+     * cap bounds the read while leaving room for duplicates (F-354).
+     */
+    private const PAIR_ROW_CAP = 10;
+
     /** F-354 duplicate-row precedence: lower wins. */
     private static function statusRank(string $status): int
     {
@@ -700,7 +729,10 @@ final class PeepSoGroupRepository
      * membership (PeepSo's member_join() modifies ANY existing row) and
      * let leave() raw-DELETE the banned row. Both refuse on false.
      *
-     * Uncached, bounded by the (user, group) pair (LIMIT 1).
+     * Uncached, bounded by the (user, group) pair (LIMIT PAIR_ROW_CAP).
+     * A duplicated pair resolves by {@see statusRank()} — a banned row
+     * always wins — so the doors decide from the same row the list
+     * surfaces show (F-354).
      */
     public static function getMembershipStatusOrFail(int $userId, int $groupId): string|null|false
     {
@@ -720,19 +752,23 @@ final class PeepSoGroupRepository
                FROM {$members}
               WHERE gm_user_id  = %d
                 AND gm_group_id = %d
-              LIMIT 1",
+              ORDER BY gm_id ASC
+              LIMIT %d",
             $userId,
-            $groupId
+            $groupId,
+            self::PAIR_ROW_CAP
         ));
         if ($queryOk === false || (string) $wpdb->last_error !== '') {
             return false;
         }
 
-        $rows = is_array($wpdb->last_result) ? $wpdb->last_result : [];
-        if ($rows === [] || !isset($rows[0]->gm_user_status)) {
-            return null;
+        $statuses = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (isset($row->gm_user_status)) {
+                $statuses[] = (string) $row->gm_user_status;
+            }
         }
-        return (string) $rows[0]->gm_user_status;
+        return self::rankedStatus($statuses);
     }
 
     /**
