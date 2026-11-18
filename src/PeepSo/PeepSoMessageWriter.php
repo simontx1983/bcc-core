@@ -133,11 +133,23 @@ final class PeepSoMessageWriter
         $existingRoot = $model->get_conversation_between($authorId, $recipientId);
         $isExisting   = $existingRoot !== null && (int) $existingRoot > 0;
 
-        $result = $model->create_new_conversation(
-            $authorId,
-            $body,
-            '', // post_title — empty by convention (PeepSo uses post_content)
-            [$recipientId] // participants array; create_new_conversation auto-adds the creator
+        // ⚠⚠ F-361 — through the GUARD. messagesmodel.php:321 and :500 fire
+        // `peepso_activity_after_add_post` DIRECTLY; neither
+        // `create_new_conversation()` nor `add_to_conversation()` calls
+        // `add_post()` at all, so the whole request-driven listener family
+        // runs on a message send without the function that normally fires it.
+        // The embed listener's outbound fetch and the photos listener's
+        // `anon_id` copy both reach it — the groups and pages listeners bail
+        // on the post type, which is luck rather than design.
+        $result = PeepSoAddPostGuard::around(
+            [PeepSoAddPostGuard::KEEP_MENTIONS],
+            [],
+            static fn () => $model->create_new_conversation(
+                $authorId,
+                $body,
+                '', // post_title — empty by convention (PeepSo uses post_content)
+                [$recipientId] // participants; create_new_conversation adds the creator
+            )
         );
 
         if (is_wp_error($result) || $result === false) {
@@ -192,7 +204,13 @@ final class PeepSoMessageWriter
         }
 
         $model = new \PeepSoMessagesModel();
-        $result = $model->add_to_conversation($authorId, $rootMsgId, $body);
+        // ⚠⚠ F-361 — the same hook, fired directly at messagesmodel.php:500.
+        // See the note on sendNew() above; same guard, same keep-list.
+        $result = PeepSoAddPostGuard::around(
+            [PeepSoAddPostGuard::KEEP_MENTIONS],
+            [],
+            static fn () => $model->add_to_conversation($authorId, $rootMsgId, $body)
+        );
 
         if ($result === false || !is_int($result)) {
             return 0;

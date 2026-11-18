@@ -28,7 +28,34 @@ if (!defined('ABSPATH')) {
  *   PeepSoPolls::after_add_post          polls.php:241     options, allow_multiple
  *   PeepSoPostBackgrounds::after_add_post postbackgrounds.php:279 background, text_color, preset_id
  *
- * The one exception is `PeepSoTags::after_save_post` (tags.php:127), which
+ * ⚠⚠ AND `after_add_post` IS NOT THE ONLY PLACE. The listener list above is
+ * what runs AFTER the row exists; these run DURING the same write, and two of
+ * them were missed in the first pass:
+ *
+ *   `wp_insert_post` (a CORE WordPress hook, fired inside add_post)
+ *     PeepSoMoods::save_mood        moods.php:141     int('mood')      prio 100
+ *     PeepSoLocation::insert_post   location.php:248  value('location') prio 30
+ *     PeepSo3_Anon::save_anon_op    anon.php:113      int('anon_id')   prio 100
+ *   `peepso_activity_insert_data` (a FILTER on the row about to be written)
+ *     PeepSoPagesPlugin::activity_insert_data  pages.php:3037  int('page_id')
+ *       — forces `act_access` to PUBLIC, overriding the audience BCC passed
+ *         in `$extra` (the F-291 default-audience fix)
+ *     PeepSoSharePhotos::activity_insert_data  — rewrites act_module_id
+ *
+ * ⚠ None of those can be DETACHED safely — `wp_insert_post` is WordPress's
+ * own hook, and the photos filter is what the photo writer depends on. The
+ * PIN is the only control that reaches them, which is why it is the primary
+ * one and why {@see pinOnly()} exists for writes that are a bare
+ * `wp_insert_post()` with no `add_post()` around them.
+ *
+ * The comment path (`add_comment`, activity.php:364) has the same shape on
+ * {@see HOOK_COMMENT}: `PeepSoPagesPlugin::after_add_comment` (pages.php:3097)
+ * reads `post_as_page` and can make any member's comment render as authored
+ * BY the page, and the photos and giphy comment listeners read the request
+ * too. Its content-driven listeners are the three KEEP_COMMENT_* entries.
+ *
+ * The one exception on this hook is `PeepSoTags::after_save_post`
+ * (tags.php:127), which
  * reads the POST CONTENT for @mentions and gates each notification with
  * `PeepSo::check_permissions(PERM_POST_VIEW)`. It reads no request input, so
  * it is the only listener BCC keeps by default.
@@ -160,8 +187,18 @@ if (!defined('ABSPATH')) {
  */
 final class PeepSoAddPostGuard
 {
-    /** The hook every request-driven PeepSo listener hangs off. */
+    /** The hook every request-driven PeepSo POST listener hangs off. */
     public const HOOK = 'peepso_activity_after_add_post';
+
+    /**
+     * The comment equivalent, fired by `add_comment()` (activity.php:364+).
+     *
+     * ⚠ Its listeners take FOUR arguments, not two, which is why
+     * `accepted_args` is carried through the detach and restored rather than
+     * assumed — a re-registration at the wrong arity silently changes what a
+     * listener sees.
+     */
+    public const HOOK_COMMENT = 'peepso_after_add_comment';
 
     /**
      * The listener BCC always keeps: @mentions, derived from the post
@@ -174,6 +211,33 @@ final class PeepSoAddPostGuard
 
     /** Single-photo attach — kept only by {@see PeepSoPhotoWriter}. */
     public const KEEP_PHOTOS = ['PeepSoSharePhotos', 'after_add_post'];
+
+    // ── the comment hook's keep-list ────────────────────────────────────
+
+    /**
+     * @mentions on a COMMENT (tags.php:46 → `after_save_comment`). Same
+     * content-derived, permission-gated shape as {@see KEEP_MENTIONS}; a
+     * different method name, so it needs its own entry.
+     */
+    public const KEEP_COMMENT_MENTIONS = ['PeepSoTags', 'after_save_comment'];
+
+    /**
+     * `PeepSoActivityStream::activity_after_add_comment`
+     * (peepso/activity/activitystream.php:260) bumps the ROOT post's
+     * `post_modified`. Derived entirely from the comment row — it reads no
+     * request input — and feeds "recently active" ordering, so dropping it
+     * would quietly stop threads resurfacing when they get a reply.
+     */
+    public const KEEP_COMMENT_BUMP = ['PeepSoActivityStream', 'activity_after_add_comment'];
+
+    /**
+     * `PeepSo3_Anon::save_comments_anon_op` (peepso/3/classes/users/anon.php:131)
+     * carries the "original poster is anonymous" marker onto a reply. It is
+     * gated on the ROOT post's own meta matching the current user, not on
+     * anything in the request, so it is not a hijack surface — and dropping
+     * it would de-anonymise an anonymous OP's replies.
+     */
+    public const KEEP_COMMENT_ANON_OP = ['PeepSo3_Anon', 'save_comments_anon_op'];
 
     /**
      * Every request key PeepSo's listeners and pre-insert filters read,
@@ -219,6 +283,16 @@ final class PeepSoAddPostGuard
         'background'     => '',
         'text_color'     => '',
         'preset_id'      => '',
+        // ⚠⚠ READ ON `wp_insert_post`, NOT on an after-the-fact action, so
+        // these run inside add_post() AND inside any bare wp_insert_post():
+        //   PeepSoMoods::save_mood         moods.php:141     int('mood')
+        //   PeepSoLocation::insert_post    location.php:248  value('location')
+        //   PeepSo3_Anon::save_anon_op     anon.php:113      int('anon_id')
+        // `anon_id` is already pinned above for the photos path; `mood` and
+        // `location` were missed in the first pass and are a real gap, since
+        // `wp_insert_post` is a CORE hook that can never be detached.
+        'mood'           => 0,
+        'location'       => '',
     ];
 
     /**
@@ -257,15 +331,84 @@ final class PeepSoAddPostGuard
      */
     public static function around(array $keep, array $intended, callable $write)
     {
+        return self::aroundHooks([self::HOOK], $keep, $intended, $write);
+    }
+
+    /**
+     * PIN-ONLY: no hook is touched, the request is still neutralised.
+     *
+     * ⚠ For a write that is a bare `wp_insert_post()` rather than an
+     * `add_post()`. Three PeepSo listeners sit on `wp_insert_post` itself and
+     * read the request there:
+     *
+     *   PeepSoMoods::save_mood       moods.php:141     int('mood')
+     *   PeepSoLocation::insert_post  location.php:248  value('location')
+     *   PeepSo3_Anon::save_anon_op   anon.php:113      int('anon_id')
+     *
+     * The last one marks a post "posted anonymously", which is the one with a
+     * privacy consequence rather than a cosmetic one.
+     *
+     * ⚠⚠ DETACHING IS NOT AN OPTION HERE, and that is the whole reason this
+     * mode exists. `wp_insert_post` is a CORE WordPress hook: WordPress
+     * itself, BCC and every other plugin hang off it, so emptying it around a
+     * write would break far more than it protected. Pinning the request
+     * removes what those three listeners READ without touching what anyone
+     * RUNS.
+     *
+     * @template TResult
+     * @param array<string, mixed> $intended
+     * @param callable(): TResult  $write
+     * @return TResult
+     */
+    public static function pinOnly(array $intended, callable $write)
+    {
+        return self::aroundHooks([], [], $intended, $write);
+    }
+
+    /**
+     * The same guard over an explicit set of hooks.
+     *
+     * ⚠ Separate from {@see around()} rather than a fourth parameter on it,
+     * so the three post writers' call sites stay exactly as reviewed. The
+     * comment and message paths reach DIFFERENT hooks:
+     *
+     *   `add_comment()`                 → `peepso_after_add_comment`
+     *   `create_new_conversation()`     → `peepso_activity_after_add_post`,
+     *   `add_to_conversation()`           fired DIRECTLY by
+     *                                     peepso-messages/classes/messagesmodel.php:321
+     *                                     and :500 — those two never call
+     *                                     `add_post()` at all, so the hook is
+     *                                     reached without the function that
+     *                                     normally fires it.
+     *
+     * @template TResult
+     * @param list<string>                      $hooks    hook names to guard
+     * @param list<array{0: string, 1: string}> $keep     [class, method] pairs
+     *                                                    retained across ALL
+     *                                                    the named hooks
+     * @param array<string, mixed>              $intended the `$_POST` this
+     *                                                    writer means to say
+     * @param callable(): TResult               $write
+     * @return TResult
+     */
+    public static function aroundHooks(array $hooks, array $keep, array $intended, callable $write)
+    {
         $request  = self::pinRequest($intended);
-        $detached = self::detachListenersExcept($keep);
+
+        /** @var array<string, list<array{0: mixed, 1: int, 2: int}>> $detached */
+        $detached = [];
+        foreach ($hooks as $hook) {
+            $detached[$hook] = self::detachListenersExcept($hook, $keep);
+        }
 
         try {
             return $write();
         } finally {
             // Hooks first: the restored request must never be visible to a
             // listener that is still detached, nor the reverse.
-            self::reattach($detached);
+            foreach ($detached as $hook => $callbacks) {
+                self::reattach($hook, $callbacks);
+            }
             self::restoreRequest($request);
         }
     }
@@ -324,6 +467,57 @@ final class PeepSoAddPostGuard
         return 'hijacked';
     }
 
+    /**
+     * BACKSTOP FOR A COMMENT: strip a forged authorship stamp, keep the
+     * comment.
+     *
+     * ⚠ DELIBERATELY NOT {@see failClosedIfHijacked()}, and the difference is
+     * not squeamishness. That one deletes through
+     * `PeepSoActivity::delete_post()`, which also removes nested replies and
+     * likes — the exact reason {@see PeepSoCommentWriter::deleteComment()}
+     * trashes a comment's wp_post instead of calling it. Destroying a
+     * member's legitimate comment, and anything hanging off it, is a worse
+     * outcome than the thing being defended against.
+     *
+     * And nothing is left wrong by stripping: the only comment-level stamp a
+     * request can forge is `peepso_post_as_page` (+ the `peepso_page_id` it
+     * rides on), which makes the comment render as authored BY the page
+     * (peepso-pages/pages.php:3097). Remove the meta and the forgery is
+     * undone — the comment is the member's own words either way.
+     *
+     * ⚠ What this CANNOT undo, same as the post backstop: a notification a
+     * listener already fired. The pin and the detach are the fix.
+     *
+     * @return string|null a reason when something was stripped, else null
+     */
+    public static function stripForgedStamps(int $postId): ?string
+    {
+        if ($postId <= 0) {
+            return null;
+        }
+
+        $stripped = [];
+        foreach (self::AUTHORIZATION_STAMPS as $key) {
+            $value = get_post_meta($postId, $key, true);
+            if ($value === '' || $value === false || $value === null || (int) $value === 0) {
+                continue;
+            }
+            delete_post_meta($postId, $key);
+            $stripped[] = $key . '=' . (string) $value;
+        }
+
+        if ($stripped === []) {
+            return null;
+        }
+
+        \BCC\Core\Log\Logger::error(
+            '[bcc-core] PeepSo listener stamped a comment BCC did not route — detach failed',
+            ['post_id' => $postId, 'stamps' => implode(',', $stripped)]
+        );
+
+        return 'forged_stamp_stripped';
+    }
+
     // ── superglobals ────────────────────────────────────────────────────
 
     /**
@@ -361,16 +555,16 @@ final class PeepSoAddPostGuard
     // ── hooks ───────────────────────────────────────────────────────────
 
     /**
-     * Remove every callback on {@see HOOK} except the keep-list.
+     * Remove every callback on $hook except the keep-list.
      *
      * @param list<array{0: string, 1: string}> $keep
      * @return list<array{0: mixed, 1: int, 2: int}> [callback, priority, acceptedArgs]
      */
-    private static function detachListenersExcept(array $keep): array
+    private static function detachListenersExcept(string $hook, array $keep): array
     {
         $detached = [];
 
-        foreach (self::listenersByPriority() as $priority => $callbacks) {
+        foreach (self::listenersByPriority($hook) as $priority => $callbacks) {
             foreach ($callbacks as $entry) {
                 $fn = is_array($entry) ? ($entry['function'] ?? null) : null;
                 if ($fn === null || !is_callable($fn)) {
@@ -385,7 +579,7 @@ final class PeepSoAddPostGuard
                     $args = $entry['accepted_args'];
                 }
 
-                remove_action(self::HOOK, $fn, (int) $priority);
+                remove_action($hook, $fn, (int) $priority);
                 $detached[] = [$fn, (int) $priority, $args];
             }
         }
@@ -396,15 +590,15 @@ final class PeepSoAddPostGuard
     /**
      * @param list<array{0: mixed, 1: int, 2: int}> $detached
      */
-    private static function reattach(array $detached): void
+    private static function reattach(string $hook, array $detached): void
     {
         foreach ($detached as [$fn, $priority, $args]) {
-            add_action(self::HOOK, $fn, $priority, $args);
+            add_action($hook, $fn, $priority, $args);
         }
     }
 
     /**
-     * The hook's callbacks, priority => (id => entry).
+     * One hook's callbacks, priority => (id => entry).
      *
      * Same defensive shape as
      * {@see \BCC\Core\Admin\ForeignNoticeFilter::filter()}: WordPress stores
@@ -414,21 +608,21 @@ final class PeepSoAddPostGuard
      *
      * @return array<int|string, array<string, mixed>>
      */
-    private static function listenersByPriority(): array
+    private static function listenersByPriority(string $hook): array
     {
         /** @var array<string, mixed> $wpFilter */
         $wpFilter = $GLOBALS['wp_filter'] ?? [];
-        if (!is_array($wpFilter) || !isset($wpFilter[self::HOOK])) {
+        if (!is_array($wpFilter) || !isset($wpFilter[$hook])) {
             return [];
         }
 
-        $hook = $wpFilter[self::HOOK];
-        if (!is_object($hook) || !isset($hook->callbacks) || !is_array($hook->callbacks)) {
+        $registry = $wpFilter[$hook];
+        if (!is_object($registry) || !isset($registry->callbacks) || !is_array($registry->callbacks)) {
             return [];
         }
 
         /** @var array<int|string, array<string, mixed>> $byPriority */
-        $byPriority = $hook->callbacks;
+        $byPriority = $registry->callbacks;
 
         return $byPriority;
     }

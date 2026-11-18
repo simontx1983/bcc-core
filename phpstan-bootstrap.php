@@ -66,6 +66,41 @@ if (!class_exists('PeepSoActivity')) {
     }
 }
 
+// Referenced from src/PeepSo/PeepSoMessageWriter.php.
+//
+// ⚠ Added for F-361. Without it PHPStan cannot infer what these calls
+// return, and a generic helper wrapping them ("Unable to resolve the
+// template type TResult") fails level 8 — so the stub is what makes the
+// guard usable here, not a formality. Return types are taken from how the
+// writer narrows each result, which is the only contract we actually rely on:
+//
+//   create_new_conversation  is_wp_error($r) || $r === false, then (int) $r
+//   add_to_conversation      $r === false || !is_int($r)
+//   get_conversation_between $r !== null && (int) $r > 0
+//   get_root_conversation    (int) $r
+//
+// ⚠⚠ Neither write method calls `PeepSoActivity::add_post()`. Both fire
+// `peepso_activity_after_add_post` DIRECTLY
+// (peepso-messages/classes/messagesmodel.php:321 and :500), so the
+// request-driven listener family runs on a message send without the function
+// that normally fires that hook. {@see \BCC\Core\PeepSo\PeepSoAddPostGuard}.
+if (!class_exists('PeepSoMessagesModel')) {
+    class PeepSoMessagesModel
+    {
+        /**
+         * @param list<int> $participants
+         * @return int|false|\WP_Error
+         */
+        public function create_new_conversation(int $author_id, string $content, string $title = '', array $participants = []) { return false; }
+        /** @return int|false */
+        public function add_to_conversation(int $author_id, int $root_msg_id, string $content) { return false; }
+        /** @return int|string|null */
+        public function get_conversation_between(int $user_a, int $user_b) { return null; }
+        /** @return int|string */
+        public function get_root_conversation(int $message_id) { return 0; }
+    }
+}
+
 if (!class_exists('PeepSoSharePhotos')) {
     class PeepSoSharePhotos
     {

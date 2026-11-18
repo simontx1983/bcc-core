@@ -93,8 +93,13 @@ namespace {
         }
     }
 
+    // Honours `accepted_args` the way WordPress does, and that is not
+    // cosmetic here: the comment hook's listeners take FOUR arguments while
+    // the post hook's take two, so a fire that always passed two would
+    // ArgumentCountError on the comment path.
     if (!function_exists('__bcc_apg_fire')) {
-        function __bcc_apg_fire(string $hook, int $postId, int $actId): void
+        /** @param mixed ...$args */
+        function __bcc_apg_fire(string $hook, ...$args): void
         {
             $registry = $GLOBALS['wp_filter'][$hook] ?? null;
             if (!$registry instanceof FakeWpHook) {
@@ -103,9 +108,11 @@ namespace {
             foreach ($registry->callbacks as $callbacks) {
                 foreach ($callbacks as $entry) {
                     $fn = $entry['function'];
-                    if (is_callable($fn)) {
-                        $fn($postId, $actId);
+                    if (!is_callable($fn)) {
+                        continue;
                     }
+                    $accepted = isset($entry['accepted_args']) ? (int) $entry['accepted_args'] : 1;
+                    $fn(...array_slice($args, 0, max(0, $accepted)));
                 }
             }
         }
@@ -218,6 +225,13 @@ namespace {
                 unset($postId, $actId);
                 // Reads the post CONTENT, never the request.
                 $GLOBALS['__bcc_apg']['ran'][] = self::class . '::after_save_post';
+            }
+
+            /** tags.php:46 — the COMMENT equivalent, four arguments. */
+            public function after_save_comment($postId, $actId, $didNotify, $didEmail): void
+            {
+                unset($postId, $actId, $didNotify, $didEmail);
+                $GLOBALS['__bcc_apg']['ran'][] = self::class . '::after_save_comment';
             }
         }
     }
@@ -375,6 +389,184 @@ namespace {
             {
                 $GLOBALS['__bcc_apg']['deleted'][] = (int) $post_id;
             }
+
+            /**
+             * activity.php:364 — fires `peepso_after_add_comment`, a DIFFERENT
+             * hook from the post path, whose listeners take FOUR arguments.
+             *
+             * @param array<string, mixed> $extra
+             * @return int|false
+             */
+            public function add_comment($parent_post_id, $author_id, $content, $extra = array())
+            {
+                $GLOBALS['__bcc_apg']['add_comment'][] = [
+                    'parent'  => (int) $parent_post_id,
+                    'author'  => (int) $author_id,
+                    'content' => (string) $content,
+                    'extra'   => is_array($extra) ? $extra : [],
+                    'get'     => $_GET,
+                    'post'    => $_POST,
+                ];
+
+                $commentId = 5151;
+                __bcc_apg_fire('peepso_after_add_comment', $commentId, 888, false, false);
+
+                return $commentId;
+            }
+        }
+    }
+
+    // ── the comment hook's listeners ────────────────────────────────────
+
+    /** activitystream.php:260 — bumps the ROOT post's post_modified. */
+    if (!class_exists('PeepSoActivityStream', false)) {
+        class PeepSoActivityStream
+        {
+            public const CPT_POST    = 'peepso-post';
+            public const CPT_COMMENT = 'peepso-comment';
+
+            public function activity_after_add_comment($postId, $actId, $didNotify, $didEmail): void
+            {
+                unset($postId, $actId, $didNotify, $didEmail);
+                // Derived from the comment row; reads no request input.
+                $GLOBALS['__bcc_apg']['ran'][] = self::class . '::activity_after_add_comment';
+            }
+        }
+    }
+
+    /** anon.php:131 — gated on the ROOT post's own meta, not the request. */
+    if (!class_exists('PeepSo3_Anon', false)) {
+        class PeepSo3_Anon
+        {
+            public function save_comments_anon_op($postId, $actId, $didNotify, $didEmail): void
+            {
+                unset($postId, $actId, $didNotify, $didEmail);
+                $GLOBALS['__bcc_apg']['ran'][] = self::class . '::save_comments_anon_op';
+            }
+
+            /** anon.php:113, on `wp_insert_post` — marks a post anonymous. */
+            public function save_anon_op($postId, $post = null, $update = false): void
+            {
+                unset($post, $update);
+                $GLOBALS['__bcc_apg']['ran'][] = self::class . '::save_anon_op';
+
+                $anonId = (new __BccApgInput())->int('anon_id', 0);
+                if ($anonId > 0) {
+                    $GLOBALS['__bcc_apg']['meta'][(int) $postId]['peepso_post_anon_op'] = $anonId;
+                }
+            }
+        }
+    }
+
+    /** moods.php:141, on `wp_insert_post` at priority 100. */
+    if (!class_exists('PeepSoMoods', false)) {
+        class PeepSoMoods
+        {
+            public function save_mood($postId, $post = null, $update = false): void
+            {
+                unset($post, $update);
+                $GLOBALS['__bcc_apg']['ran'][] = self::class . '::save_mood';
+
+                $mood = (new __BccApgInput())->int('mood', 0);
+                if ($mood > 0) {
+                    $GLOBALS['__bcc_apg']['meta'][(int) $postId]['peepso_post_mood'] = $mood;
+                }
+            }
+        }
+    }
+
+    /** location.php:248, on `wp_insert_post` at priority 30. */
+    if (!class_exists('PeepSoLocation', false)) {
+        class PeepSoLocation
+        {
+            public function insert_post($postId, $post = null, $update = false): void
+            {
+                unset($post, $update);
+                $GLOBALS['__bcc_apg']['ran'][] = self::class . '::insert_post';
+
+                $location = (new __BccApgInput())->value('location', '');
+                if (is_string($location) && $location !== '') {
+                    $GLOBALS['__bcc_apg']['meta'][(int) $postId]['peepso_post_location'] = $location;
+                }
+            }
+        }
+    }
+
+    /**
+     * pages.php:3097 — reads `post_as_page` from the REQUEST and can make any
+     * member's comment render as authored BY the page.
+     *
+     * ⚠ The real one only acts when the ROOT post already carries
+     * `peepso_page_id`. Modelled with the fixture pre-seeded that way, since
+     * otherwise the listener is inert and the test would pass for the wrong
+     * reason.
+     */
+    if (!function_exists('__bcc_apg_pages_after_add_comment')) {
+        function __bcc_apg_pages_after_add_comment($postId, $actId, $didNotify, $didEmail): void
+        {
+            unset($actId, $didNotify, $didEmail);
+            $GLOBALS['__bcc_apg']['ran'][] = 'PeepSoPagesPlugin::after_add_comment';
+
+            if (($GLOBALS['__bcc_apg']['root_page_id'] ?? 0) <= 0) {
+                return;
+            }
+            $input = new __BccApgInput();
+            $GLOBALS['__bcc_apg']['meta'][(int) $postId]['peepso_page_id']
+                = $GLOBALS['__bcc_apg']['root_page_id'];
+            if ($input->int('post_as_page', 0) > 0) {
+                $GLOBALS['__bcc_apg']['meta'][(int) $postId]['peepso_post_as_page'] = 1;
+            }
+        }
+    }
+
+    /**
+     * ⚠⚠ messagesmodel.php:321 and :500 fire
+     * `peepso_activity_after_add_post` DIRECTLY — neither write method calls
+     * `add_post()`, so the post hook is reached without the function that
+     * normally fires it. Modelled exactly that way.
+     */
+    if (!class_exists('PeepSoMessagesModel', false)) {
+        class PeepSoMessagesModel
+        {
+            /**
+             * @param list<int> $participants
+             * @return int|false
+             */
+            public function create_new_conversation($author_id, $content, $title = '', $participants = [])
+            {
+                unset($content, $title, $participants);
+                $GLOBALS['__bcc_apg']['messages'][] = (int) $author_id;
+
+                $messageId = 6161;
+                __bcc_apg_fire('peepso_activity_after_add_post', $messageId, 999);
+
+                return $messageId;
+            }
+
+            /** @return int|false */
+            public function add_to_conversation($author_id, $root_msg_id, $content)
+            {
+                unset($author_id, $root_msg_id, $content);
+
+                $messageId = 6262;
+                __bcc_apg_fire('peepso_activity_after_add_post', $messageId, 998);
+
+                return $messageId;
+            }
+
+            /** @return int|null */
+            public function get_conversation_between($a, $b)
+            {
+                unset($a, $b);
+
+                return null;
+            }
+
+            /** @return int */
+            public function get_root_conversation($message_id)
+            {
+                return (int) $message_id;
+            }
         }
     }
 
@@ -442,6 +634,60 @@ namespace BCC\Core\PeepSo {
             $GLOBALS['__bcc_apg']['meta'][(int) $postId][$key] = $value;
 
             return true;
+        }
+    }
+
+    if (!\function_exists('BCC\Core\PeepSo\delete_post_meta')) {
+        function delete_post_meta($postId, $key, $value = ''): bool
+        {
+            unset($value);
+            unset($GLOBALS['__bcc_apg']['meta'][(int) $postId][$key]);
+
+            return true;
+        }
+    }
+
+    // ⚠ A FAKE wp_insert_post that fires the three CORE-hook readers, because
+    // the pin-only mode's whole subject is what they read. Priorities match
+    // PeepSo's: location 30, then moods and anon at 100.
+    if (!\function_exists('BCC\Core\PeepSo\wp_insert_post')) {
+        /**
+         * @param array<string, mixed> $postarr
+         * @return int
+         */
+        function wp_insert_post($postarr, $wp_error = false): int
+        {
+            unset($postarr, $wp_error);
+            $postId = 7171;
+            (new \PeepSoLocation())->insert_post($postId);
+            (new \PeepSoMoods())->save_mood($postId);
+            (new \PeepSo3_Anon())->save_anon_op($postId);
+
+            return $postId;
+        }
+    }
+
+    if (!\function_exists('BCC\Core\PeepSo\is_wp_error')) {
+        /** @param mixed $thing */
+        function is_wp_error($thing): bool
+        {
+            return $thing instanceof \WP_Error;
+        }
+    }
+
+    if (!\function_exists('BCC\Core\PeepSo\wp_kses_post')) {
+        /** @param mixed $text */
+        function wp_kses_post($text): string
+        {
+            return (string) $text;
+        }
+    }
+
+    if (!\function_exists('BCC\Core\PeepSo\sanitize_text_field')) {
+        /** @param mixed $text */
+        function sanitize_text_field($text): string
+        {
+            return (string) $text;
         }
     }
 

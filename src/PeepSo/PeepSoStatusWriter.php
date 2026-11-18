@@ -353,16 +353,26 @@ final class PeepSoStatusWriter
         // Blog vs status discrimination is handled downstream by the
         // `_bcc_activity_module='blog'` post_meta marker, NOT by the
         // post_type field — see BlogStatusTransitionHandler.
-        $postId = wp_insert_post([
-            'post_type'    => 'peepso-post',
-            'post_status'  => $status,
-            'post_author'  => $authorId,
-            'post_title'   => $titleField,
-            // wp_kses_post on save protects against script injection in the
-            // body. Markdown stays as-is; the frontend handles rendering.
-            'post_excerpt' => wp_kses_post($excerpt),
-            'post_content' => wp_kses_post($fullText),
-        ], true);
+        // ⚠⚠ F-361 — PIN-ONLY, because this is a bare wp_insert_post() and
+        // three PeepSo listeners sit on that CORE hook reading the request:
+        // moods (`mood`), location (`location`) and the anonymous-OP marker
+        // (`anon_id`, which makes the post render as "posted anonymously").
+        // Nothing is detached — `wp_insert_post` is WordPress's own hook and
+        // emptying it would break far more than it protected — so the pin is
+        // the whole control here. {@see PeepSoAddPostGuard::pinOnly()}.
+        $postId = PeepSoAddPostGuard::pinOnly(
+            [], // a blog post drives nothing through the request
+            static fn () => wp_insert_post([
+                'post_type'    => 'peepso-post',
+                'post_status'  => $status,
+                'post_author'  => $authorId,
+                'post_title'   => $titleField,
+                // wp_kses_post on save protects against script injection in
+                // the body. Markdown stays as-is; the frontend renders it.
+                'post_excerpt' => wp_kses_post($excerpt),
+                'post_content' => wp_kses_post($fullText),
+            ], true)
+        );
 
         if (is_wp_error($postId) || (int) $postId <= 0) {
             return 0;
