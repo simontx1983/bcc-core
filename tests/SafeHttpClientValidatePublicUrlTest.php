@@ -115,14 +115,23 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
     /**
      * Anti-vacuity: the fix must not blanket-block the prefixes it inspects.
      *
-     * A 6to4 address wrapping a PUBLIC IPv4 is a legitimate public address,
-     * and so is an ordinary global IPv6 literal. If these were refused, the
-     * tests above would pass for a helper that simply rejected every IPv6
-     * address — which is the easy wrong implementation here.
+     * An ordinary global IPv6 literal is a legitimate public address. If
+     * these were refused, the tests above would pass for a helper that
+     * simply rejected every IPv6 address — which is the easy wrong
+     * implementation here.
      *
      * ⚠ The plain `2606:4700::1111` case also pins the bracket fix: before
      * it, EVERY bracketed IPv6 literal fell through to the DNS path and was
      * refused, public ones included.
+     *
+     * ⚠⚠ PUBLIC 6to4 USED TO BE A ROW HERE and is not any more, because its
+     * verdict depends on the PHP version — see
+     * {@see testPublicSixToFourFollowsTheRuntimeFlags()}, which derives the
+     * expectation instead of hard-coding one version's answer.
+     *
+     * ⚠ `2001:4860:4860::8888` doubles as the upper boundary control for the
+     * Teredo `2001::/32` denial: a /16 written where a /32 was meant would
+     * refuse it.
      *
      * @return array<string, array{0: string}>
      */
@@ -131,7 +140,6 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
         return [
             'public v6 literal'         => ['https://[2606:4700::1111]/x'],
             'public v6 literal (other)' => ['https://[2001:4860:4860::8888]/x'],
-            '6to4 wrapping a PUBLIC v4' => ['https://[2002:5db8:d822::1]/x'],
         ];
     }
 
@@ -142,6 +150,90 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
             SafeHttpClient::validatePublicUrl($url),
             "{$url} is public and must not be refused"
         );
+    }
+
+    /**
+     * ⚠⚠ PUBLIC 6to4 IS A VERSION-DEPENDENT VERDICT, so this derives the
+     * expectation from the runtime rather than hard-coding one.
+     *
+     * Measured with every range flag the runtime offers:
+     *
+     *   PHP 8.1.23   2002:5db8:d822::1   allowed
+     *   PHP 8.2.30   2002:5db8:d822::1   allowed
+     *   PHP 8.3.29   2002:5db8:d822::1   REFUSED
+     *
+     * 8.3's `FILTER_FLAG_GLOBAL_RANGE` refuses ALL of `2002::/16`, public
+     * 6to4 included. Production runs 8.3 while CI runs 8.2, so the flat
+     * `true` the first round wrote into two providers was right on CI and
+     * wrong on prod — it would go red the day CI moves to 8.3, and it
+     * asserted PHP's policy rather than ours.
+     *
+     * What IS ours, and is identical on every version: the embedded-IPv4
+     * decode must never be the thing that refuses a 6to4 address wrapping a
+     * PUBLIC IPv4. So the assertion is an EQUALITY with the runtime's own
+     * flag verdict, preceded by a check that the wrapped IPv4 is itself
+     * judged public — if the address is refused at all, the flags refused it
+     * and our layer merely agreed.
+     *
+     * ⚠ Delegating the expectation does NOT make this vacuous. A helper that
+     * just returned the flag verdict would pass this test and fail every
+     * private-embedded case in {@see embeddedIpv4Urls()} and
+     * {@see helperVerdicts()}, where the flags say "allowed" and the only
+     * correct answer is "refused".
+     *
+     * @return array<string, array{0: string, 1: string}>
+     */
+    public static function publicSixToFourPairs(): array
+    {
+        return [
+            // 5db8:d822 is 93.184.216.34; 0101:0101 is 1.1.1.1.
+            'wrapping 93.184.216.34' => ['2002:5db8:d822::1', '93.184.216.34'],
+            'wrapping 1.1.1.1'       => ['2002:0101:0101::1', '1.1.1.1'],
+        ];
+    }
+
+    #[DataProvider('publicSixToFourPairs')]
+    public function testPublicSixToFourFollowsTheRuntimeFlags(
+        string $sixToFour,
+        string $wrapped
+    ): void {
+        $ref = new ReflectionMethod(SafeHttpClient::class, 'isPublicIp');
+        $ref->setAccessible(true);
+
+        $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+        if (defined('FILTER_FLAG_GLOBAL_RANGE')) {
+            $flags |= FILTER_FLAG_GLOBAL_RANGE;
+        }
+        $flagsAllow = filter_var($sixToFour, FILTER_VALIDATE_IP, $flags) !== false;
+
+        // The wrapped IPv4 is public space, so the decode cannot be the
+        // refuser — without this, the equality below could hold for the
+        // wrong reason.
+        self::assertTrue(
+            $ref->invoke(null, $wrapped),
+            "{$wrapped} is public space and must be judged public"
+        );
+
+        self::assertSame(
+            $flagsAllow,
+            $ref->invoke(null, $sixToFour),
+            sprintf(
+                '%s must follow the runtime range flags (PHP %s says %s), never the decode',
+                $sixToFour,
+                PHP_VERSION,
+                $flagsAllow ? 'allowed' : 'refused'
+            )
+        );
+
+        // Same answer at the URL level, through the bracket unwrap.
+        $url    = "https://[{$sixToFour}]/x";
+        $result = SafeHttpClient::validatePublicUrl($url);
+        if ($flagsAllow) {
+            self::assertNull($result, "{$url} must be allowed where the runtime flags allow it");
+        } else {
+            self::assertInstanceOf(WP_Error::class, $result, "expected block for {$url}");
+            self::assertSame('ssrf_blocked', $result->get_error_code(), "wrong code for {$url}");
+        }
     }
 
     /**
@@ -246,6 +338,14 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
             'site-local fec0::/10 low'    => ['fec0::1',              false],
             'site-local fec0::/10 high'   => ['feff::1',              false],
 
+            // ⚠ Teredo (RFC 4380), refused as a whole /32. Its embedded
+            // IPv4 is in bytes 4-7 AND bitwise-complemented in the last
+            // four, so there is nothing a tail decode could read. Measured
+            // ALLOWED on 8.1.23 — the flags only deny it from 8.2 on, which
+            // is why it is a prefix row and not left to GLOBAL_RANGE.
+            'Teredo 2001::/32 bottom'     => ['2001::1',              false],
+            'Teredo 2001::/32 middle'     => ['2001:0:1234::1',       false],
+
             // CGNAT + benchmark, denied explicitly rather than via
             // GLOBAL_RANGE, so the verdict no longer depends on PHP 8.2.
             'CGNAT 100.64/10 low'         => ['100.64.0.1',           false],
@@ -263,14 +363,20 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
             'public v4'                   => ['93.184.216.34',        true],
             'public v4 (resolver)'        => ['1.1.1.1',              true],
             'public v6'                   => ['2606:4700::1111',      true],
+            // ⚠ Also the Teredo upper boundary: a /16 written where /32 was
+            // meant would refuse this.
             'public v6 (other)'           => ['2001:4860:4860::8888', true],
-            '6to4 wrapping a PUBLIC v4'   => ['2002:5db8:d822::1',    true],
+
+            // ⚠ Public 6to4 is NOT asserted here — the verdict depends on
+            // the PHP version. {@see testPublicSixToFourFollowsTheRuntimeFlags()}.
 
             // ⚠⚠ BOUNDARY CONTROLS — these are what keep the new denials
             // from being quietly too wide. Without them, a /32 written
             // where a /48 was meant, or a mask off by one bit, would pass
             // every assertion above.
+            'just below the /48'          => ['64:ff9b:0:1::1',       true],
             'just outside the /48'        => ['64:ff9b:2::1',         true],
+            'outside fec0::/10'           => ['fe40::1',              true],
             'just below CGNAT'            => ['100.63.255.255',       true],
             'just below benchmark'        => ['198.17.255.255',       true],
             'just above benchmark'        => ['198.20.0.1',           true],
@@ -336,6 +442,84 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
             $denied,
             $ref->invoke(null, $ip),
             sprintf('%s should %sbe denied by the CIDR fallback', $ip, $denied ? '' : 'NOT ')
+        );
+    }
+
+    /**
+     * ⚠⚠ THE DENIED-PREFIX TABLE ON ITS OWN, for the same reason the CIDR
+     * fallback above has its own test: through `isPublicIp()` some of these
+     * are refused twice over and the verdict cannot say which layer did it.
+     *
+     * Measured with every range flag the runtime offers:
+     *
+     *   2001::1        allowed on 8.1.23; REFUSED from 8.2 (GLOBAL_RANGE)
+     *   64:ff9b:1::    allowed on 8.1.23, 8.2.30 AND 8.3.29
+     *   fec0::1        allowed on 8.1.23, 8.2.30 AND 8.3.29
+     *
+     * So the Teredo rows pass through `isPublicIp()` on CI even with the
+     * table entry deleted — that gap only opens on the 8.0/8.1 hosts the
+     * entry exists for, and no 8.0 runtime is available to test on. Calling
+     * the matcher directly is what makes the version-independent denial a
+     * tested claim rather than a comment.
+     *
+     * ⚠ The `false` rows are boundary controls, and they are the whole point
+     * of matching on bits. Without them:
+     *   - `64:ff9b:0:1::1` — a /32 or /47 written where /48 was meant passes
+     *     every other assertion in this file;
+     *   - `2001:0:1234::1` (true) — an over-NARROW Teredo row, /48 instead
+     *     of /32, would miss it while still catching `2001::1`;
+     *   - `fe40::1` / `fe80::1` — deleting the partial-byte mask in
+     *     `sharesBitPrefix()` turns /10 into /8 and survives everything else;
+     *   - `2001:1::1` — a /16 where /32 was meant swallows most of the global
+     *     unicast space in use today.
+     *
+     * ⚠ This matcher is deliberately indifferent to the range flags and to
+     * IPv4: it reads bytes from `inet_pton()` and nothing else, so an IPv4
+     * address is NOT its business and must come back false.
+     *
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function deniedPrefixVerdicts(): array
+    {
+        return [
+            // RFC 8215 local-use NAT64, refused as a whole /48.
+            'RFC8215 /48 bottom'      => ['64:ff9b:1::',                            true],
+            'RFC8215 /48 top'         => ['64:ff9b:1:ffff:ffff:ffff:ffff:ffff',     true],
+            'just below the /48'      => ['64:ff9b:0:1::1',                         false],
+            'just above the /48'      => ['64:ff9b:2::1',                           false],
+
+            // Teredo, refused as a whole /32.
+            'Teredo bottom'           => ['2001::1',                                true],
+            'Teredo middle'           => ['2001:0:1234::1',                         true],
+            'Teredo top'              => ['2001:0:ffff:ffff:ffff:ffff:ffff:ffff',   true],
+            'just above Teredo'       => ['2001:1::1',                              false],
+            'public 2001:4860'        => ['2001:4860:4860::8888',                   false],
+
+            // Deprecated site-local, the one odd-bit prefix in the table.
+            'fec0::/10 bottom'        => ['fec0::1',                                true],
+            'fec0::/10 top'           => ['feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', true],
+            'link-local is a /10 too' => ['fe80::1',                                false],
+            'fe40::/10 is another'    => ['fe40::1',                                false],
+
+            // Not this matcher's business.
+            'private v4'              => ['10.0.0.1',                               false],
+            'public v4'               => ['93.184.216.34',                           false],
+            'not an IP at all'        => ['nonsense',                                false],
+        ];
+    }
+
+    #[DataProvider('deniedPrefixVerdicts')]
+    public function testDeniedPrefixMatchesOnBitsIndependentlyOfGlobalRange(
+        string $ip,
+        bool $denied
+    ): void {
+        $ref = new ReflectionMethod(SafeHttpClient::class, 'matchesDeniedPrefix');
+        $ref->setAccessible(true);
+
+        self::assertSame(
+            $denied,
+            $ref->invoke(null, $ip),
+            sprintf('%s should %sbe denied by the prefix table', $ip, $denied ? '' : 'NOT ')
         );
     }
 }
