@@ -8,6 +8,7 @@ use BCC\Core\Http\SafeHttpClient;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
 use WP_Error;
 
 /**
@@ -188,5 +189,67 @@ final class SafeHttpClientValidatePublicUrlTest extends TestCase
 
         self::assertInstanceOf(WP_Error::class, $result, "expected block for {$url}");
         self::assertSame('ssrf_blocked', $result->get_error_code(), "wrong code for {$url}");
+    }
+
+    /**
+     * ⚠⚠ THE HELPER ITSELF, because the REACHABLE path cannot be reached
+     * from a URL in a unit test.
+     *
+     * The exploitable site is `resolvePublicIp()`: an attacker who controls
+     * DNS for their own name answers with an AAAA record of
+     * `64:ff9b::a9fe:a9fe`, it satisfies the range flags, and it is then
+     * PINNED as the connect target — so the pin that exists to defeat DNS
+     * rebinding instead guarantees the request lands on the metadata
+     * endpoint. That method calls `gethostbyname()` / `dns_get_record()`
+     * directly with no injectable seam, so a network-free test cannot drive
+     * it, and the tests above reach only the URL-literal site.
+     *
+     * What makes those two sites agree is that both now ask `isPublicIp()`
+     * and nothing else. Pinning the helper's verdicts therefore covers the
+     * DNS site's decision; the one-line call there is all that is left
+     * untested, and it is visible in the diff.
+     *
+     * ⚠ Addresses go in as BARE IPs here — no brackets. That is the form
+     * `resolvePublicIp()` sees, since `$record['ipv6']` from
+     * `dns_get_record()` is never bracketed.
+     *
+     * @return array<string, array{0: string, 1: bool}>
+     */
+    public static function helperVerdicts(): array
+    {
+        return [
+            // Embedded private/metadata IPv4 — all ALLOWED before this fix.
+            '6to4 -> 10.0.0.1'            => ['2002:0a00:0001::1',    false],
+            '6to4 -> metadata'            => ['2002:a9fe:a9fe::1',    false],
+            'NAT64 /96 -> metadata'       => ['64:ff9b::a9fe:a9fe',   false],
+            'NAT64 /48 -> 10.0.0.1'       => ['64:ff9b:1::0a00:0001', false],
+            'IPv4-compatible -> 10.0.0.1' => ['::0a00:0001',          false],
+            'IPv4-mapped -> metadata'     => ['::ffff:a9fe:a9fe',     false],
+            // Already refused before the fix — must stay refused.
+            'loopback v6'                 => ['::1',                  false],
+            'ULA fc00::/7'                => ['fd00::1',              false],
+            'metadata v4'                 => ['169.254.169.254',      false],
+            'rfc1918 v4'                  => ['10.0.0.1',             false],
+            'not an IP at all'            => ['nonsense',             false],
+            // Public — must stay allowed, or link previews break.
+            'public v4'                   => ['93.184.216.34',        true],
+            'public v4 (resolver)'        => ['1.1.1.1',              true],
+            'public v6'                   => ['2606:4700::1111',      true],
+            'public v6 (other)'           => ['2001:4860:4860::8888', true],
+            '6to4 wrapping a PUBLIC v4'   => ['2002:5db8:d822::1',    true],
+        ];
+    }
+
+    #[DataProvider('helperVerdicts')]
+    public function testIsPublicIpVerdict(string $ip, bool $expected): void
+    {
+        $ref = new ReflectionMethod(SafeHttpClient::class, 'isPublicIp');
+        $ref->setAccessible(true);
+
+        self::assertSame(
+            $expected,
+            $ref->invoke(null, $ip),
+            sprintf('%s should be judged %s', $ip, $expected ? 'public' : 'NOT public')
+        );
     }
 }
