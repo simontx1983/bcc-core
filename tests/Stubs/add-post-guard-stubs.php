@@ -659,9 +659,11 @@ namespace BCC\Core\PeepSo {
         {
             unset($postarr, $wp_error);
             $postId = 7171;
-            (new \PeepSoLocation())->insert_post($postId);
-            (new \PeepSoMoods())->save_mood($postId);
-            (new \PeepSo3_Anon())->save_anon_op($postId);
+            // â  DISPATCHED through the hook registry, not called directly.
+            // Calling them directly made a test vacuous: a mutation that made
+            // pin-only DETACH `wp_insert_post` survived, because the fixture
+            // was not going through the registry the detach acts on.
+            \__bcc_apg_fire('wp_insert_post', $postId, null, false);
 
             return $postId;
         }

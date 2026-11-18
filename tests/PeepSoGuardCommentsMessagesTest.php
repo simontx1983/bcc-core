@@ -87,6 +87,14 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
         \__bcc_apg_add('peepso_after_add_comment', [new \PeepSoGiphy(), 'after_add_post'], 10, 4);
         \__bcc_apg_add('peepso_after_add_comment', [new \PeepSoSharePhotos(), 'after_add_post'], 10, 4);
 
+        // ⚠ The CORE hook, registered the way PeepSo does (location at 30,
+        // moods and anon at 100) so the fixture's wp_insert_post DISPATCHES
+        // through the registry. Calling them directly made a mutation that
+        // detached this hook survive every test.
+        \__bcc_apg_add('wp_insert_post', [new \PeepSoLocation(), 'insert_post'], 30, 3);
+        \__bcc_apg_add('wp_insert_post', [new \PeepSoMoods(), 'save_mood'], 100, 3);
+        \__bcc_apg_add('wp_insert_post', [new \PeepSo3_Anon(), 'save_anon_op'], 100, 3);
+
         // The post hook, which the MESSAGES model fires directly.
         \__bcc_apg_add('peepso_activity_after_add_post', [new \PeepSoActivity(), 'handle_embed_data'], 10, 2);
         \__bcc_apg_add('peepso_activity_after_add_post', [new \PeepSoTags(), 'after_save_post'], 10, 2);
@@ -245,7 +253,12 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
     /**
      * ⭐ `mood` and `location` were MISSED by the first pass, and they are
      * read on `wp_insert_post` — a CORE hook, so there is nothing to detach.
-     * The pin is the only control that reaches them.
+     *
+     * ⚠ This covers the QUERY-STRING route, which is closed by `$_GET` being
+     * emptied wholesale rather than by either key's entry in `PINNED_KEYS`.
+     * {@see testTheRawBodyCannotSupplyAMoodEither()} is where the `mood`
+     * entry itself is load-bearing. A mutation deleting it survived this
+     * test, which is how that became clear.
      */
     public function testStrayMoodAndLocationDoNotStickToABlogPost(): void
     {
@@ -259,6 +272,51 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
         self::assertArrayNotHasKey('peepso_post_mood', $this->meta(self::BLOG_ID));
         self::assertArrayNotHasKey('peepso_post_location', $this->meta(self::BLOG_ID));
         self::assertArrayNotHasKey('peepso_post_anon_op', $this->meta(self::BLOG_ID));
+    }
+
+    /**
+     * ⚠⚠ WHERE THE `mood` PIN ENTRY ACTUALLY EARNS ITS PLACE.
+     *
+     * `save_mood` reads `int('mood')`, and `int()` falls through `$_GET` →
+     * `$_POST` → the raw body. Emptying `$_GET` closes the first leg;
+     * replacing `$_POST` closes the second only if the key is PRESENT with a
+     * neutral value, because an absent key is exactly what sends `int()` on
+     * to `php://input`. This is the one assertion that fails when `'mood' =>
+     * 0` is deleted from `PINNED_KEYS`.
+     *
+     * ⚠ And `location` has NO such test on purpose, because none is possible:
+     * it is read with `value()`, which has no raw-body leg at all
+     * (peepso/classes/input.php:38-46). With `$_GET` emptied and `$_POST`
+     * replaced, `value('location')` returns its default whether or not
+     * `'location'` is in `PINNED_KEYS` — the entry cannot change a verdict.
+     * It is kept for symmetry and as a record of the attack surface, and this
+     * is said out loud rather than dressed up as coverage. The same is true
+     * of every other `value()`-read key in that list; the load-bearing ones
+     * are the `int()`-read keys: group_id, page_id, post_as_page, module_id,
+     * anon_id, post_id, privacy, allow_multiple and mood.
+     */
+    public function testTheRawBodyCannotSupplyAMoodEither(): void
+    {
+        $GLOBALS['__bcc_apg']['raw'] = ['mood' => '7'];
+
+        PeepSoStatusWriter::createSelfBlogPost(self::AUTHOR, 'excerpt', 'full text');
+
+        self::assertContains(
+            'PeepSoMoods::save_mood',
+            $this->ran(),
+            'the mood listener did not run, so this says nothing about the pin'
+        );
+        self::assertArrayNotHasKey('peepso_post_mood', $this->meta(self::BLOG_ID));
+    }
+
+    /** ⚠ ANTI-VACUITY: unpinned, the raw body DOES reach save_mood. */
+    public function testTheFixtureRawBodyReachesSaveMood(): void
+    {
+        $GLOBALS['__bcc_apg']['raw'] = ['mood' => '7'];
+
+        (new \PeepSoMoods())->save_mood(self::BLOG_ID);
+
+        self::assertSame(7, $this->meta(self::BLOG_ID)['peepso_post_mood'] ?? null);
     }
 
     /**
