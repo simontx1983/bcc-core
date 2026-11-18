@@ -411,11 +411,15 @@ final class Throttle
     }
 
     /**
-     * F-290: give back the slot a successful call used — for a route that
-     * only wants FAILED attempts counted (password sign-in: a correct
-     * password must not use up the member's budget). Same bucket as
+     * F-290: give back the slot an allowed call used, for a request that a
+     * LATER limit then refused (password sign-in: when a per-account bucket
+     * says no, the buckets the request already passed get their slots back,
+     * so the refused request costs nothing). Not for successes: a correct
+     * password stays counted. Same bucket as
      * allow($action, …, $window, $key): pass the same action, window and key.
-     * Never takes a bucket below zero. Best-effort: a missing backend, or a
+     * Never takes a bucket below zero. With the bcc-trust RateLimiter, a
+     * release after a window boundary takes the slot from the NEW window
+     * (see RateLimiter::releaseByKey). Best-effort: a missing backend, or a
      * bcc-trust without releaseByKey(), is a silent no-op — the call then
      * simply stays counted, the safe direction.
      */
