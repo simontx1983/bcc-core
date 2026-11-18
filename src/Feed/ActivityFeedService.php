@@ -664,15 +664,7 @@ final class ActivityFeedService
             if ($postId > 0) {
                 $post = get_post($postId);
                 if ($post instanceof \WP_Post) {
-                    // post_content holds the user's text. PeepSo
-                    // htmlspecialchars'd it on write — strip back to
-                    // plain UTF-8 for the feed-item body. The frontend
-                    // is responsible for any rendering treatment.
-                    $text = html_entity_decode(
-                        (string) $post->post_content,
-                        ENT_QUOTES,
-                        'UTF-8'
-                    );
+                    $text = self::plainTextFromStoredContent((string) $post->post_content);
                 }
             }
             return [
@@ -704,6 +696,37 @@ final class ActivityFeedService
         }
 
         return [];
+    }
+
+    /**
+     * F-350: a status post's stored `post_content` → the PLAIN TEXT the
+     * feed contract's `body.text` promises.
+     *
+     * PeepSo does not store what the user typed. `PeepSoActivity::add_post()`
+     * runs its `peepso_activity_post_content` filter at WRITE time and saves
+     * the result: every URL becomes
+     * `<a class="ps-media__link ps-media-link" href="…" rel="nofollow">URL</a>`,
+     * and a stray `<` the user typed is stored as `&lt;`. Passing that
+     * through as text made the frontend (which renders `body.text` as text,
+     * never as HTML) show raw markup to readers.
+     *
+     * Order matters:
+     *   1. drop <script>/<style> elements WITH their contents (they never
+     *      hold readable text), as wp_strip_all_tags() does;
+     *   2. strip every remaining tag — a PeepSo link keeps its visible text,
+     *      which is the URL as the user typed it;
+     *   3. only THEN decode entities, so the user's literal `<` (stored as
+     *      `&lt;`) comes back as text instead of being eaten as a tag.
+     *
+     * Nothing here emits markup, so nothing can be injected: whatever HTML
+     * is stored, the output is text. Pure, so it is tested without WordPress.
+     */
+    public static function plainTextFromStoredContent(string $stored): string
+    {
+        $text = (string) preg_replace('@<(script|style)[^>]*?>.*?</\\1>@si', '', $stored);
+        $text = strip_tags($text);
+
+        return html_entity_decode($text, ENT_QUOTES, 'UTF-8');
     }
 
     /**
