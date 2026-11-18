@@ -62,7 +62,65 @@ final class RenderingWpdb
         $this->lastSql = $sql;
         ++$this->queryCount;
 
+        // F-275: a raised driver error reads as `[]`, exactly as real
+        // `get_results()` hands it back. That indistinguishability is the
+        // defect; '' (the default) leaves every existing test unchanged.
+        if ($this->errorOnQuery !== '') {
+            $this->last_error = $this->errorOnQuery;
+            return [];
+        }
+
         return $this->resultsToReturn;
+    }
+
+    // ── F-275: the trusted read path (ProbesReads::trustedRows) ─────────
+    // Additive. Modelled on BlockedSender\CaptureWpdb, which carries the
+    // full reasoning for each case.
+
+    /** Real `wpdb::$last_error`; production clears it before a trusted read. */
+    public string $last_error = '';
+
+    /** A driver error the NEXT read raises, or '' for success. */
+    public string $errorOnQuery = '';
+
+    /**
+     * Forces `query()` to return false WITHOUT an error, which models
+     * real wpdb's pre-`flush()` bails (a failed reconnect, an empty
+     * `query` filter result): no `last_error`, and `last_result` still
+     * holds the PREVIOUS query's rows.
+     */
+    public bool $bailBeforeFlush = false;
+
+    /** @var list<object> Real `wpdb::$last_result`. */
+    public array $last_result = [];
+
+    /** @var list<string> `last_error` as seen when each `query()` began. */
+    public array $errorSeenAtQuery = [];
+
+    /**
+     * Real `wpdb::query()`: the ROW COUNT for a SELECT (so a genuine empty
+     * result is 0, not false), or false on failure. Rows are left alone on
+     * either failure, as the real pre-flush bail leaves them.
+     *
+     * @return int|false
+     */
+    public function query(string $sql)
+    {
+        $this->lastSql = $sql;
+        ++$this->queryCount;
+        $this->errorSeenAtQuery[] = $this->last_error;
+
+        if ($this->errorOnQuery !== '') {
+            $this->last_error = $this->errorOnQuery;
+            return false;
+        }
+        if ($this->bailBeforeFlush) {
+            return false;
+        }
+
+        $this->last_result = $this->resultsToReturn;
+
+        return count($this->resultsToReturn);
     }
 
     /** @var object|null */
@@ -80,6 +138,13 @@ final class RenderingWpdb
     {
         $this->lastSql = $sql;
         ++$this->queryCount;
+
+        // F-275: a raised driver error reads as null, as real `get_row()`
+        // hands it back — the same answer as "no such row".
+        if ($this->errorOnQuery !== '') {
+            $this->last_error = $this->errorOnQuery;
+            return null;
+        }
 
         return $this->rowToReturn;
     }

@@ -57,9 +57,40 @@ final class ActivityFeedService
 
     private PeepSoGraphService $graph;
 
-    public function __construct(PeepSoGraphService $graph)
+    /**
+     * F-275: see the constructor. Initialised here as well, so an
+     * instance made without the constructor (reflection in tests) reads
+     * the historical behaviour rather than failing on an unset property.
+     */
+    private bool $throwOnReadFailure = false;
+
+    /**
+     * @param bool $throwOnReadFailure F-275, OPT-IN. When true, every
+     *   activity read this instance makes (the three list reads and the
+     *   permalink read) throws {@see \BCC\Core\Contracts\ActivityReadFailedException}
+     *   when the read did not run, instead of answering an empty page or
+     *   null. That is what lets a feed say "try again" rather than
+     *   "nothing here". `false` (the default) keeps every method
+     *   byte-identical.
+     *
+     *   ⚠ A CONSTRUCTOR FLAG, NOT A PER-METHOD PARAMETER, ON PURPOSE. The
+     *   read methods take up to thirteen parameters, and their callers
+     *   pass the tail by name. A new named argument would be a fatal
+     *   "unknown named parameter" on any bcc-core that predates it, and
+     *   positional padding there is the silent-slip hazard the
+     *   `$enforcePostVisibility` notes describe. An extra POSITIONAL
+     *   constructor argument is simply ignored by an older bcc-core, so a
+     *   bcc-trust that passes it cannot fatal whichever plugin deploys
+     *   first.
+     *
+     *   ⚠ HYDRATION IS UNCHANGED. Only the candidate read decides whether
+     *   rows exist. Author, reaction and body lookups keep their own
+     *   fallbacks, which degrade an item rather than hide a page.
+     */
+    public function __construct(PeepSoGraphService $graph, bool $throwOnReadFailure = false)
     {
-        $this->graph = $graph;
+        $this->graph              = $graph;
+        $this->throwOnReadFailure = $throwOnReadFailure;
     }
 
     /**
@@ -112,7 +143,8 @@ final class ActivityFeedService
             $hallFeed,
             viewerId: $viewerId,
             viewerFriendIds: $viewerFriendIds,
-            enforcePostVisibility: $enforcePostVisibility
+            enforcePostVisibility: $enforcePostVisibility,
+            throwOnReadFailure: $this->throwOnReadFailure
         );
 
         $hasMore = count($rows) > $limit;
@@ -225,7 +257,8 @@ final class ActivityFeedService
             null,
             viewerId: $viewerId,
             viewerFriendIds: $viewerFriendIds,
-            enforcePostVisibility: $enforcePostVisibility
+            enforcePostVisibility: $enforcePostVisibility,
+            throwOnReadFailure: $this->throwOnReadFailure
         );
 
         $hasMore = count($rows) > $limit;
@@ -305,7 +338,8 @@ final class ActivityFeedService
             null,
             viewerId: $viewerId,
             viewerFriendIds: $viewerFriendIds,
-            enforcePostVisibility: $enforcePostVisibility
+            enforcePostVisibility: $enforcePostVisibility,
+            throwOnReadFailure: $this->throwOnReadFailure
         );
 
         $hasMore = count($rows) > $limit;
@@ -386,7 +420,8 @@ final class ActivityFeedService
             $allowedModuleIds,
             viewerFriendIds: $viewerFriendIds,
             enforcePostVisibility: $enforcePostVisibility,
-            viewerId: $viewerId
+            viewerId: $viewerId,
+            throwOnReadFailure: $this->throwOnReadFailure
         );
         if ($row === null || (string) $row->act_status !== 'publish') {
             return null;
