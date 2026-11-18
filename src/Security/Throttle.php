@@ -65,13 +65,20 @@ final class Throttle
     private static array $loggedOnce = [];
 
     /**
-     * Context of the most recent allow() call: {limit, window, at}. Lets a
-     * bcc_rate_limited 429 carry precise Retry-After / X-RateLimit-* values
-     * without every call site threading them (Phase 6 contract fix). Overwritten
-     * on each call; only read on a denial — the endpoint returns immediately on
-     * deny, so this holds the FAILING call's context at that point.
+     * The most recent allow() call that was DENIED in this request:
+     * {limit, window, at, retry_after}. Lets a bcc_rate_limited 429 carry
+     * precise Retry-After / X-RateLimit-* values without every call site
+     * threading them (Phase 6 contract fix).
      *
-     * @var array{limit: int, window: int, at: int}|null
+     * F-289: written ONLY on a deny. It used to be written on every call, so
+     * a 429 that no throttle caused (a cooldown, the captcha step-up) picked
+     * up whichever bucket had last let the request through. An allowed call
+     * now leaves it alone, so a later 429 of another kind finds null, and an
+     * earlier denial a caller chose to work around is still the one
+     * recorded. `retry_after` is the seconds until a retry would pass (the
+     * time left, not the window). See denied().
+     *
+     * @var array{limit: int, window: int, at: int, retry_after: int}|null
      */
     private static ?array $lastDenial = null;
 
@@ -110,14 +117,52 @@ final class Throttle
     }
 
     /**
-     * Context of the most recent allow() call — {limit, window, at} — for the
-     * Envelope to attach Retry-After / X-RateLimit-* to a bcc_rate_limited 429.
+     * The most recent DENIED allow() call in this request —
+     * {limit, window, at, retry_after} — for the bcc-trust Envelope to attach
+     * Retry-After / X-RateLimit-* to a bcc_rate_limited 429. Null when no
+     * call has been denied (F-289). `retry_after` is the seconds from `at`
+     * until a retry would pass.
      *
-     * @return array{limit: int, window: int, at: int}|null
+     * @return array{limit: int, window: int, at: int, retry_after: int}|null
      */
     public static function lastDenial(): ?array
     {
         return self::$lastDenial;
+    }
+
+    /**
+     * Record a deny for lastDenial() and return false, so each deny in
+     * allow() reads `return self::denied(…)`.
+     */
+    private static function denied(int $limit, int $window, int $retryAfter): bool
+    {
+        self::$lastDenial = [
+            'limit'       => $limit,
+            'window'      => $window,
+            'at'          => time(),
+            'retry_after' => max(1, $retryAfter),
+        ];
+        return false;
+    }
+
+    /**
+     * F-289: seconds until a retry on the bcc-trust RateLimiter bucket $key
+     * would pass — the time left, solved from the bucket's own counts. A
+     * bcc-trust without retryAfterByKey() answers the window, the value
+     * Retry-After always carried.
+     */
+    private static function rateLimiterRetryAfter(string $key, int $limit, int $window): int
+    {
+        // Feature-detected: retryAfterByKey() ships in a later bcc-trust
+        // than this bcc-core may run beside.
+        $retryAfter = ['\\BCC\\Trust\\Core\\Security\\RateLimiter', 'retryAfterByKey'];
+        if (is_callable($retryAfter)) {
+            $seconds = call_user_func($retryAfter, $key, $limit, $window);
+            if (is_int($seconds)) {
+                return $seconds;
+            }
+        }
+        return $window;
     }
 
     /**
@@ -336,9 +381,9 @@ final class Throttle
      */
     public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null, bool $countDenied = true): bool
     {
-        // Record this call's limit/window so a resulting 429 can advertise an
-        // accurate Retry-After / X-RateLimit-* (read centrally by the Envelope).
-        self::$lastDenial = ['limit' => $limit, 'window' => $window, 'at' => time()];
+        // Every deny below goes through denied(), which records it for the
+        // Envelope's Retry-After / X-RateLimit-*. An allowed call records
+        // nothing (F-289).
 
         // Fail-closed when proxy config is ambiguous AND operator has opted
         // in via BCC_REQUIRE_TRUSTED_PROXY_CONFIG. Without this, a site that
@@ -353,7 +398,7 @@ final class Throttle
                     'action' => $action,
                 ]);
             });
-            return false;
+            return self::denied($limit, $window, $window);
         }
 
         // FAIL CLOSED when no safe backend is available. Previously this
@@ -375,7 +420,7 @@ final class Throttle
                     'action' => $action,
                 ]);
             });
-            return false;
+            return self::denied($limit, $window, $window);
         }
 
         $key = self::bucketKey($action, $key);
@@ -387,13 +432,19 @@ final class Throttle
             $ok = \BCC\Trust\Core\Security\RateLimiter::allowByKey($key, $limit, $window, $countDenied);
             if ($ok) {
                 self::touchLastSuccess();
+                return true;
             }
-            return $ok;
+            // A sliding window: the wait is anywhere from 0 to two windows,
+            // so ask the bucket rather than advertise its window.
+            return self::denied($limit, $window, self::rateLimiterRetryAfter($key, $limit, $window));
         }
 
         // With persistent object cache (Redis/Memcached): use atomic wp_cache.
+        // Its bucket is one fixed TTL of $window from the first call, so the
+        // window is the most a retry can have to wait.
         if (wp_using_ext_object_cache()) {
-            return self::allowViaObjectCache($action, $key, $limit, $window, $countDenied);
+            return self::allowViaObjectCache($action, $key, $limit, $window, $countDenied)
+                || self::denied($limit, $window, $window);
         }
 
         // Unreachable by construction: isReady() returns true iff the
