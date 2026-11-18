@@ -1,0 +1,468 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BCC\Core\PeepSo;
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+/**
+ * ⚠⚠ THE ONE SAFE WAY FOR BCC TO CALL `PeepSoActivity::add_post()`.
+ *
+ * ── THE BUG THIS EXISTS FOR ──────────────────────────────────────────
+ *
+ * `add_post()` fires `peepso_activity_after_add_post`
+ * (peepso/activity/classes/activity.php:270), and EVERY listener on that
+ * hook except one reads the CURRENT REQUEST to decide what to do — with no
+ * authorization check of its own, because in PeepSo's own UI the request
+ * was shaped by PeepSo's own form:
+ *
+ *   PeepSoGroupsPlugin::after_add_post   groups.php:1616   group_id, module_id
+ *   PeepSoPagesPlugin::after_add_post    pages.php:1764    page_id, module_id, post_as_page
+ *   PeepSoActivity::handle_embed_data    activity.php:5769 type, embed  → OUTBOUND FETCH
+ *   PeepSoSharePhotos::after_add_post    …photos.php:729   type, files
+ *   PeepSoSharePhotos::after_add_post_album …photos.php:2212 type, photo, name, privacy, module_id
+ *   PeepSoGiphy::after_add_post          giphy.php:408     type, giphy
+ *   PeepSoPolls::after_add_post          polls.php:241     options, allow_multiple
+ *   PeepSoPostBackgrounds::after_add_post postbackgrounds.php:279 background, text_color, preset_id
+ *
+ * The one exception is `PeepSoTags::after_save_post` (tags.php:127), which
+ * reads the POST CONTENT for @mentions and gates each notification with
+ * `PeepSo::check_permissions(PERM_POST_VIEW)`. It reads no request input, so
+ * it is the only listener BCC keeps by default.
+ *
+ * ⚠⚠ AND `PeepSoInput` READS THE QUERY STRING FIRST. Measured in
+ * peepso/classes/input.php:
+ *
+ *   value($k)  $_GET  → $_POST            → (never the raw body)
+ *   int($k)    $_GET  → $_POST            → raw body (parse_str of php://input)
+ *   raw($k)    —      → $_POST            → (get_raw() at :89 is an EMPTY stub,
+ *                                           so $_GET is ignored for raw())
+ *
+ * Two consequences, and the second is the one that is easy to miss:
+ *
+ *   1. A BCC REST create can carry its real arguments in the JSON body and
+ *      a SECOND, contradictory set in the query string. BCC sees "post on my
+ *      own wall"; PeepSo sees `?group_id=<a secret group>&module_id=8` and
+ *      stamps `peepso_group_id` on the post, then fires
+ *      `peepso_groups_new_post`, which notifies that group's followers. BCC's
+ *      group gate never ran, because BCC was never told about a group — and
+ *      `peepso_group_id` post-meta is what ~14 BCC files read to decide which
+ *      group a post belongs to, so from that moment the post IS that group's
+ *      as far as the feeds, {@see \BCC\Core\Repositories\PeepSoGroupRepository}
+ *      and the interaction gate are concerned.
+ *
+ *   2. The query string OUTRANKS the `$_POST` values OUR OWN WRITERS SET.
+ *      {@see PeepSoPhotoWriter} sets `$_POST['module_id'] = 4` and
+ *      `$_POST['type'] = 'photo'` to drive PeepSo's photo path; a request
+ *      carrying `?module_id=8` wins over both. So the integration surface the
+ *      writers depend on is itself hijackable, which is why clearing the
+ *      superglobals is part of this guard and not a separate nicety.
+ *
+ * ── PIN THE INPUT, THEN DETACH ───────────────────────────────────────
+ *
+ * ⚠⚠ UNSETTING A KEY IS NOT ENOUGH, AND IS WORSE THAN USELESS. `post()`
+ * returns its `$default` when `!isset($_POST[$name])`, and `int()`'s default
+ * IS `raw_input()` — so `unset($_POST['group_id'])` is exactly what makes
+ * `int()` fall through to `parse_str(file_get_contents('php://input'))`, a
+ * stream no superglobal hygiene can reach. The key must therefore be PINNED
+ * to a neutral value, not removed: `isset()` is then true, `post()` answers
+ * with the pin, and the raw body is never consulted.
+ *
+ * So the guard pins rather than sanitises:
+ *
+ *   `$_GET`     emptied — it outranks everything
+ *   `$_REQUEST` emptied — not a `PeepSoInput` source, but other PeepSo code
+ *                         reads it, and emptying it costs nothing
+ *   `$_POST`    REPLACED by {@see PINNED_KEYS} (every key these listeners
+ *               read, at a neutral value) merged with exactly what the
+ *               calling writer means to say
+ *
+ * ⚠ `files`, `photo` and `options` pin to `[]` and NOT `''`, because their
+ * readers do `count($input->value('files', array()))`. A string there is a
+ * `TypeError` in PHP 8 — a pin that fatals is not a safe default.
+ *
+ * Pinning also covers listeners nobody has enumerated yet, including ones a
+ * future PeepSo release adds, which is what makes it the primary control and
+ * the detach below defence in depth.
+ *
+ * The keep-list is an ALLOWLIST, not a denylist, for the same reason: a
+ * listener PeepSo adds in a future release is dropped by default rather than
+ * silently trusted. The cost is that a new PeepSo feature BCC wants has to be
+ * named here — a visible, reviewable line — instead of arriving unannounced.
+ *
+ * ⚠ Both halves are needed, and `anon_id` is the clearest proof. The photo
+ * writer must KEEP `PeepSoSharePhotos::after_add_post`, and that listener's
+ * `save_images()` reads `anon_id` (peepso-photos/classes/photosmodel.php:100)
+ * and copies the uploaded image plus its thumbnails into THAT member's photo
+ * folder. Detaching cannot close it, because the listener is one we keep;
+ * only the pin closes it.
+ *
+ * ── WHAT THIS CANNOT DO ──────────────────────────────────────────────
+ *
+ * {@see failClosedIfHijacked()} is a BACKSTOP for a detach that did not work,
+ * not the fix. By the time it runs, a listener that was not detached has
+ * already fired its notifications, and no post-hoc check can recall those.
+ * The detach is the fix; the check only ensures we do not then SERVE the
+ * hijacked post as though it were legitimate.
+ *
+ * ── §11 ──────────────────────────────────────────────────────────────
+ *
+ * The hook-enumeration shape — the `is_object` / `isset(->callbacks)` guards
+ * and `remove_action($hook, $fn, (int) $priority)` — is taken from
+ * {@see \BCC\Core\Admin\ForeignNoticeFilter::filter()}, which already walks
+ * `$wp_filter[$hook]->callbacks` and removes selected callbacks on the
+ * admin-notice hooks. That file is the in-tree precedent for this technique;
+ * what is NOT reused is its selection rule (origin-file attribution, which
+ * fails open) because every listener here is a third party's and this guard
+ * must fail CLOSED.
+ *
+ * ⚠ Callbacks are removed and re-added INDIVIDUALLY rather than by swapping
+ * the `WP_Hook` object out and back. That is what makes the guard safe to
+ * run while PeepSo has a TEMPORARY registration of its own open —
+ * peepso-groups/groups.php:2195/:2228 and peepso-pages/pages.php:3849 each
+ * add an `after_add_post` callback, do a thing, and remove it again. A
+ * snapshot-and-replace would restore a hook object captured mid-window and
+ * could resurrect a callback the vendor had since removed, or drop one it
+ * had since added.
+ *
+ * The superglobal save/restore half FULFILS the extraction
+ * `PeepSoGifWriter::restorePostKey()` pre-registered in its own docblock —
+ * "Duplicated from PeepSoPhotoWriter::restorePostKey (~6 lines). Acceptable
+ * per §11 on second occurrence; if a third writer ever adds the same pattern,
+ * extract to a shared `PostSuperglobalGuard` helper at that point." The third
+ * caller has arrived ({@see PeepSoStatusWriter}, plus the repost writer), so
+ * the extraction is due. It lands here rather than in a separate
+ * `PostSuperglobalGuard` because the two halves must be ORDERED — the keys
+ * are cleared BEFORE the writer sets its own, or the guard would wipe the
+ * values the writer just wrote. It is PeepSo-specific (PeepSo's hook,
+ * PeepSo's request keys, PeepSo's delete path), so it belongs beside the
+ * writers in `src/PeepSo/` rather than in `src/Support/`.
+ *
+ * ⚠ THIS DOES NOT CONTRADICT {@see PeepSoStatusWriter}'s standing decision.
+ * That writer's docblock records that driving `$_POST['group_id'] +
+ * module_id=8` was considered and REJECTED because it would "leak group
+ * state into request superglobals". It still is rejected: this guard never
+ * WRITES a routing value into a superglobal — it CLEARS the ones an attacker
+ * may have supplied. The status writer stays superglobal-free in the sense
+ * that decision meant, and keeps stamping groups through
+ * {@see PeepSoStatusWriter::attachToGroup()}.
+ *
+ * ⚠ The callable runs INSIDE this guard's `try`, so a writer that needs to
+ * clean up on failure keeps its own `try/catch` within the callable — see
+ * {@see PeepSoPhotoWriter}, which must unlink staged temp files on a throw
+ * and rethrow. The guard adds a `finally`; it does not take one away.
+ *
+ * @package BCC_Core
+ * @subpackage PeepSo
+ */
+final class PeepSoAddPostGuard
+{
+    /** The hook every request-driven PeepSo listener hangs off. */
+    public const HOOK = 'peepso_activity_after_add_post';
+
+    /**
+     * The listener BCC always keeps: @mentions, derived from the post
+     * CONTENT and permission-gated per recipient. Reads no request input.
+     */
+    public const KEEP_MENTIONS = ['PeepSoTags', 'after_save_post'];
+
+    /** Giphy post-meta — kept only by {@see PeepSoGifWriter}. */
+    public const KEEP_GIPHY = ['PeepSoGiphy', 'after_add_post'];
+
+    /** Single-photo attach — kept only by {@see PeepSoPhotoWriter}. */
+    public const KEEP_PHOTOS = ['PeepSoSharePhotos', 'after_add_post'];
+
+    /**
+     * Every request key PeepSo's listeners and pre-insert filters read,
+     * mapped to the NEUTRAL value it is pinned to for the write.
+     *
+     * ⚠ Pinned, not unset — see the class docblock: unsetting is what opens
+     * the raw-body fallback.
+     *
+     * ⚠ `files`, `photo` and `options` MUST pin to `[]`. Their readers call
+     * `count()` on the value, and `count('')` is a `TypeError` in PHP 8.
+     *
+     * ⚠ `embed` is pinned even though `raw()` never consults `$_GET`
+     * (`get_raw()` at peepso/classes/input.php:89 is an empty stub): it is
+     * read from `$_POST`, which the pin replaces wholesale.
+     *
+     * @var array<string, string|int|list<mixed>>
+     */
+    private const PINNED_KEYS = [
+        // routing / ownership — the authorization-relevant ones
+        'group_id'       => 0,
+        'page_id'        => 0,
+        'post_as_page'   => 0,
+        'module_id'      => 0,
+        // ⚠ copies the upload into ANY member's photo folder
+        // (peepso-photos/classes/photosmodel.php:100)
+        'anon_id'        => 0,
+        'post_id'        => 0,
+        // media dispatch
+        'type'           => '',
+        'giphy'          => '',
+        'embed'          => '',
+        'context'        => '',
+        'files'          => [],
+        'photo'          => [],
+        // album creation (PeepSoSharePhotos::after_add_post_album)
+        'name'           => '',
+        'description'    => '',
+        'privacy'        => 0,
+        // polls
+        'options'        => [],
+        'allow_multiple' => 0,
+        // post backgrounds
+        'background'     => '',
+        'text_color'     => '',
+        'preset_id'      => '',
+    ];
+
+    /**
+     * Post-meta that decides WHERE a post lives, i.e. who may read it.
+     *
+     * ⚠ Only the authorization-relevant stamps are checked. Poll options and
+     * background colours can also be injected by a listener that escaped the
+     * detach, but they are cosmetic meta on the member's own post — they
+     * change no audience and leak nothing, so treating them as a hijack
+     * would fail legitimate writes for no security gain. Stated rather than
+     * left as an apparent oversight.
+     *
+     * @var list<string>
+     */
+    private const AUTHORIZATION_STAMPS = [
+        'peepso_group_id',
+        'peepso_page_id',
+        'peepso_post_as_page',
+    ];
+
+    /**
+     * Run $write with PeepSo's request-driven listeners detached and the
+     * hijackable request keys cleared, restoring both in a `finally`.
+     *
+     * @template TResult
+     * @param list<array{0: string, 1: string}> $keep     [class, method] pairs
+     *                                                    to retain on the
+     *                                                    hook; use the KEEP_*
+     *                                                    constants.
+     * @param array<string, mixed>              $intended the `$_POST` this
+     *                                                    writer MEANS to say,
+     *                                                    merged over the
+     *                                                    neutral pins
+     * @param callable(): TResult               $write    the add_post call
+     * @return TResult whatever $write returns
+     */
+    public static function around(array $keep, array $intended, callable $write)
+    {
+        $request  = self::pinRequest($intended);
+        $detached = self::detachListenersExcept($keep);
+
+        try {
+            return $write();
+        } finally {
+            // Hooks first: the restored request must never be visible to a
+            // listener that is still detached, nor the reverse.
+            self::reattach($detached);
+            self::restoreRequest($request);
+        }
+    }
+
+    /**
+     * BACKSTOP. If a post came back carrying an authorization stamp BCC did
+     * not intend, delete it through PeepSo's own delete path and say so.
+     *
+     * ⚠ Deletion goes through `PeepSoActivity::delete_post()` (the wp_post
+     * id, activity.php:777), NOT `wp_delete_post()`. PeepSo's
+     * `before_delete_post` cleanup (peepso.php:2887) only fires for BLOG
+     * posts, keyed on the blogposts-shortcode meta, so a `wp_delete_post()`
+     * here would leave an ORPHAN activity row pointing at a missing wp_post.
+     *
+     * @param int $postId          the wp_post id add_post returned
+     * @param int $intendedGroupId the group BCC gated and intends to stamp
+     *                             ITSELF afterwards, or 0 for a profile post
+     * @return string|null a failure reason, or null when the post is clean
+     */
+    public static function failClosedIfHijacked(int $postId, int $intendedGroupId = 0): ?string
+    {
+        if ($postId <= 0) {
+            return null;
+        }
+
+        $found = [];
+        foreach (self::AUTHORIZATION_STAMPS as $key) {
+            $value = get_post_meta($postId, $key, true);
+            if ($value === '' || $value === false || $value === null || (int) $value === 0) {
+                continue;
+            }
+            // BCC stamps the group itself, AFTER this check
+            // ({@see PeepSoStatusWriter::attachToGroup()}), so a matching
+            // group stamp here means a listener got there first — with the
+            // right id, but without BCC's gate having run. Still a hijack.
+            $found[] = $key . '=' . (string) $value;
+        }
+
+        if ($found === []) {
+            return null;
+        }
+
+        \BCC\Core\Log\Logger::error(
+            '[bcc-core] PeepSo listener stamped a post BCC did not route — detach failed',
+            [
+                'post_id'           => $postId,
+                'intended_group_id' => $intendedGroupId,
+                'stamps'            => implode(',', $found),
+            ]
+        );
+
+        if (class_exists('PeepSoActivity')) {
+            \PeepSoActivity::get_instance()->delete_post($postId);
+        }
+
+        return 'hijacked';
+    }
+
+    // ── superglobals ────────────────────────────────────────────────────
+
+    /**
+     * Replace the request with exactly what BCC means to say.
+     *
+     * ⚠ The arrays are snapshotted and REPLACED WHOLESALE rather than edited
+     * key by key, so nothing a caller forgot to list can survive. That is
+     * safe here because BCC's REST layer reads its arguments from the parsed
+     * `WP_REST_Request`, never from these superglobals, and the replacement
+     * lasts only for the duration of one `add_post()` call.
+     *
+     * @param array<string, mixed> $intended
+     * @return array{0: array<string, mixed>, 1: array<string, mixed>, 2: array<string, mixed>}
+     *         the previous [$_GET, $_POST, $_REQUEST]
+     */
+    private static function pinRequest(array $intended): array
+    {
+        $saved = [$_GET, $_POST, $_REQUEST];
+
+        $_GET     = [];
+        $_REQUEST = [];
+        $_POST    = array_merge(self::PINNED_KEYS, $intended);
+
+        return $saved;
+    }
+
+    /**
+     * @param array{0: array<string, mixed>, 1: array<string, mixed>, 2: array<string, mixed>} $saved
+     */
+    private static function restoreRequest(array $saved): void
+    {
+        [$_GET, $_POST, $_REQUEST] = $saved;
+    }
+
+    // ── hooks ───────────────────────────────────────────────────────────
+
+    /**
+     * Remove every callback on {@see HOOK} except the keep-list.
+     *
+     * @param list<array{0: string, 1: string}> $keep
+     * @return list<array{0: mixed, 1: int, 2: int}> [callback, priority, acceptedArgs]
+     */
+    private static function detachListenersExcept(array $keep): array
+    {
+        $detached = [];
+
+        foreach (self::listenersByPriority() as $priority => $callbacks) {
+            foreach ($callbacks as $entry) {
+                $fn = is_array($entry) ? ($entry['function'] ?? null) : null;
+                if ($fn === null || !is_callable($fn)) {
+                    continue;
+                }
+                if (self::isKept($fn, $keep)) {
+                    continue;
+                }
+
+                $args = 1;
+                if (is_array($entry) && isset($entry['accepted_args']) && is_int($entry['accepted_args'])) {
+                    $args = $entry['accepted_args'];
+                }
+
+                remove_action(self::HOOK, $fn, (int) $priority);
+                $detached[] = [$fn, (int) $priority, $args];
+            }
+        }
+
+        return $detached;
+    }
+
+    /**
+     * @param list<array{0: mixed, 1: int, 2: int}> $detached
+     */
+    private static function reattach(array $detached): void
+    {
+        foreach ($detached as [$fn, $priority, $args]) {
+            add_action(self::HOOK, $fn, $priority, $args);
+        }
+    }
+
+    /**
+     * The hook's callbacks, priority => (id => entry).
+     *
+     * Same defensive shape as
+     * {@see \BCC\Core\Admin\ForeignNoticeFilter::filter()}: WordPress stores
+     * a `WP_Hook` object here, but a plugin can leave anything in
+     * `$wp_filter`, and an absent hook is the ordinary case on a request
+     * where nothing registered.
+     *
+     * @return array<int|string, array<string, mixed>>
+     */
+    private static function listenersByPriority(): array
+    {
+        /** @var array<string, mixed> $wpFilter */
+        $wpFilter = $GLOBALS['wp_filter'] ?? [];
+        if (!is_array($wpFilter) || !isset($wpFilter[self::HOOK])) {
+            return [];
+        }
+
+        $hook = $wpFilter[self::HOOK];
+        if (!is_object($hook) || !isset($hook->callbacks) || !is_array($hook->callbacks)) {
+            return [];
+        }
+
+        /** @var array<int|string, array<string, mixed>> $byPriority */
+        $byPriority = $hook->callbacks;
+
+        return $byPriority;
+    }
+
+    /**
+     * Whether $fn is on the keep-list, matched by CLASS and METHOD.
+     *
+     * ⚠ Matched by class name rather than by object identity, because PeepSo
+     * registers with `array(&$this, 'method')` from a singleton this code
+     * never holds a reference to. Class+method is also what survives PeepSo
+     * re-instantiating a plugin object between requests.
+     *
+     * @param mixed                             $fn
+     * @param list<array{0: string, 1: string}> $keep
+     */
+    private static function isKept($fn, array $keep): bool
+    {
+        if (!is_array($fn) || count($fn) !== 2 || !is_string($fn[1])) {
+            return false; // a closure or function name is never kept
+        }
+
+        $class = is_object($fn[0]) ? get_class($fn[0]) : (is_string($fn[0]) ? $fn[0] : '');
+        if ($class === '') {
+            return false;
+        }
+
+        foreach ($keep as [$keepClass, $keepMethod]) {
+            if ($fn[1] === $keepMethod
+                && ($class === $keepClass || is_subclass_of($class, $keepClass))
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}

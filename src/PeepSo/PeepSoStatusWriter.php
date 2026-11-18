@@ -130,12 +130,39 @@ final class PeepSoStatusWriter
             }
         }
 
-        $postId = $activity->add_post($authorId, $authorId, $stripped, $extra);
+        // ⚠⚠ F-361 — the write goes through the GUARD, never straight to
+        // add_post. PeepSo's `peepso_activity_after_add_post` listeners read
+        // the CURRENT REQUEST — query string FIRST — with no authorization of
+        // their own, so without this a create carrying
+        // `?group_id=<a secret group>&module_id=8` lands stamped as that
+        // group's post and notifies its followers, while BCC's group gate
+        // never ran because BCC was never told about a group.
+        // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
+        //
+        // @mentions are KEPT: `PeepSoTags::after_save_post` derives them from
+        // the post CONTENT and permission-gates each notification, so it is
+        // the one listener on that hook that is not request-driven.
+        $postId = PeepSoAddPostGuard::around(
+            [PeepSoAddPostGuard::KEEP_MENTIONS],
+            [], // a status post drives nothing through the request
+            static fn () => $activity->add_post($authorId, $authorId, $stripped, $extra)
+        );
 
         if ($postId === false || (int) $postId <= 0) {
             return ['ok' => false, 'reason' => 'persist_failed'];
         }
         $postId = (int) $postId;
+
+        // Backstop for a detach that did not work: if a listener stamped this
+        // post anyway, destroy it and fail rather than serve it as
+        // legitimate. ⚠ Runs BEFORE attachToGroup(), which is where BCC
+        // applies its OWN, gated stamp — so a stamp seen here is always
+        // someone else's. ⚠ It cannot un-send a notification that listener
+        // already fired; the detach above is the fix, this is the net.
+        $hijacked = PeepSoAddPostGuard::failClosedIfHijacked($postId, $groupId);
+        if ($hijacked !== null) {
+            return ['ok' => false, 'reason' => $hijacked];
+        }
 
         $actId = self::resolveActIdForPost($postId);
         if ($actId <= 0) {
