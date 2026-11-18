@@ -317,13 +317,24 @@ final class Throttle
     /**
      * Check if an action should be allowed under rate limits.
      *
-     * @param string      $action  Action identifier (e.g. 'gallery_upload').
-     * @param int         $limit   Max requests per window.
-     * @param int         $window  Window in seconds.
-     * @param string|null $key     Custom key (defaults to action_userId).
+     * @param string      $action      Action identifier (e.g. 'gallery_upload').
+     * @param int         $limit       Max requests per window.
+     * @param int         $window      Window in seconds.
+     * @param string|null $key         Custom key (defaults to action_userId).
+     * @param bool        $countDenied F-290. true (the default, every existing
+     *                                 caller): a DENIED call still uses up a
+     *                                 slot — pessimistic accounting, so a
+     *                                 sustained flooder gets nothing until it
+     *                                 stops. false (opt-in, auth routes only): a
+     *                                 denied call is not recorded, so a member
+     *                                 retrying while blocked doesn't extend the
+     *                                 block; a flooder then gets exactly $limit
+     *                                 per window. The increment stays atomic
+     *                                 (increment, then give the slot back on a
+     *                                 deny), so there is no check-then-act race.
      * @return bool True if allowed, false if throttled.
      */
-    public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null): bool
+    public static function allow(string $action, int $limit = 10, int $window = 60, ?string $key = null, bool $countDenied = true): bool
     {
         // Record this call's limit/window so a resulting 429 can advertise an
         // accurate Retry-After / X-RateLimit-* (read centrally by the Envelope).
@@ -367,6 +378,74 @@ final class Throttle
             return false;
         }
 
+        $key = self::bucketKey($action, $key);
+
+        // Prefer bcc-trust's atomic RateLimiter when available. An older
+        // bcc-trust whose allowByKey() takes three parameters ignores the
+        // fourth, which leaves the pessimistic default in place.
+        if (class_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter')) {
+            $ok = \BCC\Trust\Core\Security\RateLimiter::allowByKey($key, $limit, $window, $countDenied);
+            if ($ok) {
+                self::touchLastSuccess();
+            }
+            return $ok;
+        }
+
+        // With persistent object cache (Redis/Memcached): use atomic wp_cache.
+        if (wp_using_ext_object_cache()) {
+            return self::allowViaObjectCache($action, $key, $limit, $window, $countDenied);
+        }
+
+        // Unreachable by construction: isReady() returns true iff the
+        // bcc-trust RateLimiter class is loaded OR WordPress is using a
+        // persistent object cache, and both paths above return before this
+        // point. A previous release shipped a wp_options-backed sliding-
+        // window fallback here — that fallback caused write amplification on
+        // the most-contended WP table under load, and bcc-core now fails
+        // closed at the isReady() gate instead. If this throw ever fires,
+        // someone has broken the invariant in isReady() — do not silently
+        // recover.
+        throw new \LogicException(
+            '[Throttle] allow() reached unreachable branch — isReady() invariant violated'
+        );
+    }
+
+    /**
+     * F-290: give back the slot a successful call used — for a route that
+     * only wants FAILED attempts counted (password sign-in: a correct
+     * password must not use up the member's budget). Same bucket as
+     * allow($action, …, $window, $key): pass the same action, window and key.
+     * Never takes a bucket below zero. Best-effort: a missing backend, or a
+     * bcc-trust without releaseByKey(), is a silent no-op — the call then
+     * simply stays counted, the safe direction.
+     */
+    public static function release(string $action, int $window = 60, ?string $key = null): void
+    {
+        $key = self::bucketKey($action, $key);
+
+        if (class_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter')) {
+            if (method_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter', 'releaseByKey')) {
+                \BCC\Trust\Core\Security\RateLimiter::releaseByKey($key, $window);
+            }
+            return;
+        }
+
+        if (wp_using_ext_object_cache()) {
+            $cache_key = 'bcc_throttle_' . md5($key);
+            $hits      = wp_cache_get($cache_key, 'bcc_throttle');
+            if (is_int($hits) && $hits > 0) {
+                wp_cache_decr($cache_key, 1, 'bcc_throttle');
+            }
+        }
+    }
+
+    /**
+     * The bucket key allow() and release() share: the caller's key, else
+     * "bcc_throttle_{action}_{userId}" for a signed-in caller, else the
+     * anonymous caller's network.
+     */
+    private static function bucketKey(string $action, ?string $key): string
+    {
         $user_id = get_current_user_id();
         if ($user_id === 0 && $key === null) {
             // Fallback to IP for anonymous users to avoid shared bucket.
@@ -393,96 +472,78 @@ final class Throttle
             $subnet = self::normalizeIpToSubnet($ip);
             $key = "bcc_throttle_{$action}_ip_" . md5($subnet);
         }
-        $key = $key ?? "bcc_throttle_{$action}_{$user_id}";
+        return $key ?? "bcc_throttle_{$action}_{$user_id}";
+    }
 
-        // Prefer bcc-trust's atomic RateLimiter when available.
-        if (class_exists('\\BCC\\Trust\\Core\\Security\\RateLimiter')) {
-            $ok = \BCC\Trust\Core\Security\RateLimiter::allowByKey($key, $limit, $window);
-            if ($ok) {
-                self::touchLastSuccess();
-            }
-            return $ok;
-        }
-
-        // With persistent object cache (Redis/Memcached): use atomic wp_cache.
-        if (wp_using_ext_object_cache()) {
-            $cache_key = 'bcc_throttle_' . md5($key);
-            $added = wp_cache_add($cache_key, 1, 'bcc_throttle', $window);
-            if ($added) {
-                // Liveness round-trip: wp_cache_add can return true against
-                // a local in-memory fallback when the persistent backend is
-                // disconnected, producing per-worker buckets instead of the
-                // intended shared bucket. Read back: if the value is not
-                // exactly 1, the store is degraded and we must fail-closed
-                // for mutating actions so attackers cannot multiply their
-                // effective rate limit by the PHP-FPM pool size.
-                $verify = wp_cache_get($cache_key, 'bcc_throttle');
-                if ((int) $verify !== 1) {
-                    self::$degraded = true;
-                    self::markSharedDegraded();
-                    $critical = in_array($action, self::CRITICAL_ACTIONS, true);
-                    if ($critical) {
-                        self::logOnce('liveness_fail_' . $action, static function () use ($action, $cache_key, $verify): void {
-                            \BCC\Core\Log\Logger::error('[Throttle] wp_cache_add liveness failed — mutating action denied', [
-                                'action' => $action, 'key' => $cache_key,
-                                'verify' => var_export($verify, true),
-                            ]);
-                        });
-                        return false;
-                    }
-                    return self::processLevelBackstop($action, $limit);
-                }
-                self::touchLastSuccess();
-                return true;
-            }
-            $hits = wp_cache_incr($cache_key, 1, 'bcc_throttle');
-            // Strict-typing guard: any non-positive-int return from
-            // wp_cache_incr means the backend is unusable for atomic
-            // counting on this request. Drop-in object caches vary on
-            // the error return (false, 0, null, string); treat anything
-            // that's not a clean positive int as degraded.
-            if (!is_int($hits) || $hits <= 0) {
+    /** The persistent-object-cache path of allow(). */
+    private static function allowViaObjectCache(string $action, string $key, int $limit, int $window, bool $countDenied): bool
+    {
+        $cache_key = 'bcc_throttle_' . md5($key);
+        $added = wp_cache_add($cache_key, 1, 'bcc_throttle', $window);
+        if ($added) {
+            // Liveness round-trip: wp_cache_add can return true against
+            // a local in-memory fallback when the persistent backend is
+            // disconnected, producing per-worker buckets instead of the
+            // intended shared bucket. Read back: if the value is not
+            // exactly 1, the store is degraded and we must fail-closed
+            // for mutating actions so attackers cannot multiply their
+            // effective rate limit by the PHP-FPM pool size.
+            $verify = wp_cache_get($cache_key, 'bcc_throttle');
+            if ((int) $verify !== 1) {
                 self::$degraded = true;
                 self::markSharedDegraded();
-                // Cache backend broken (Redis outage, connection reset, etc.).
-                // Differentiate by action criticality:
-                //   - Mutating/abuse-prone actions → deny (fail-closed)
-                //   - Read-only/low-risk actions   → allow with process-level backstop
                 $critical = in_array($action, self::CRITICAL_ACTIONS, true);
-
                 if ($critical) {
-                    self::logOnce('redis_down_' . $action, static function () use ($action, $cache_key): void {
-                        \BCC\Core\Log\Logger::error('[Throttle] Redis down — mutating action denied', [
+                    self::logOnce('liveness_fail_' . $action, static function () use ($action, $cache_key, $verify): void {
+                        \BCC\Core\Log\Logger::error('[Throttle] wp_cache_add liveness failed — mutating action denied', [
                             'action' => $action, 'key' => $cache_key,
+                            'verify' => var_export($verify, true),
                         ]);
                     });
                     return false;
                 }
-
-                // Non-critical reads: allow up to a per-process cap to prevent
-                // a single PHP worker from hammering the DB when Redis is down.
-                // This caps damage per-worker; nginx/CDN handles global rate.
                 return self::processLevelBackstop($action, $limit);
             }
-            $allowed = $hits <= $limit;
-            if ($allowed) {
-                self::touchLastSuccess();
-            }
-            return $allowed;
+            self::touchLastSuccess();
+            return true;
         }
+        $hits = wp_cache_incr($cache_key, 1, 'bcc_throttle');
+        // Strict-typing guard: any non-positive-int return from
+        // wp_cache_incr means the backend is unusable for atomic
+        // counting on this request. Drop-in object caches vary on
+        // the error return (false, 0, null, string); treat anything
+        // that's not a clean positive int as degraded.
+        if (!is_int($hits) || $hits <= 0) {
+            self::$degraded = true;
+            self::markSharedDegraded();
+            // Cache backend broken (Redis outage, connection reset, etc.).
+            // Differentiate by action criticality:
+            //   - Mutating/abuse-prone actions → deny (fail-closed)
+            //   - Read-only/low-risk actions   → allow with process-level backstop
+            $critical = in_array($action, self::CRITICAL_ACTIONS, true);
 
-        // Unreachable by construction: isReady() returns true iff the
-        // bcc-trust RateLimiter class is loaded OR WordPress is using a
-        // persistent object cache, and both paths above return before this
-        // point. A previous release shipped a wp_options-backed sliding-
-        // window fallback here — that fallback caused write amplification on
-        // the most-contended WP table under load, and bcc-core now fails
-        // closed at the isReady() gate instead. If this throw ever fires,
-        // someone has broken the invariant in isReady() — do not silently
-        // recover.
-        throw new \LogicException(
-            '[Throttle] allow() reached unreachable branch — isReady() invariant violated'
-        );
+            if ($critical) {
+                self::logOnce('redis_down_' . $action, static function () use ($action, $cache_key): void {
+                    \BCC\Core\Log\Logger::error('[Throttle] Redis down — mutating action denied', [
+                        'action' => $action, 'key' => $cache_key,
+                    ]);
+                });
+                return false;
+            }
+
+            // Non-critical reads: allow up to a per-process cap to prevent
+            // a single PHP worker from hammering the DB when Redis is down.
+            // This caps damage per-worker; nginx/CDN handles global rate.
+            return self::processLevelBackstop($action, $limit);
+        }
+        $allowed = $hits <= $limit;
+        if ($allowed) {
+            self::touchLastSuccess();
+        } elseif (!$countDenied) {
+            // F-290 opt-in: give the denied call's slot back.
+            wp_cache_decr($cache_key, 1, 'bcc_throttle');
+        }
+        return $allowed;
     }
 
     /**
