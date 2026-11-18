@@ -12,7 +12,8 @@
  *   - Lists and search never show a secret page, to anyone. Put
  *     `notSecretSql()` in the WHERE clause.
  *   - One page on its own is shown to a member of that page (any `member*`
- *     status, the owner included) and to nobody else. Ask `isVisibleTo()`.
+ *     status, the owner included) and to someone invited to it
+ *     (`pending_user`), and to nobody else. Ask `isVisibleTo()`.
  *   - A read that fails counts as secret. Hiding an open page for one
  *     request costs less than showing a secret one.
  *   - Closed pages (1) are NOT hidden: anyone may see that they exist.
@@ -23,9 +24,9 @@
  *   let such a page through when one row said 0, and returned the page once
  *   per row. NOT EXISTS does neither.
  *
- * ⚠ Membership is stricter than PeepSo's own page view, which also admits
- *   `pending_user` (invited, not yet joined). Here an invitation alone does
- *   not open a secret page.
+ * ⚠ Invited users (`pending_user`) see the page, as in PeepSo's own page
+ *   view: they have to open it to accept. Someone who only ASKED to join
+ *   (`pending_admin`) does not, and a `banned` row beats every other row.
  *
  * ⚠ Not PeepSo's global `\PeepSoPagePrivacy` (its privacy constants). This
  *   class is namespaced and holds BCC's reads; nothing in BCC uses PeepSo's.
@@ -49,6 +50,9 @@ final class PeepSoPagePrivacy
     public const SECRET   = 2;
 
     private const MEMBERS_TABLE_SUFFIX = 'peepso_page_members';
+
+    /** Invited by a page admin, not yet accepted. PeepSo lets them see a secret page. */
+    private const INVITED_STATUS = 'pending_user';
 
     /**
      * Rows read for one (page, user) pair. A pair normally has one row, but
@@ -104,9 +108,10 @@ final class PeepSoPagePrivacy
      * May this viewer see this page on its own (its card, its profile)?
      *
      * True for a page that is not secret. For a secret page, true only when
-     * the viewer is a member of it: a `member*` status (member, moderator,
-     * manager, owner) and no `banned` row. Anonymous viewers, invited users,
-     * banned users and failed reads all get false.
+     * the viewer is a member of it (a `member*` status: member, moderator,
+     * manager, owner) or invited to it (`pending_user`), with no `banned`
+     * row. Anonymous viewers, people who only asked to join, banned users
+     * and failed reads all get false.
      *
      * It does not check that the page exists or is published; callers do
      * that first.
@@ -124,8 +129,8 @@ final class PeepSoPagePrivacy
     }
 
     /**
-     * The viewer holds a `member*` row on the page and no `banned` row.
-     * A failed read answers false.
+     * The viewer holds a `member*` or `pending_user` row on the page and no
+     * `banned` row. A failed read answers false.
      *
      * Banned rows sort first, so the row cap can never hide a ban behind
      * older member rows.
@@ -151,17 +156,17 @@ final class PeepSoPagePrivacy
             return false;
         }
 
-        $member = false;
+        $admitted = false;
         foreach ($wpdb->get_col(null) as $status) {
             $status = (string) $status;
             if ($status === 'banned') {
                 return false;
             }
-            if (str_starts_with($status, 'member')) {
-                $member = true;
+            if (str_starts_with($status, 'member') || $status === self::INVITED_STATUS) {
+                $admitted = true;
             }
         }
-        return $member;
+        return $admitted;
     }
 
     /**

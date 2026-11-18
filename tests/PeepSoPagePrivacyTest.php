@@ -13,7 +13,8 @@ use PHPUnit\Framework\TestCase;
  * PeepSoPagePrivacy — the shared SECRET-page rule.
  *
  * Lists use notSecretSql(); one page on its own uses isVisibleTo(), which
- * lets the page's members through. A failed read counts as secret.
+ * lets the page's members and invitees through. A failed read counts as
+ * secret.
  *
  * The fake $wpdb answers the privacy probe and the membership read from
  * `$secret` / `$statuses`, and can fail either one. The SQL itself is run
@@ -223,13 +224,15 @@ final class PeepSoPagePrivacyTest extends TestCase
         yield 'manager'                 => [['member_manager'], true];
         yield 'owner'                   => [['member_owner'], true];
         yield 'no row'                  => [[], false];
-        yield 'invited, not yet joined' => [['pending_user'], false];
+        yield 'invited, not yet joined' => [['pending_user'], true];
         yield 'asked to join'           => [['pending_admin'], false];
         yield 'banned'                  => [['banned'], false];
         yield 'blocked invites'         => [['block_invites'], false];
         yield 'banned beside a member row' => [['banned', 'member'], false];
         yield 'member beside a banned row' => [['member', 'banned'], false];
         yield 'member beside a pending row' => [['pending_user', 'member'], true];
+        yield 'invite beside a banned row'  => [['banned', 'pending_user'], false];
+        yield 'banned beside an invite'     => [['pending_user', 'banned'], false];
     }
 
     /** @param list<string> $statuses */
