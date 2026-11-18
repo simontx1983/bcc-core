@@ -53,9 +53,15 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             . " AND nmv_neg.meta_key = '_bcc_post_visibility'"
             . " AND nmv_neg.meta_value NOT IN ('public_group','public_all')))";
 
+        // ⚠ `a.act_repost_id` added for F-346. The golden SQL did its job:
+        // widening COLUMNS changed the rendered query and these two tests
+        // went red. The ONLY delta is one more selected column — the JOINs,
+        // the WHERE, the ORDER BY and the LIMIT are byte-identical, which is
+        // what makes updating the expectation the right call rather than a
+        // way to silence it.
         private const SELECT_PREFIX = 'SELECT DISTINCT a.act_id, p.post_author AS act_user_id, a.act_owner_id,'
             . ' a.act_module_id, a.act_external_id, p.post_date_gmt AS act_time, a.act_access,'
-            . ' p.post_status AS act_status FROM wp_peepso_activities a'
+            . ' p.post_status AS act_status, a.act_repost_id FROM wp_peepso_activities a'
             . ' INNER JOIN wp_posts p ON p.ID = a.act_external_id';
 
         private const GLOBAL_GATE_JOINS = " LEFT JOIN wp_postmeta gx_pm ON gx_pm.post_id = p.ID"
