@@ -45,7 +45,9 @@ final class PeepSoGroupWriter
      *
      * Behavior:
      *   - No existing row → INSERT with gm_user_status='member'
-     *   - Existing 'member%' row → idempotent success (no-op)
+     *   - Existing 'member%' row → idempotent success (no-op): nothing is
+     *     written, so an owner / manager / moderator keeps the role and a
+     *     member_readonly row stays muted; no counter refresh, no join hook
      *   - Existing 'banned' row → REFUSED (returns false); a group-level
      *     ban must stick until an admin lifts it
      *   - Existing pending/block_invites row → upgraded by PeepSo's
@@ -108,6 +110,16 @@ final class PeepSoGroupWriter
                 'group_id' => $groupId,
             ]);
             return false;
+        }
+
+        // Already a member (any member% role): nothing to write. PeepSo's
+        // member_join() on an existing row runs member_modify('member'), so
+        // calling it here would rewrite an owner, manager or moderator to a
+        // plain member (the owner losing the group's owner row) and lift a
+        // member_readonly mute. No counter refresh and no join hook either:
+        // nobody joined.
+        if (is_string($status) && str_starts_with($status, 'member')) {
+            return true;
         }
 
         $member = new \PeepSoGroupUser($groupId, $userId);
