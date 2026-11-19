@@ -6,6 +6,7 @@ namespace BCC\Core\PeepSo\Tests;
 
 use BCC\Core\PeepSo\PeepSoGroupWriter;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -74,22 +75,47 @@ final class PeepSoGroupWriterJoinGuardTest extends TestCase
         );
     }
 
-    public function testExistingMemberRowRemainsIdempotentSuccess(): void
+    /** @return array<string, array{string}> */
+    public static function activeRoles(): array
     {
-        $GLOBALS['__bcc_gw_fixture']['status'] = 'member';
+        return [
+            'owner'               => ['member_owner'],
+            'manager'             => ['member_manager'],
+            'moderator'           => ['member_moderator'],
+            'read-only (muted)'   => ['member_readonly'],
+            'plain member'        => ['member'],
+        ];
+    }
 
-        self::assertTrue(PeepSoGroupWriter::join(7, 42));
-        self::assertSame([[42, 7]], $GLOBALS['__bcc_gw_fixture']['member_join_calls']);
+    /**
+     * An existing member's Join is a no-op that KEEPS the role. PeepSo's
+     * member_join() on an existing row runs member_modify('member'), so
+     * reaching it rewrote an owner / manager / moderator to a plain member
+     * (the owner losing the group's owner row) and lifted a member_readonly
+     * mute. MyGroupsEndpoint::postJoin calls join() for existing members.
+     */
+    #[DataProvider('activeRoles')]
+    public function testAnExistingMembersJoinKeepsTheirRoleAndWritesNothing(string $role): void
+    {
+        $GLOBALS['__bcc_gw_fixture']['status'] = $role;
+
+        self::assertTrue(PeepSoGroupWriter::join(7, 42), 'still a success: they are a member');
+
+        self::assertSame($role, $GLOBALS['__bcc_gw_fixture']['status'], 'the role is unchanged');
+        self::assertSame([], $GLOBALS['__bcc_gw_fixture']['member_join_calls']);
+        self::assertSame([], $GLOBALS['__bcc_gw_fixture']['count_updates']);
+        self::assertSame([], $GLOBALS['__bcc_gw_fixture']['actions'], 'nobody joined: no join hook');
     }
 
     public function testPendingRowStillUpgradesThroughMemberJoin(): void
     {
-        // pending_admin arises only via PeepSo's own UI flow; the guard is
-        // scoped to 'banned' and must not widen silently.
+        // pending_admin arises only via PeepSo's own UI flow; the no-op is
+        // scoped to member% rows and must not widen silently.
         $GLOBALS['__bcc_gw_fixture']['status'] = 'pending_admin';
 
         self::assertTrue(PeepSoGroupWriter::join(7, 42));
         self::assertSame([[42, 7]], $GLOBALS['__bcc_gw_fixture']['member_join_calls']);
+        self::assertSame('member', $GLOBALS['__bcc_gw_fixture']['status']);
     }
 
     public function testInvalidIdsAreRefusedBeforeAnyLookup(): void

@@ -8,6 +8,7 @@
  *
  * Fixture shape ($GLOBALS['__bcc_gw_fixture']):
  *   status            ?string  what getMembershipStatus() reports for the row
+ *                              (member_join() writes it to 'member', as PeepSo does)
  *   read_failed       bool     getMembershipStatusOrFail() returns false
  *   member_join_calls list<array{int,int}>  [groupId, userId] per call
  *   member_leave_calls list<array{int,int}> [groupId, userId] per call
@@ -139,10 +140,17 @@ namespace {
             {
             }
 
+            /**
+             * As PeepSo's (peepso-groups classes/models/groupuser.php):
+             * no row → INSERT 'member'; an existing row → member_modify('member'),
+             * which rewrites the row's status WHATEVER it was. Either way the
+             * pair now reads 'member'.
+             */
             public function member_join(): void
             {
                 $GLOBALS['__bcc_gw_fixture']['locked_writes'][] = \BCC\Core\DB\AdvisoryLock::anyHeld();
                 $GLOBALS['__bcc_gw_fixture']['member_join_calls'][] = [$this->groupId, $this->userId];
+                $GLOBALS['__bcc_gw_fixture']['status'] = 'member';
             }
 
             public function member_leave(): void
