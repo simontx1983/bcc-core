@@ -33,6 +33,15 @@ jobs:
           tools: composer:v2
           coverage: none
 
+      # ⚠ BEFORE `composer install`, and deliberately so. The committed vendor/
+      # is the deploy artifact (deploy.yml: "the checked-out tree is the deploy
+      # artifact"); installing first would rewrite the classmap in the runner,
+      # and the guard would then pass over freshly written files instead of
+      # the ones this commit actually ships. Same step as bcc-trust's ci.yml,
+      # running the byte-identical scripts/composer-classmap-guard.php.
+      - name: Composer classmap parity (committed vendor, pre-install)
+        run: php scripts/composer-classmap-guard.php
+
       - name: Install dependencies
         run: composer install --no-interaction --no-progress --prefer-dist
 
