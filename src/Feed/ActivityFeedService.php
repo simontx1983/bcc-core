@@ -240,10 +240,8 @@ final class ActivityFeedService
         // Over-fetch by 1 to detect has_more without a separate count.
         $rows = PeepSoActivityRepository::getActivities(
             [$authorId],
-            // The repository binds an explicit module list as strings
-            // (`%s`), while its own default gate binds ints (`%d`), so the
-            // cast is the repository's documented contract, not a guess.
-            $moduleIds === null ? null : array_map('strval', $moduleIds),
+            // Numeric ids, which the repository binds as integers (F-392).
+            $moduleIds,
             $cursorTime,
             $cursorActId,
             $limit + 1,

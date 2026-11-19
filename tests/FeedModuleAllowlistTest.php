@@ -217,19 +217,105 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
             }
         }
 
-        public function testExplicitModuleListIsHonoredVerbatimAndUnchanged(): void
+        /**
+         * F-392: the blog tab passes the NAME 'blog'. It used to be bound as
+         * the string 'blog', which MySQL casts to 0 against the SMALLINT
+         * column, so the tab matched legacy module-0 rows and never a blog
+         * (204). It is now bound as 204, and only 204.
+         */
+        public function testAModuleNameIsBoundAsItsNumericId(): void
         {
             $wpdb = $this->installWpdb();
 
-            // Signals scope passes ['signal']; the blog tab passes ['blog'].
-            PeepSoActivityRepository::getActivities([5], ['signal'], null, null, 10);
+            PeepSoActivityRepository::getActivities([5], ['blog'], null, null, 10);
 
-            self::assertStringContainsString('a.act_module_id IN (%s)', $wpdb->lastSql());
-            self::assertContains('signal', $wpdb->lastArgs());
+            self::assertStringContainsString('a.act_module_id IN (%d)', $wpdb->lastSql());
+            self::assertStringNotContainsString('a.act_module_id IN (%s)', $wpdb->lastSql());
+            self::assertContains(204, $wpdb->lastArgs());
+            self::assertNotContains('blog', $wpdb->lastArgs());
+            self::assertNotContains(0, $wpdb->lastArgs(), 'nothing that becomes module 0');
             // The numeric allowlist must NOT be injected onto an explicit list.
-            foreach (self::ALLOWED as $id) {
+            foreach (array_diff(self::ALLOWED, [204]) as $id) {
                 self::assertNotContains($id, $wpdb->lastArgs());
             }
+        }
+
+        /**
+         * F-392: the signals scope passes the NAME 'signal'. No writer emits a
+         * numeric signal module, so it resolves to nothing: no rows and no
+         * query, rather than the legacy module-0 rows `IN ('signal')` matched.
+         */
+        public function testTheSignalNameResolvesToNothingAndIssuesNoQuery(): void
+        {
+            $wpdb = $this->installWpdb();
+            $wpdb->resultsToReturn = [(object) ['act_id' => 1, 'act_module_id' => '0']];
+
+            self::assertSame([], PeepSoActivityRepository::getActivities([5], ['signal'], null, null, 10));
+            self::assertSame([], $wpdb->prepared, 'no statement is prepared');
+        }
+
+        public function testAnExplicitNumericListIsBoundAsIntegers(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getActivities([5], [204, '202'], null, null, 10);
+
+            self::assertStringContainsString('a.act_module_id IN (%d,%d)', $wpdb->lastSql());
+            self::assertContains(204, $wpdb->lastArgs());
+            self::assertContains(202, $wpdb->lastArgs());
+            self::assertNotContains('202', $wpdb->lastArgs());
+        }
+
+        /** Zero, unknown names and junk are dropped; a list left empty returns nothing, never everything. */
+        public function testZeroAndUnknownEntriesAreDropped(): void
+        {
+            $wpdb = $this->installWpdb();
+            PeepSoActivityRepository::getActivities([5], [0, 'no-such-module', 204], null, null, 10);
+            self::assertStringContainsString('a.act_module_id IN (%d)', $wpdb->lastSql());
+            self::assertNotContains(0, $wpdb->lastArgs());
+
+            $wpdb = $this->installWpdb();
+            self::assertSame([], PeepSoActivityRepository::getActivities([5], ['0', 'no-such-module', ''], null, null, 10));
+            self::assertSame([], $wpdb->prepared, 'an all-junk list falls back to NO rows, not the default gate');
+        }
+
+        /** The scope the Signals tab calls: an empty page, no query. */
+        public function testTheSignalsScopeIsAnEmptyPageWithNoQuery(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            $page = self::service()->getFeed(0, ActivityFeedService::SCOPE_SIGNALS);
+
+            self::assertSame([], $page['items']);
+            self::assertFalse($page['pagination']['has_more']);
+            self::assertNull($page['pagination']['next_cursor']);
+            self::assertSame([], $wpdb->prepared);
+        }
+
+        /**
+         * moduleIdsFor() maps a name to every numeric id of the same KIND,
+         * through MODULE_TO_KIND's string keys, so it cannot drift from the
+         * map: 'pull_batch' (legacy alias) and 'watch_batch' are both 200.
+         */
+        public function testModuleIdsForResolvesNamesThroughTheMap(): void
+        {
+            self::assertSame([204], FeedItemNormalizer::moduleIdsFor(['blog']));
+            self::assertSame([202], FeedItemNormalizer::moduleIdsFor(['review']));
+            self::assertSame([200], FeedItemNormalizer::moduleIdsFor(['watch_batch']));
+            self::assertSame([200], FeedItemNormalizer::moduleIdsFor(['pull_batch']));
+            self::assertSame([201], FeedItemNormalizer::moduleIdsFor(['page_claim']));
+            self::assertSame([203], FeedItemNormalizer::moduleIdsFor(['dispute']));
+            self::assertSame([1], FeedItemNormalizer::moduleIdsFor(['status']));
+            self::assertSame([], FeedItemNormalizer::moduleIdsFor(['signal']), 'no numeric signal module exists');
+            self::assertSame([], FeedItemNormalizer::moduleIdsFor(['project', 'nft']), 'kinds with no numeric module');
+            self::assertSame([], FeedItemNormalizer::moduleIdsFor(['no-such-module', '', '-5', -5, 0, '0']));
+        }
+
+        public function testModuleIdsForKeepsNumbersDeduplicatesAndKeepsOrder(): void
+        {
+            self::assertSame([204, 202], FeedItemNormalizer::moduleIdsFor(['204', 202, 'blog', '204']));
+            self::assertSame([30], FeedItemNormalizer::moduleIdsFor([30]), 'a number is kept as given; the wall narrows it to public modules');
+            self::assertSame([30], FeedItemNormalizer::moduleIdsFor(['30']), 'digits are a number too, mapped or not');
         }
 
         public function testEmptyModuleListShortCircuitsToNoRows(): void
