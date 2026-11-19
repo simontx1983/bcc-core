@@ -627,10 +627,12 @@ final class PeepSoGroupRepository
         // duplicate. Rows arrive in gm_id order; per group the best-ranked
         // row wins and the lowest gm_id breaks a tie, so the answer never
         // depends on which duplicate happened to be inserted first:
-        //   banned  >  active (member%)  >  anything else (pending_*, …)
+        //   banned  >  member_owner  >  other active (member%)  >  anything else (pending_*, …)
         // A ban outranks membership (fail closed, and the write doors
-        // refuse on any banned row); membership outranks a stale pending
-        // or invite row left beside it.
+        // refuse on any banned row); an owner row outranks another active
+        // row (leave() must see the owner, or member_leave() deletes the
+        // owner row with it); membership outranks a stale pending or invite
+        // row left beside it.
         $out  = [];
         $rank = [];
         foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
@@ -671,13 +673,26 @@ final class PeepSoGroupRepository
      */
     private const PAIR_ROW_CAP = 10;
 
-    /** F-354 duplicate-row precedence: lower wins. */
+    /**
+     * F-354 duplicate-row precedence: lower wins.
+     *
+     *   banned  >  member_owner  >  other active (member%)  >  anything else
+     *
+     * The owner row outranks another active row because PeepSo's
+     * member_leave() deletes EVERY row of the pair: read as 'member', an
+     * owner with a stray member row passed PeepSoGroupWriter::leave()'s owner
+     * refusal (and GroupLeaveGuard's), and the group lost its owner row. The
+     * same order the bcc-trust page read uses (ban, then owner, then oldest).
+     */
     private static function statusRank(string $status): int
     {
         if ($status === 'banned') {
             return 0;
         }
-        return str_starts_with($status, 'member') ? 1 : 2;
+        if ($status === 'member_owner') {
+            return 1;
+        }
+        return str_starts_with($status, 'member') ? 2 : 3;
     }
 
     /**

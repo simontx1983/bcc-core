@@ -77,9 +77,10 @@ final class DoorReadsWpdb
 /**
  * F-354 follow-up: the write doors' single-pair reads resolve a duplicated
  * (user, group) pair by the SAME rank as findUserMembershipStatuses —
- * banned > active (member%) > anything else, the lowest gm_id breaking a
- * tie — so a door never decides from a different row than the lists show,
- * and a ban is never outranked by a stale member row.
+ * banned > member_owner > other active (member%) > anything else, the
+ * lowest gm_id breaking a tie — so a door never decides from a different
+ * row than the lists show, a ban is never outranked by a stale member row,
+ * and an owner row is never hidden behind one.
  */
 #[CoversMethod(PeepSoGroupRepository::class, 'getMembershipStatus')]
 #[CoversMethod(PeepSoGroupRepository::class, 'getMembershipStatusOrFail')]
@@ -115,6 +116,15 @@ final class MembershipDoorReadsRankTest extends TestCase
             'ban beside a stale member'  => [['member', 'banned'], 'banned'],
             'ban first'                  => [['banned', 'member_moderator'], 'banned'],
             'two active: lowest gm_id'   => [['member_manager', 'member'], 'member_manager'],
+            // An owner row outranks another active row in EITHER order:
+            // read as 'member', leave() would let member_leave() delete the
+            // owner row along with the stray one.
+            'owner behind an older member'    => [['member', 'member_owner'], 'member_owner'],
+            'owner ahead of a member'         => [['member_owner', 'member'], 'member_owner'],
+            'owner behind a moderator'        => [['member_moderator', 'member_owner'], 'member_owner'],
+            'owner behind a stale request'    => [['pending_admin', 'member_owner'], 'member_owner'],
+            'ban still beats an owner row'    => [['member_owner', 'banned'], 'banned'],
+            'ban ahead of an owner row'       => [['banned', 'member_owner'], 'banned'],
             'two inactive: lowest gm_id' => [['pending_user', 'pending_admin'], 'pending_user'],
             'single row'                 => [['pending_admin'], 'pending_admin'],
         ];
