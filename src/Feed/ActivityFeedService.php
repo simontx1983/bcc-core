@@ -132,12 +132,11 @@ final class ActivityFeedService
         // The caller may pass the list it already resolved (bcc-trust does,
         // because it also needs it to decide which rooms lift the shadow-
         // limit); otherwise it is read here. The list only applies to this
-        // scope, and never alongside a single-group read.
+        // scope, and never alongside a single-group read. `[]` (a member of
+        // nothing) needs no guard here: the repository answers it with no
+        // rows and no query, so the page is empty with has_more false.
         if ($scope === self::SCOPE_GROUPS && !($onlyForGroupId !== null && $onlyForGroupId > 0)) {
             $onlyForGroupIds ??= $this->resolveViewerMemberGroupIds($viewerId);
-            if ($onlyForGroupIds === []) {
-                return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
-            }
         } else {
             $onlyForGroupIds = null;
         }
