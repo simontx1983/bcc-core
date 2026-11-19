@@ -1,0 +1,50 @@
+<?php
+
+/**
+ * FIXTURE — not loaded, not scanned, read only by
+ * PostWritePinInventoryTest::testADocblockMentionIsNotACallSite().
+ *
+ * Every "write" below lives in a COMMENT. A guard that matched text
+ * rather than tokens would report every one of them, and three separate
+ * real incidents on F-361 had exactly that shape:
+ *
+ *   - substr_count('PeepSoAddPostGuard::pinOnly(') read 3 for 2 calls,
+ *     because the comment explaining the guard named it
+ *   - the guard flagged function_exists('wp_save_post_revision'), a
+ *     defensive check, because the name appeared as a string
+ *   - a comment saying "not a PHPStan suppression comment" BECAME one,
+ *     because that tool also reads comments
+ *
+ * So this fixture exists to prove the token walk skips comments, rather
+ * than to assert it in a docblock.
+ */
+
+declare(strict_types=1);
+
+// A plain line comment naming a writer: wp_insert_post([...]);
+
+/* A block comment: wp_update_post(['ID' => 1], true); */
+
+/**
+ * A docblock showing the WRONG form, exactly as pinOnly()'s own
+ * docblock does:
+ *
+ *     PeepSoAddPostGuard::pinOnly([], wp_insert_post([...]))
+ *
+ * and the right one:
+ *
+ *     PeepSoAddPostGuard::pinOnly([], static fn () => wp_insert_post([...]))
+ *
+ * plus a model write: new \PeepSoGroup(null, $data)
+ * and a dispatch: call_user_func('wp_trash_post', 1)
+ * and a revision: wp_save_post_revision(1)
+ */
+final class CommentOnlyWriteFixture
+{
+    public function nothingHereWrites(): int
+    {
+        // wp_trash_post($id);
+        // media_handle_sideload($file, 0);
+        return 0;
+    }
+}
