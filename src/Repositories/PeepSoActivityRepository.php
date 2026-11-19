@@ -898,6 +898,16 @@ final class PeepSoActivityRepository
      * @param list<int>|null $viewerFriendIds See {@see f02PostVisibilityClause}. Only read when `$enforcePostVisibility` is true.
      * @param bool $enforcePostVisibility OPT-IN §F-02 per-post gate, matching {@see getActivities}. `false` (the default, and every pre-existing caller including {@see getAuthorId}) leaves this query byte-identical. ⚠ Enforcing here is what stops a permalink from serving a post the feed hides: the two readers share one predicate for exactly that reason.
      * @param bool $throwOnReadFailure F-275, OPT-IN, matching {@see getActivities}. `false` (the default, and every pre-existing caller) keeps the historical answer, where a failed read returns null exactly like "not found". When true, a read that did not run throws {@see ActivityReadFailedException}, so a permalink can answer "try again" rather than 404. A genuine miss is still null.
+     * @param bool|null $topLevelOnly Exclude COMMENT activity rows
+     *   (`act_comment_object_id > 0`), the same predicate
+     *   {@see getActivities} applies. `null` (the default) resolves to
+     *   **true whenever `$allowedModuleIds` is non-null** and false
+     *   otherwise, because the module allowlist alone does NOT separate a
+     *   comment from a post: PeepSo stores `act_module_id = 1` on both. ⚠
+     *   Read the inline note at the predicate before changing this — a
+     *   comment post carries no `peepso_group_id`, so letting a comment row
+     *   resolve on a feed-shaped path makes it readable by link no matter
+     *   which group it lives in. Pass `true`/`false` to decide explicitly.
      * @phpstan-return ActivityRow|null
      * @throws ActivityReadFailedException only when `$throwOnReadFailure` is true
      */
@@ -907,7 +917,8 @@ final class PeepSoActivityRepository
         ?array $viewerFriendIds = null,
         bool $enforcePostVisibility = false,
         int $viewerId = 0,
-        bool $throwOnReadFailure = false
+        bool $throwOnReadFailure = false,
+        ?bool $topLevelOnly = null
     ): ?object {
         global $wpdb;
 
@@ -922,6 +933,33 @@ final class PeepSoActivityRepository
             foreach ($allowedModuleIds as $m) {
                 $params[] = (int) $m;
             }
+        }
+
+        // ⚠⚠ TOP-LEVEL ONLY — the same predicate getActivities() carries,
+        // and for the same reason. PeepSo writes an activities row for
+        // EVERY comment with act_module_id = 1, the module a status post
+        // uses, so the module allowlist above does NOT separate comments
+        // from posts: a comment act id satisfies it. Those rows INNER JOIN
+        // a published wp_post and resolve here as though they were
+        // top-level posts.
+        //
+        // ⛔ A comment post carries NO `peepso_group_id` — PeepSo's own
+        // groups add-on walks UP to the parent to find the group — so every
+        // group-membership rule keyed on the resolved post reads "not
+        // group-tagged" for a comment and lets it through. That is what
+        // made comment act ids readable by link regardless of the group
+        // they live in.
+        //
+        // Defaults to ON exactly when a module allowlist was passed, which
+        // is the FEED-SHAPED contract: those callers (the permalink, the
+        // interaction gate) are asking "is this a feed item", and a comment
+        // is not one. Callers that pass no allowlist are the internal ones
+        // the $allowedModuleIds docblock describes — author resolution,
+        // comment-parent lookup, moderation — and they must still resolve a
+        // comment act, so their behaviour is unchanged. Pass the flag
+        // explicitly to override either way.
+        if ($topLevelOnly ?? ($allowedModuleIds !== null)) {
+            $where[] = '(a.act_comment_object_id = 0 OR a.act_comment_object_id IS NULL)';
         }
 
         $authorAccJoin = '';
