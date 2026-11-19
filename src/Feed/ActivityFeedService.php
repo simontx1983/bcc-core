@@ -2,6 +2,7 @@
 
 namespace BCC\Core\Feed;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\PeepSo\PeepSoGraphService;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
@@ -42,9 +43,19 @@ final class ActivityFeedService
     public const SCOPE_FOLLOWING = 'following';
     public const SCOPE_SIGNALS   = 'signals';
     public const SCOPE_GROUP     = 'group';
+    /** F-416: posts from the groups and Halls the viewer belongs to ("My Groups"). */
+    public const SCOPE_GROUPS    = 'groups';
 
     /** @var list<string> */
-    public const VALID_SCOPES = [self::SCOPE_FOR_YOU, self::SCOPE_FOLLOWING, self::SCOPE_SIGNALS];
+    public const VALID_SCOPES = [self::SCOPE_FOR_YOU, self::SCOPE_FOLLOWING, self::SCOPE_SIGNALS, self::SCOPE_GROUPS];
+
+    /**
+     * The most groups the "My Groups" scope reads: the viewer's most recently
+     * joined. {@see PeepSoGroupRepository::getActiveMemberGroupIdsOrFail()}
+     * ranks at most 200, so a member of more sees the newest 200 rooms, which
+     * narrows and never leaks.
+     */
+    public const MEMBER_GROUPS_CAP = 200;
 
     /**
      * Author-whitelist cap for the `following` scope. getFollowing() defaults
@@ -104,14 +115,32 @@ final class ActivityFeedService
      * @param ?string $hallFeed Ranked-Hall channel selector (Rank Phase 7, §21.3) — forwarded verbatim to PeepSoActivityRepository::getActivities and only meaningful on the group-scoped path (`$onlyForGroupId` set). 'ranked' = ranked-channel posts only; 'main' = exclude ranked-channel posts; null = no channel filter (legacy callers). Posting into the ranked channel is gated in bcc-trust; reading it is open to everyone.
      * @param list<int>|null $viewerFriendIds §F-02: the authors the VIEWER is a friend of, for the level-30 branch. Only read when `$enforcePostVisibility` is true. ⚠ bcc-core does NOT discover this itself — friendship lives in `peepso_user_friends`, owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed depend on an add-on that may not be installed. The caller computes it and passes it. ⚠ null/[] means "a friend of nobody", which DENIES level 30 (except the viewer's own posts) rather than ignoring the branch — correct for an anonymous reader, and currently the only possible value in BCC, where peepso-friends is not installed.
      * @param bool $enforcePostVisibility §F-02 per-post gate, OPT-IN. ⚠⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them — the switch is the caller's to throw, which is also how an admin read is expressed (pass false). When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows posts already written under it. ⚠ Forwarded to the repository BY NAME: `getActivities()` takes nineteen parameters and these sit at 17-19, so positional padding would mean several bare nulls per call site, and a positional slip there is silent.
+     * @param list<int>|null $onlyForGroupIds F-416, read ONLY on {@see self::SCOPE_GROUPS}: the groups the viewer is an active member of, as the caller already resolved them. null = read them here ({@see resolveViewerMemberGroupIds()}). `[]` = a member of nothing → an empty page, no query. Forwarded to {@see PeepSoActivityRepository::getActivities()}, which reads the posts of those groups as a MEMBER (members_only included, no public_all gate). Ignored on every other scope and alongside `$onlyForGroupId`.
+     * @param list<int>|null $softExcludedAuthorIds Authors dropped except inside `$softExclusionExemptGroupIds` (the shadow-limit channel for "My Groups"; see the repository). Hard exclusions stay in `$excludedAuthorIds`.
+     * @param list<int>|null $softExclusionExemptGroupIds Groups whose posts are exempt from `$softExcludedAuthorIds`.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
+     * @throws ActivityReadFailedException only when built with `$throwOnReadFailure`
      */
-    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null, ?array $groupVisibilityIn = null, ?string $hashtag = null, ?string $hallFeed = null, ?array $viewerFriendIds = null, bool $enforcePostVisibility = false): array
+    public function getFeed(int $viewerId, string $scope, ?string $cursor = null, int $limit = 20, ?array $excludedAuthorIds = null, ?array $excludedActIds = null, ?int $onlyForGroupId = null, ?array $excludedGroupIds = null, ?array $groupVisibilityIn = null, ?string $hashtag = null, ?string $hallFeed = null, ?array $viewerFriendIds = null, bool $enforcePostVisibility = false, ?array $onlyForGroupIds = null, ?array $softExcludedAuthorIds = null, ?array $softExclusionExemptGroupIds = null): array
     {
         if (!in_array($scope, self::VALID_SCOPES, true)) {
             $scope = self::SCOPE_FOR_YOU;
         }
         $limit = max(1, min(50, $limit));
+
+        // F-416 "My Groups": a member read across the viewer's own groups.
+        // The caller may pass the list it already resolved (bcc-trust does,
+        // because it also needs it to decide which rooms lift the shadow-
+        // limit); otherwise it is read here. The list only applies to this
+        // scope, and never alongside a single-group read.
+        if ($scope === self::SCOPE_GROUPS && !($onlyForGroupId !== null && $onlyForGroupId > 0)) {
+            $onlyForGroupIds ??= $this->resolveViewerMemberGroupIds($viewerId);
+            if ($onlyForGroupIds === []) {
+                return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
+            }
+        } else {
+            $onlyForGroupIds = null;
+        }
 
         [$cursorTime, $cursorActId] = self::decodeCursor($cursor);
 
@@ -144,7 +173,10 @@ final class ActivityFeedService
             viewerId: $viewerId,
             viewerFriendIds: $viewerFriendIds,
             enforcePostVisibility: $enforcePostVisibility,
-            throwOnReadFailure: $this->throwOnReadFailure
+            throwOnReadFailure: $this->throwOnReadFailure,
+            onlyForGroupIds: $onlyForGroupIds,
+            softExcludedAuthorIds: $softExcludedAuthorIds,
+            softExclusionExemptGroupIds: $softExclusionExemptGroupIds
         );
 
         $hasMore = count($rows) > $limit;
@@ -167,6 +199,29 @@ final class ActivityFeedService
                 'has_more'    => $hasMore,
             ],
         ];
+    }
+
+    /**
+     * The groups the "My Groups" scope reads for a caller that did not pass
+     * them. A read that did not run throws when this service was built with
+     * `$throwOnReadFailure` (so the feed answers "try again"), and otherwise
+     * reads as a member of nothing — the historical empty answer.
+     *
+     * @return list<int>
+     * @throws ActivityReadFailedException only when `$throwOnReadFailure` is true
+     */
+    private function resolveViewerMemberGroupIds(int $viewerId): array
+    {
+        $ids = PeepSoGroupRepository::getActiveMemberGroupIdsOrFail($viewerId, self::MEMBER_GROUPS_CAP);
+        if ($ids === null) {
+            if ($this->throwOnReadFailure) {
+                throw new ActivityReadFailedException(
+                    '[bcc-core] ActivityFeedService: the "My Groups" membership read failed. An empty result here is NOT "a member of nothing".'
+                );
+            }
+            return [];
+        }
+        return $ids;
     }
 
     /**

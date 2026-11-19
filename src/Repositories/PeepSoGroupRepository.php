@@ -920,6 +920,90 @@ final class PeepSoGroupRepository
     }
 
     /**
+     * The PUBLISHED groups the user is an active member of, for a read that
+     * shows those groups' MEMBER content (the home feed's "My Groups" scope,
+     * F-416). Most recently joined first, at most `$limit` (capped at 200).
+     *
+     * Stricter than {@see getUserMemberGroupIds()} in three ways, each one
+     * load-bearing for a member read:
+     *   - F-354: a pair can carry a stale duplicate row, so a `member%` row
+     *     alone does not prove membership. Each candidate is re-read through
+     *     {@see findUserMembershipStatuses()} and kept only when its RANKED
+     *     status is active: a `banned` row beside a `member` row wins, and a
+     *     group is out;
+     *   - only published `peepso-group` posts: a trashed or drafted group's
+     *     member rows do not reach a feed;
+     *   - a read that did not run answers NULL, never `[]`. `[]` is "a member
+     *     of nothing" (an empty feed); null lets the caller answer "try again"
+     *     instead of showing a member an empty page during an outage.
+     *
+     * Uncached for the same reason as getUserMemberGroupIds(): a stale
+     * "still a member" would show a removed or banned member the group's
+     * members-only posts.
+     *
+     * @return list<int>|null null when either read failed
+     */
+    public static function getActiveMemberGroupIdsOrFail(int $userId, int $limit = 200): ?array
+    {
+        if ($userId <= 0) {
+            return [];
+        }
+        // findUserMembershipStatuses() ranks at most 200 ids.
+        $limit = max(1, min(200, $limit));
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        // GROUP BY, not DISTINCT: the order is the latest join of the pair,
+        // which DISTINCT could not sort by on MySQL 8 (it rejects ORDER BY
+        // over a column that is not selected). gm_group_id breaks a tie.
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT gm.gm_group_id
+               FROM {$members} gm
+              INNER JOIN {$wpdb->posts} p ON p.ID = gm.gm_group_id
+              WHERE gm.gm_user_id     = %d
+                AND gm.gm_user_status LIKE %s
+                AND p.post_type       = %s
+                AND p.post_status     = %s
+              GROUP BY gm.gm_group_id
+              ORDER BY MAX(gm.gm_joined) DESC, gm.gm_group_id DESC
+              LIMIT %d",
+            $userId,
+            self::ACTIVE_MEMBER_STATUS,
+            self::POST_TYPE,
+            self::POST_STATUS,
+            $limit
+        ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
+
+        $candidates = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (isset($row->gm_group_id)) {
+                $candidates[] = (int) $row->gm_group_id;
+            }
+        }
+        if ($candidates === []) {
+            return [];
+        }
+
+        $statuses = self::findUserMembershipStatuses($userId, $candidates);
+        if ($statuses === null) {
+            return null;
+        }
+
+        $active = [];
+        foreach ($candidates as $groupId) {
+            $status = $statuses[$groupId] ?? null;
+            if ($status !== null && str_starts_with($status, 'member')) {
+                $active[] = $groupId;
+            }
+        }
+        return $active;
+    }
+
+    /**
      * Co-members of a set of groups: for every active member of any
      * group in `$groupIds`, return how many of those groups they share
      * and one representative shared group_id. Drives the who-to-follow
