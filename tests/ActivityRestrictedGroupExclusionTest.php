@@ -153,7 +153,10 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
                 self::SELECT_PREFIX . self::GLOBAL_GATE_JOINS . self::BASE_WHERE
                     . ' AND p.post_author NOT IN (11,12)'
                     . ' AND a.act_id NOT IN (13)'
-                    . " AND a.act_module_id IN ('status','blog')"
+                    // F-392: module NAMES are resolved to their numeric ids and
+                    // bound as integers. They used to render ('status','blog'),
+                    // which MySQL casts to 0 against the SMALLINT column.
+                    . ' AND a.act_module_id IN (1,204)'
                     . " AND (p.post_date_gmt < '2026-11-10 10:00:00'"
                     . " OR (p.post_date_gmt = '2026-11-10 10:00:00' AND a.act_id < 900))"
                     . ' AND ' . self::PUBLIC_ALL_GATE . self::TAIL . '21',

@@ -195,6 +195,47 @@ final class FeedItemNormalizer
     }
 
     /**
+     * F-392: a caller's explicit module list as the numeric `act_module_id`
+     * values a query can bind.
+     *
+     *   • A numeric entry (int, or a string of digits) is kept as an int.
+     *   • A module NAME ('blog', 'review', 'signal', the legacy 'pull_batch')
+     *     becomes every numeric id whose kind matches the name's kind in
+     *     MODULE_TO_KIND, so 'blog' → [204] and 'signal' → [], because no
+     *     writer emits a numeric signal module.
+     *   • Anything else, and 0 or below, is dropped. 0 is not a module: it is
+     *     what a string write to the SMALLINT column was coerced to.
+     *
+     * Binding a name directly is the defect this replaces: MySQL casts it to
+     * 0. The result is de-duplicated, in first-seen order, and may be empty,
+     * which a caller must treat as "no rows", never as "no filter".
+     *
+     * @param array<int|string> $modules
+     * @return list<int>
+     */
+    public static function moduleIdsFor(array $modules): array
+    {
+        $ids = [];
+        foreach ($modules as $module) {
+            if (is_int($module) || ctype_digit($module)) {
+                $ids[] = (int) $module;
+                continue;
+            }
+            $kind = self::MODULE_TO_KIND[$module] ?? null;
+            if ($kind === null) {
+                continue;
+            }
+            foreach (self::MODULE_TO_KIND as $moduleId => $moduleKind) {
+                if (is_int($moduleId) && $moduleKind === $kind) {
+                    $ids[] = $moduleId;
+                }
+            }
+        }
+
+        return array_values(array_unique(array_filter($ids, static fn (int $id): bool => $id > 0)));
+    }
+
+    /**
      * @param ActivityRow $row     A row from PeepSoActivityRepository::getActivities().
      * @param array<string, mixed> $author Pre-hydrated author block (kind/id/handle/display_name/avatar_url/reputation_tier/rank_label/is_in_good_standing/is_followed_by_viewer).
      * @param array<string, mixed> $body   Pre-hydrated kind-specific body (per §3.3.1–3.3.8). Empty = use defaults.

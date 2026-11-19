@@ -148,9 +148,9 @@ namespace BCC\Core\Feed\Tests\WallModuleFilter {
             $out = $this->wall([1, self::MODULE_REVIEW]);
 
             self::assertSame(
-                "act_module_id IN ('1','202')",
+                "act_module_id IN (1,202)",
                 self::moduleClause($out['sql']),
-                'the repository binds an explicit list as strings (%s), its own default as ints (%d)'
+                'an explicit list is bound as integers, like the default (F-392)'
             );
             self::assertSame(1, $out['queries'], 'one candidate query, not a fetch-then-filter');
         }
@@ -173,9 +173,9 @@ namespace BCC\Core\Feed\Tests\WallModuleFilter {
 
             $clause = self::moduleClause($this->wall($allowed)['sql']);
 
-            self::assertStringNotContainsString("'" . self::MODULE_BLOG . "'", $clause);
-            self::assertStringContainsString("'" . self::MODULE_REVIEW . "'", $clause, 'only blogs were dropped');
-            self::assertStringContainsString("'1'", $clause, 'ordinary statuses still show');
+            self::assertDoesNotMatchRegularExpression('/\b' . self::MODULE_BLOG . '\b/', $clause);
+            self::assertMatchesRegularExpression('/\b' . self::MODULE_REVIEW . '\b/', $clause, 'only blogs were dropped');
+            self::assertMatchesRegularExpression('/[(,]1[,)]/', $clause, 'ordinary statuses still show');
         }
 
         /** The same channel, used for the Reviews section. */
@@ -188,8 +188,8 @@ namespace BCC\Core\Feed\Tests\WallModuleFilter {
 
             $clause = self::moduleClause($this->wall($allowed)['sql']);
 
-            self::assertStringNotContainsString("'" . self::MODULE_REVIEW . "'", $clause);
-            self::assertStringContainsString("'" . self::MODULE_BLOG . "'", $clause, 'only reviews were dropped');
+            self::assertDoesNotMatchRegularExpression('/\b' . self::MODULE_REVIEW . '\b/', $clause);
+            self::assertMatchesRegularExpression('/\b' . self::MODULE_BLOG . '\b/', $clause, 'only reviews were dropped');
         }
 
         /**
@@ -229,7 +229,7 @@ namespace BCC\Core\Feed\Tests\WallModuleFilter {
         {
             $clause = self::moduleClause($this->wall([1, self::MODULE_DM, self::MODULE_POLL])['sql']);
 
-            self::assertSame("act_module_id IN ('1')", $clause, 'only the public module survives');
+            self::assertSame("act_module_id IN (1)", $clause, 'only the public module survives');
         }
 
         /**
