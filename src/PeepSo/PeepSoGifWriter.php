@@ -113,9 +113,9 @@ final class PeepSoGifWriter
         // never ran because BCC was never told about a group.
         // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
         //
-        // @mentions are KEPT: `PeepSoTags::after_save_post` derives them from
-        // the post CONTENT and permission-gates each notification, so it is
-        // the one listener on that hook that is not request-driven.
+        // @mentions are NOT kept (F-423): BCC's own NotificationDispatcher
+        // notifies mentionees, gated on the post's audience. See the class
+        // note on PeepSoTags in {@see PeepSoAddPostGuard}.
         //
         // `PeepSoGiphy::after_add_post` is kept here and nowhere else: it is
         // request-driven, but THIS writer is the thing driving it.
@@ -133,7 +133,7 @@ final class PeepSoGifWriter
         // `$_POST['giphy']` is set. So we pass the user's caption verbatim —
         // no single-space pad needed.
         $postId = PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_GIPHY],
+            [PeepSoAddPostGuard::KEEP_GIPHY],
             ['type' => 'giphy', 'giphy' => $urlTrimmed],
             static fn () => \PeepSoActivity::get_instance()->add_post(
                 $authorId,

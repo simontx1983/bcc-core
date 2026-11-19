@@ -54,11 +54,17 @@ if (!defined('ABSPATH')) {
  * BY the page, and the photos and giphy comment listeners read the request
  * too. Its content-driven listeners are the three KEEP_COMMENT_* entries.
  *
- * The one exception on this hook is `PeepSoTags::after_save_post`
- * (tags.php:127), which
- * reads the POST CONTENT for @mentions and gates each notification with
- * `PeepSo::check_permissions(PERM_POST_VIEW)`. It reads no request input, so
- * it is the only listener BCC keeps by default.
+ * ⚠ `PeepSoTags::after_save_post` (tags.php:127) and `after_save_comment`
+ * (tags.php:201) are detached too, although they read no request input
+ * (F-423). They mail "Someone mentioned you" and write a PeepSo-module bell
+ * for every @mention in the content, gated only on
+ * `PeepSo::check_permissions(PERM_POST_VIEW, author)`, which is the
+ * AUTHOR's profile privacy. That is not the post's audience: a secret or
+ * closed group post, a followers-only post or a DM mailed members who
+ * cannot open it. BCC's own NotificationDispatcher owns mentions, gated on
+ * the post's permalink. Mention RENDERING is unaffected: it is PeepSo's
+ * `do_tags` content filter and BCC's MentionExtractor, both reading the
+ * stored content, never these listeners.
  *
  * ⚠⚠ AND `PeepSoInput` READS THE QUERY STRING FIRST. Measured in
  * peepso/classes/input.php:
@@ -201,10 +207,15 @@ final class PeepSoAddPostGuard
     public const HOOK_COMMENT = 'peepso_after_add_comment';
 
     /**
-     * The listener BCC always keeps: @mentions, derived from the post
-     * CONTENT and permission-gated per recipient. Reads no request input.
+     * Classes NO caller may keep, whatever its keep-list says.
+     *
+     * `PeepSoTags` (F-423): its two listeners mail and bell every @mention
+     * gated on the author's profile privacy, not the post's audience; see
+     * the class note. Refusing it HERE, not just leaving it off each
+     * writer's list, is what covers the writers no test can drive (photo,
+     * GIF) and any writer added later.
      */
-    public const KEEP_MENTIONS = ['PeepSoTags', 'after_save_post'];
+    private const NEVER_KEPT = ['PeepSoTags'];
 
     /** Giphy post-meta — kept only by {@see PeepSoGifWriter}. */
     public const KEEP_GIPHY = ['PeepSoGiphy', 'after_add_post'];
@@ -213,13 +224,6 @@ final class PeepSoAddPostGuard
     public const KEEP_PHOTOS = ['PeepSoSharePhotos', 'after_add_post'];
 
     // ── the comment hook's keep-list ────────────────────────────────────
-
-    /**
-     * @mentions on a COMMENT (tags.php:46 → `after_save_comment`). Same
-     * content-derived, permission-gated shape as {@see KEEP_MENTIONS}; a
-     * different method name, so it needs its own entry.
-     */
-    public const KEEP_COMMENT_MENTIONS = ['PeepSoTags', 'after_save_comment'];
 
     /**
      * `PeepSoActivityStream::activity_after_add_comment`
@@ -647,6 +651,11 @@ final class PeepSoAddPostGuard
         $class = is_object($fn[0]) ? get_class($fn[0]) : (is_string($fn[0]) ? $fn[0] : '');
         if ($class === '') {
             return false;
+        }
+        foreach (self::NEVER_KEPT as $neverKept) {
+            if ($class === $neverKept || is_subclass_of($class, $neverKept)) {
+                return false;
+            }
         }
 
         foreach ($keep as [$keepClass, $keepMethod]) {

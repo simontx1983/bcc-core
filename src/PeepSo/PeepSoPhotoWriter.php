@@ -210,9 +210,9 @@ final class PeepSoPhotoWriter
         // never ran because BCC was never told about a group.
         // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
         //
-        // @mentions are KEPT: `PeepSoTags::after_save_post` derives them from
-        // the post CONTENT and permission-gates each notification, so it is
-        // the one listener on that hook that is not request-driven.
+        // @mentions are NOT kept (F-423): BCC's own NotificationDispatcher
+        // notifies mentionees, gated on the post's audience. See the class
+        // note on PeepSoTags in {@see PeepSoAddPostGuard}.
         //
         // ⚠⚠ THIS WRITER IS THE SHARPEST CASE. It sets
         // `$_POST['module_id'] = 4` to drive PeepSo's photo path — and
@@ -237,7 +237,7 @@ final class PeepSoPhotoWriter
         // ⚠ `files` is pinned to a LIST. Its reader calls `count()` on it,
         // so a bare string would be a PHP 8 TypeError.
         $postId = PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_PHOTOS],
+            [PeepSoAddPostGuard::KEEP_PHOTOS],
             [
                 'type'      => 'photo',
                 'files'     => [$hashName],

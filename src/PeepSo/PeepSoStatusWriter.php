@@ -168,11 +168,11 @@ final class PeepSoStatusWriter
         // never ran because BCC was never told about a group.
         // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
         //
-        // @mentions are KEPT: `PeepSoTags::after_save_post` derives them from
-        // the post CONTENT and permission-gates each notification, so it is
-        // the one listener on that hook that is not request-driven.
+        // @mentions are NOT kept (F-423): BCC's own NotificationDispatcher
+        // notifies mentionees, gated on the post's audience. See the class
+        // note on PeepSoTags in {@see PeepSoAddPostGuard}.
         $postId = PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS],
+            [], // nothing kept: every listener on this hook is detached
             [], // a status post drives nothing through the request
             static fn () => $activity->add_post($authorId, $authorId, $stripped, $extra)
         );
