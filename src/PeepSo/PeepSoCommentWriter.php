@@ -203,7 +203,37 @@ final class PeepSoCommentWriter
             return false;
         }
 
-        $trashed = wp_trash_post($commentPostId);
+        // ⚠⚠ F-361 — PIN-ONLY, AND A TRASH IS NOT EXEMPT.
+        //
+        // This looks like it should be out of scope: nothing is being
+        // created, and the three request-reading listeners are usually
+        // described as running on an INSERT. They run here too.
+        // `wp_trash_post()` calls `wp_update_post()` in its own body
+        // (wp-includes/post.php), `wp_update_post()` calls
+        // `wp_insert_post()`, and that fires the `wp_insert_post` action at
+        // :5204 with `$update = true`. Traced, not assumed.
+        //
+        //   PeepSoMoods::save_mood       moods.php:47     int('mood')
+        //   PeepSoLocation::insert_post  location.php:90  value('location')
+        //   PeepSo3_Anon::save_anon_op   anon.php (peepso-anon) int('anon_id')
+        //
+        // ⚠ And `save_mood`'s "don't touch it unless there's a mood" guard
+        // does NOT save us: the action passes `$post`, so the branch that
+        // DELETES the meta is skipped while `else if ($mood)` still fires.
+        // A delete-my-comment request carrying `?mood=…&location=…`
+        // therefore stamps that meta on the way out.
+        //
+        // The consequence here is smaller than on a create — the row is
+        // being trashed — but an untrash would restore it carrying whatever
+        // was stamped, and the invariant is worth more than the
+        // case-by-case judgment: EVERY BCC post write goes through
+        // `pinOnly`, so the guard test can be mechanical and its allowlist
+        // can stay empty. {@see PeepSoAddPostGuard::pinOnly()}.
+        $trashed = PeepSoAddPostGuard::pinOnly(
+            [], // removing a comment drives nothing through the request
+            static fn () => wp_trash_post($commentPostId)
+        );
+
         return $trashed !== false && $trashed !== null;
     }
 }
