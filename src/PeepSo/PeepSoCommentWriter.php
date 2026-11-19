@@ -140,17 +140,49 @@ final class PeepSoCommentWriter
         // PeepSo defaults to PeepSoActivity::MODULE_ID = 1 (status),
         // which fails for every other kind (photo=4, poll=30, blog=6661,
         // etc.).
-        $result = \PeepSoActivity::get_instance()->add_comment(
-            $parentPostId,
-            $authorId,
-            $writeContent,
-            ['module_id' => $parentModuleId]
+        // ⚠⚠ F-361 — through the GUARD, never straight to add_comment.
+        // `add_comment()` fires `peepso_after_add_comment`, and
+        // `PeepSoPagesPlugin::after_add_comment` (peepso-pages/pages.php:3097)
+        // reads `post_as_page` from the REQUEST — query string first — so any
+        // member commenting on a page's post could have their comment render
+        // as authored BY the page. The photos and giphy comment listeners
+        // read the request the same way.
+        //
+        // Three listeners are kept, and none of them reads the request: the
+        // root-post `post_modified` bump (so replies still resurface a
+        // thread), @mentions, and the anonymous-OP marker (dropping that one
+        // would de-anonymise an anonymous poster's own replies).
+        $result = PeepSoAddPostGuard::aroundHooks(
+            [PeepSoAddPostGuard::HOOK_COMMENT],
+            [
+                PeepSoAddPostGuard::KEEP_COMMENT_BUMP,
+                PeepSoAddPostGuard::KEEP_COMMENT_MENTIONS,
+                PeepSoAddPostGuard::KEEP_COMMENT_ANON_OP,
+            ],
+            [], // a comment drives nothing through the request
+            static fn () => \PeepSoActivity::get_instance()->add_comment(
+                $parentPostId,
+                $authorId,
+                $writeContent,
+                ['module_id' => $parentModuleId]
+            )
         );
 
         if ($result === false || !is_int($result)) {
             return 0;
         }
-        return $result > 0 ? $result : 0;
+        if ($result <= 0) {
+            return 0;
+        }
+
+        // Backstop. ⚠ STRIPS rather than deletes — see
+        // PeepSoAddPostGuard::stripForgedStamps(): the comment is the
+        // member's own words, and the destructive path would take nested
+        // replies and likes with it. The return value is ignored on purpose;
+        // the forgery is already undone and the comment is legitimate.
+        PeepSoAddPostGuard::stripForgedStamps($result);
+
+        return $result;
     }
 
     /**
