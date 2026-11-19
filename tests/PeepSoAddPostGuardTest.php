@@ -187,7 +187,7 @@ final class PeepSoAddPostGuardTest extends TestCase
         $GLOBALS['__bcc_apg']['raw'] = ['anon_id' => '777'];
 
         PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_PHOTOS],
+            [PeepSoAddPostGuard::KEEP_PHOTOS],
             ['type' => 'photo', 'files' => ['abc.jpg'], 'module_id' => 4],
             static fn () => \PeepSoActivity::get_instance()->add_post(self::AUTHOR, self::AUTHOR, 'x')
         );
@@ -239,15 +239,36 @@ final class PeepSoAddPostGuardTest extends TestCase
     // ── what must keep working ──────────────────────────────────────────
 
     /**
-     * @mentions are the one listener kept: `PeepSoTags::after_save_post`
-     * reads the post CONTENT and permission-gates each notification, so it is
-     * not request-driven and dropping it would silently kill mentions.
+     * F-423: PeepSo's own @mention listener never runs on a BCC write. It
+     * mailed and belled every mentionee gated only on the AUTHOR's profile
+     * privacy, never the post's audience. BCC's NotificationDispatcher owns
+     * mentions. The listener is back on the hook afterwards.
      */
-    public function testMentionNotificationsStillRun(): void
+    public function testPeepSosOwnMentionListenerNeverRuns(): void
     {
+        $before = $this->registry();
+
         PeepSoStatusWriter::createSelfStatus(self::AUTHOR, 'hello @someone');
 
-        self::assertContains('PeepSoTags::after_save_post', $this->ran());
+        self::assertNotContains('PeepSoTags::after_save_post', $this->ran());
+        self::assertSame($before, $this->registry(), 'restored afterwards');
+    }
+
+    /**
+     * ⚠ And no keep-list can keep it, so a writer this suite cannot drive
+     * (photo, GIF) or a future one cannot bring the mail back. The control
+     * keeps a neighbour on the same hook: the keep-list itself still works.
+     */
+    public function testNoKeepListCanKeepPeepSoTags(): void
+    {
+        PeepSoAddPostGuard::around(
+            [['PeepSoTags', 'after_save_post'], ['PeepSoPolls', 'after_add_post']],
+            [],
+            static fn () => \PeepSoActivity::get_instance()->add_post(self::AUTHOR, self::AUTHOR, 'hello @someone')
+        );
+
+        self::assertNotContains('PeepSoTags::after_save_post', $this->ran());
+        self::assertContains('PeepSoPolls::after_add_post', $this->ran(), 'control: a kept listener still runs');
     }
 
     /**
@@ -322,7 +343,7 @@ final class PeepSoAddPostGuardTest extends TestCase
         $_GET['anon_id'] = '777';
 
         PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_PHOTOS],
+            [PeepSoAddPostGuard::KEEP_PHOTOS],
             ['type' => 'photo', 'files' => ['abc.jpg'], 'module_id' => 4],
             static fn () => \PeepSoActivity::get_instance()->add_post(self::AUTHOR, self::AUTHOR, 'x')
         );
@@ -347,7 +368,7 @@ final class PeepSoAddPostGuardTest extends TestCase
         $_GET['type']      = 'activity';
 
         PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS, PeepSoAddPostGuard::KEEP_PHOTOS],
+            [PeepSoAddPostGuard::KEEP_PHOTOS],
             ['type' => 'photo', 'files' => ['abc.jpg'], 'module_id' => 4],
             static fn () => \PeepSoActivity::get_instance()->add_post(self::AUTHOR, self::AUTHOR, 'x')
         );
@@ -398,7 +419,7 @@ final class PeepSoAddPostGuardTest extends TestCase
 
         try {
             PeepSoAddPostGuard::around(
-                [PeepSoAddPostGuard::KEEP_MENTIONS],
+                [PeepSoAddPostGuard::KEEP_PHOTOS],
                 [],
                 static function (): int {
                     throw new \RuntimeException('add_post blew up');

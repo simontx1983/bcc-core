@@ -159,19 +159,20 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
     }
 
     /**
-     * The three content-driven comment listeners keep running: the root-post
-     * bump (so a reply still resurfaces a thread), @mentions, and the
-     * anonymous-OP marker (dropping it would de-anonymise an anonymous
-     * poster's own replies).
+     * The two content-driven comment listeners keep running: the root-post
+     * bump (so a reply still resurfaces a thread) and the anonymous-OP marker
+     * (dropping it would de-anonymise an anonymous poster's own replies).
+     * PeepSo's @mention listener does NOT (F-423): BCC's dispatcher notifies
+     * mentionees, gated on the parent post's audience.
      */
-    public function testTheContentDrivenCommentListenersStillRun(): void
+    public function testTheContentDrivenCommentListenersStillRunButNotPeepSosMentions(): void
     {
         PeepSoCommentWriter::addComment(self::PARENT, self::AUTHOR, 'hello @someone', 1);
 
         $ran = $this->ran();
         self::assertContains('PeepSoActivityStream::activity_after_add_comment', $ran);
-        self::assertContains('PeepSoTags::after_save_comment', $ran);
         self::assertContains('PeepSo3_Anon::save_comments_anon_op', $ran);
+        self::assertNotContains('PeepSoTags::after_save_comment', $ran);
     }
 
     /**
@@ -240,12 +241,20 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
         self::assertSame([], $GLOBALS['__bcc_apg']['fetched']);
     }
 
-    /** ⚠ ANTI-VACUITY: a message send still works and still runs @mentions. */
-    public function testAMessageSendStillRunsMentions(): void
+    /**
+     * F-423: an @mention in a DM no longer makes PeepSo mail the mentionee,
+     * participant or not. BCC has no mention notification for messages: no
+     * bell beats a leak. Both sends still work.
+     */
+    public function testAMessageSendNeverRunsPeepSosMentionListener(): void
     {
-        PeepSoMessageWriter::sendNewMessage(self::AUTHOR, self::RECIPIENT, 'hi @someone');
+        $result = PeepSoMessageWriter::sendNewMessage(self::AUTHOR, self::RECIPIENT, 'hi @someone');
+        $reply  = PeepSoMessageWriter::sendInConversation(self::AUTHOR, 4242, 'and @someone');
 
-        self::assertContains('PeepSoTags::after_save_post', $this->ran());
+        self::assertIsArray($result);
+        self::assertSame(self::MESSAGE_ID, $result['message_id'] ?? null);
+        self::assertSame(6262, $reply);
+        self::assertNotContains('PeepSoTags::after_save_post', $this->ran());
     }
 
     // ── 3. pin-only, on a bare wp_insert_post ───────────────────────────
@@ -378,7 +387,7 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
 
         PeepSoAddPostGuard::aroundHooks(
             ['peepso_activity_after_add_post', 'peepso_after_add_comment'],
-            [PeepSoAddPostGuard::KEEP_MENTIONS],
+            [PeepSoAddPostGuard::KEEP_COMMENT_BUMP],
             [],
             static fn (): int => 1
         );
@@ -414,16 +423,17 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
         $hook   = 'peepso_activity_after_add_post';
         $before = array_keys($GLOBALS['wp_filter'][$hook]->callbacks[10]);
 
-        PeepSoAddPostGuard::aroundHooks([$hook], [PeepSoAddPostGuard::KEEP_MENTIONS], [], static fn (): int => 1);
+        // Any [class, method] pair at priority 10 shows it; nothing is written.
+        PeepSoAddPostGuard::aroundHooks([$hook], [['PeepSoGroupsPlugin', 'after_add_post']], [], static fn (): int => 1);
 
         $after = array_keys($GLOBALS['wp_filter'][$hook]->callbacks[10]);
 
         // Same set, and the kept one is still there…
         self::assertSame(count($before), count($after));
         self::assertSame([], array_diff($before, $after), 'a callback did not come back');
-        self::assertContains('PeepSoTags::after_save_post', $after);
+        self::assertContains('PeepSoGroupsPlugin::after_add_post', $after);
         // …but the detached ones moved to the end of the bucket.
         self::assertNotSame($before, $after, 'if order IS preserved now, delete this test and tighten the one above');
-        self::assertSame('PeepSoTags::after_save_post', $after[0]);
+        self::assertSame('PeepSoGroupsPlugin::after_add_post', $after[0]);
     }
 }

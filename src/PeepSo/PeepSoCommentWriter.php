@@ -148,15 +148,16 @@ final class PeepSoCommentWriter
         // as authored BY the page. The photos and giphy comment listeners
         // read the request the same way.
         //
-        // Three listeners are kept, and none of them reads the request: the
+        // Two listeners are kept, and neither reads the request: the
         // root-post `post_modified` bump (so replies still resurface a
-        // thread), @mentions, and the anonymous-OP marker (dropping that one
-        // would de-anonymise an anonymous poster's own replies).
+        // thread) and the anonymous-OP marker (dropping that one would
+        // de-anonymise an anonymous poster's own replies). @mentions are NOT
+        // kept (F-423): BCC's own NotificationDispatcher notifies them,
+        // gated on the parent post's audience; see {@see PeepSoAddPostGuard}.
         $result = PeepSoAddPostGuard::aroundHooks(
             [PeepSoAddPostGuard::HOOK_COMMENT],
             [
                 PeepSoAddPostGuard::KEEP_COMMENT_BUMP,
-                PeepSoAddPostGuard::KEEP_COMMENT_MENTIONS,
                 PeepSoAddPostGuard::KEEP_COMMENT_ANON_OP,
             ],
             [], // a comment drives nothing through the request

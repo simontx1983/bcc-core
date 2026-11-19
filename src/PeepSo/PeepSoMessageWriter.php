@@ -141,8 +141,12 @@ final class PeepSoMessageWriter
         // The embed listener's outbound fetch and the photos listener's
         // `anon_id` copy both reach it — the groups and pages listeners bail
         // on the post type, which is luck rather than design.
+        //
+        // Nothing is kept. @mentions included (F-423): PeepSoTags mailed
+        // anyone @mentioned in a DM, a participant or not, and BCC has no
+        // mention notification for messages. No bell beats a leak.
         $result = PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS],
+            [],
             [],
             static fn () => $model->create_new_conversation(
                 $authorId,
@@ -205,9 +209,9 @@ final class PeepSoMessageWriter
 
         $model = new \PeepSoMessagesModel();
         // ⚠⚠ F-361 — the same hook, fired directly at messagesmodel.php:500.
-        // See the note on sendNew() above; same guard, same keep-list.
+        // See the note on sendNew() above; same guard, nothing kept.
         $result = PeepSoAddPostGuard::around(
-            [PeepSoAddPostGuard::KEEP_MENTIONS],
+            [],
             [],
             static fn () => $model->add_to_conversation($authorId, $rootMsgId, $body)
         );
