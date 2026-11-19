@@ -877,19 +877,21 @@ final class PeepSoGroupRepository
     {
         global $wpdb;
 
-        // peepso_group_privacy = 2 is PRIVACY_SECRET; exclude.
+        // F-429: the shared rule, not an inline check. The LEFT JOIN form
+        // this replaced listed a group whenever ANY of its privacy rows was
+        // not 2 — so a group carrying both '0' and '2' was browsable — and
+        // returned it once per row. NOT EXISTS needs no join, so dropping
+        // the join removes the duplicate rows along with the leak.
+        $notSecret = PeepSoGroupPrivacy::notSecretSql('p.ID');
+
         $rows = $wpdb->get_col($wpdb->prepare(
             "SELECT p.ID
                FROM {$wpdb->posts} p
-          LEFT JOIN {$wpdb->postmeta} pm
-                    ON pm.post_id  = p.ID
-                   AND pm.meta_key = %s
               WHERE p.post_type   = %s
                 AND p.post_status = %s
-                AND (pm.meta_value IS NULL OR CAST(pm.meta_value AS UNSIGNED) <> 2)
+                AND {$notSecret}
               ORDER BY p.ID DESC
               LIMIT %d",
-            'peepso_group_privacy',
             self::POST_TYPE,
             self::POST_STATUS,
             $limit
