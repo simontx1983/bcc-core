@@ -612,11 +612,18 @@ final class PeepSoGroupRepository
                FROM {$members}
               WHERE gm_user_id = %d
                 AND gm_group_id IN ({$placeholders})
-              ORDER BY gm_id ASC
+              ORDER BY (gm_user_status = 'banned') DESC, gm_id ASC
               LIMIT %d",
             // 2× the ids: with no unique (user, group) index a pair can have
             // a duplicate row, and a limit equal to the id count would let
             // duplicates push a real group past it — read as "no row".
+            //
+            // Banned rows FIRST: the limit is shared by every pair, so a pair
+            // with three or more rows can push its own NEWER ban past it and
+            // read as a member (security review, F-416). A ban therefore never
+            // falls outside the window while any active row is inside it.
+            // Within each class gm_id still orders the rows, so the tie-break
+            // below is unchanged.
             ...array_merge([$userId], $groupIds, [2 * count($groupIds)])
         ));
         if ($ok === false || (string) $wpdb->last_error !== '') {
@@ -624,8 +631,8 @@ final class PeepSoGroupRepository
         }
 
         // F-354: no unique (user, group) index, so a pair can carry a stale
-        // duplicate. Rows arrive in gm_id order; per group the best-ranked
-        // row wins and the lowest gm_id breaks a tie, so the answer never
+        // duplicate. Rows arrive bans first, then in gm_id order; per group
+        // the best-ranked row wins and the lowest gm_id breaks a tie, so the answer never
         // depends on which duplicate happened to be inserted first:
         //   banned  >  member_owner  >  other active (member%)  >  anything else (pending_*, …)
         // A ban outranks membership (fail closed, and the write doors

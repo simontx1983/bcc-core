@@ -52,8 +52,14 @@ final class StatusesWpdb
             $this->last_error = 'simulated failure';
             return false;
         }
-        // Honour the statement's LIMIT, as MySQL would.
-        $rows = preg_match('/LIMIT (\d+)/', $sql, $m) === 1 ? array_slice($this->rows, 0, (int) $m[1]) : $this->rows;
+        // $this->rows are in gm_id order. Honour a bans-first ORDER BY and
+        // then the statement's LIMIT, as MySQL would.
+        $rows = $this->rows;
+        if (str_contains($sql, "ORDER BY (gm_user_status = 'banned') DESC, gm_id ASC")) {
+            $banned = array_filter($rows, static fn (object $r): bool => ($r->gm_user_status ?? '') === 'banned');
+            $rows   = array_merge(array_values($banned), array_values(array_diff_key($rows, $banned)));
+        }
+        $rows = preg_match('/LIMIT (\d+)/', $sql, $m) === 1 ? array_slice($rows, 0, (int) $m[1]) : $rows;
         $this->last_result = $rows;
         return count($rows);
     }
@@ -98,7 +104,8 @@ final class MembershipStatusesSqlTest extends TestCase
         self::assertStringContainsString('SELECT gm_group_id, gm_user_status FROM wp_peepso_group_members', $sql);
         self::assertStringContainsString('WHERE gm_user_id = 7 AND gm_group_id IN (42,43)', $sql, 'deduplicated, non-positive ids dropped');
         self::assertStringContainsString('LIMIT 4', $sql, '2 × the two ids');
-        self::assertStringNotContainsString('gm_user_status =', $sql, 'every status, not only active ones');
+        $where = (string) strstr((string) strstr($sql, 'WHERE'), 'ORDER BY', true);
+        self::assertStringNotContainsString('gm_user_status', $where, 'every status, not only active ones (status only ORDERS the rows)');
     }
 
     public function testEveryStatusComesBackKeyedByGroup(): void
@@ -110,9 +117,12 @@ final class MembershipStatusesSqlTest extends TestCase
             (object) ['gm_group_id' => '45', 'gm_user_status' => 'banned'],
         ];
 
+        // A map: callers look groups up by id, so key order is not part of it.
+        $statuses = (array) PeepSoGroupRepository::findUserMembershipStatuses(7, [42, 43, 44, 45, 46]);
+        ksort($statuses);
         self::assertSame(
             [42 => 'member_owner', 43 => 'pending_admin', 44 => 'pending_user', 45 => 'banned'],
-            PeepSoGroupRepository::findUserMembershipStatuses(7, [42, 43, 44, 45, 46])
+            $statuses
         );
     }
 
@@ -160,7 +170,40 @@ final class MembershipStatusesSqlTest extends TestCase
 
         self::assertSame([42 => $expected], PeepSoGroupRepository::findUserMembershipStatuses(7, [42]));
         self::assertCount(1, $this->wpdb->queries, 'one read, no follow-up per duplicate');
-        self::assertStringContainsString('ORDER BY gm_id ASC', $this->wpdb->queries[0]);
+        self::assertStringContainsString("ORDER BY (gm_user_status = 'banned') DESC, gm_id ASC", $this->wpdb->queries[0]);
+    }
+
+    /**
+     * The limit (2 × the ids) is shared by every pair, so three rows on ONE
+     * pair could push that pair's own newer ban past it: two member rows
+     * fill a limit of 2 and the ban, the last row in gm_id order, is never
+     * read, so the group reads as "member" (security review, F-416). Bans
+     * are read first, so the ban is inside the window whatever its gm_id.
+     */
+    public function testANewerBanBehindTwoMemberRowsStillWins(): void
+    {
+        $this->wpdb->rows = [
+            (object) ['gm_group_id' => '42', 'gm_user_status' => 'member'],
+            (object) ['gm_group_id' => '42', 'gm_user_status' => 'member'],
+            (object) ['gm_group_id' => '42', 'gm_user_status' => 'banned'],
+        ];
+
+        self::assertSame([42 => 'banned'], PeepSoGroupRepository::findUserMembershipStatuses(7, [42]));
+        self::assertStringContainsString('LIMIT 2', $this->wpdb->queries[0], 'the ban lies beyond a gm_id-ordered limit');
+    }
+
+    /** Bans first must not reorder anything else: the gm_id tie-break holds within each class. */
+    public function testBansFirstKeepsTheGmIdTieBreakForOtherRows(): void
+    {
+        $this->wpdb->rows = [
+            (object) ['gm_group_id' => '42', 'gm_user_status' => 'member_moderator'],
+            (object) ['gm_group_id' => '43', 'gm_user_status' => 'banned'],
+            (object) ['gm_group_id' => '42', 'gm_user_status' => 'member'],
+        ];
+
+        $statuses = (array) PeepSoGroupRepository::findUserMembershipStatuses(7, [42, 43]);
+        ksort($statuses);
+        self::assertSame([42 => 'member_moderator', 43 => 'banned'], $statuses);
     }
 
     public function testOneGroupsDuplicateDoesNotChangeAnother(): void
@@ -181,7 +224,8 @@ final class MembershipStatusesSqlTest extends TestCase
     {
         PeepSoGroupRepository::findUserMembershipStatuses(7, range(1, 250));
 
-        self::assertSame(200, substr_count($this->wpdb->queries[0], ',') + 1 - substr_count('gm_group_id, gm_user_status', ','));
+        preg_match('/gm_group_id IN \(([^)]*)\)/', $this->wpdb->queries[0], $in);
+        self::assertCount(200, explode(',', $in[1] ?? ''));
         self::assertStringContainsString('LIMIT 400', $this->wpdb->queries[0]);
     }
 
