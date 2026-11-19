@@ -595,7 +595,24 @@ final class PeepSoGroupWriter
             ],
         ];
 
-        $group = new \PeepSoGroup(null, $data);
+        // ⚠⚠ F-361 — A PEEPSO MODEL WRITE, which #149's guard could not
+        // see: it knew WordPress function NAMES, and this is a
+        // constructor. `new PeepSoGroup(null, $data)` runs
+        // `wp_insert_post()` (peepso-groups group.php:308).
+        //
+        // TWO arguments CREATE; ONE only loads — which is why the
+        // `new \PeepSoGroup($groupId)` reads elsewhere in this file are
+        // left alone, and why the guard counts arguments rather than
+        // matching the class name.
+        //
+        // This is reached from a MEMBER creating a community (trust's
+        // MyGroupsEndpoint), so the three request-reading listeners
+        // (moods.php:47, location.php:90, peepso-anon) see whatever that
+        // member sent.
+        $group = PeepSoAddPostGuard::pinOnly(
+            [], // creating a community drives nothing through the request
+            static fn () => new \PeepSoGroup(null, $data)
+        );
 
         // PeepSoGroup returns FALSE from its constructor's get_posts
         // fallback when the wp_post insert failed. The id property
@@ -752,7 +769,40 @@ final class PeepSoGroupWriter
 
         // Step 3 — switch the owner pointer (post_author). PeepSo's
         // update() maps owner_id through post_data_map → wp_update_post.
-        $group->update(['owner_id' => $toUserId]);
+        // ⚠ F-361 — the other PeepSo model write: `update()` maps
+        // owner_id through post_data_map to `wp_update_post()`
+        // (group.php:355), which fires the action. Reached from
+        // CommunityCustodyService on a member's own custody request.
+        //
+        // ⚠ A BLOCK CLOSURE RETURNING A VALUE, not an arrow fn, and not a
+        // blanket PHPStan suppression. `pinOnly()` is `@template TResult`
+        // over `callable(): TResult`, and `PeepSoGroup::update()` is
+        // declared VOID — so an arrow fn gives PHPStan nothing to resolve
+        // TResult from ("Unable to resolve the template type TResult",
+        // level 8). Returning a value is the honest fix: suppressing the
+        // whole call would hide a real signature mismatch that the next
+        // void write hits too.
+        //
+        // ⚠⚠ AND DO NOT SPELL OUT A PHPSTAN SUPPRESSION COMMENT ANYWHERE
+        // IN THIS FILE'S PROSE. PHPStan reads that annotation ANYWHERE in a
+        // comment and acts on it, so writing it out — even in backticks,
+        // even to say it is NOT being used — produces a non-ignorable parse
+        // error of its own. Measured: that is precisely what the first
+        // version of THIS comment did, and it is the third time on F-361
+        // that naming a mechanism in a comment made the mechanism react.
+        // Describe it; never write the annotation.
+        PeepSoAddPostGuard::pinOnly(
+            [], // an owner pointer change drives nothing through the request
+            static function () use ($group, $toUserId): bool {
+                /** @phpstan-ignore-next-line — PeepSo classes are runtime-only. */
+                $group->update(['owner_id' => $toUserId]);
+
+                // update() is void and swallows a wp_update_post failure —
+                // step 3b below is what actually verifies the pointer moved,
+                // so this `true` claims nothing about success.
+                return true;
+            }
+        );
 
         // Step 3b — VERIFY the pointer actually moved. PeepSoGroup::update()
         // is void and swallows a wp_update_post failure, so a silent miss

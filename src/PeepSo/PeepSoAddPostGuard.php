@@ -359,6 +359,20 @@ final class PeepSoAddPostGuard
      * removes what those three listeners READ without touching what anyone
      * RUNS.
      *
+     * ⚠ TO WRAP A **VOID** WRITE, USE A BLOCK CLOSURE THAT RETURNS A VALUE.
+     * `TResult` below cannot be resolved from a void callable, so an arrow
+     * fn over something like `PeepSoGroup::update()` fails PHPStan at level
+     * 8 with "Unable to resolve the template type TResult". Return a plain
+     * `true` and say in a comment that the value claims nothing about
+     * success — the void method's own failure handling is unchanged by the
+     * pin, so a return value here would be inventing a signal the write
+     * never gave. {@see PeepSoGroupWriter::transferOwnership()} does this.
+     *
+     * ⚠ The write MUST sit inside the closure, not be passed as an
+     * evaluated argument: `pinOnly([], wp_insert_post(...))` evaluates the
+     * write BEFORE this method runs, so it is not pinned at all. Both
+     * plugins' `PostWritePinInventoryTest` rejects that form.
+     *
      * @template TResult
      * @param array<string, mixed> $intended
      * @param callable(): TResult  $write
