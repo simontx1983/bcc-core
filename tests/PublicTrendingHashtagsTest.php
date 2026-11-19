@@ -100,6 +100,9 @@ final class PublicTrendingHashtagsTest extends TestCase
             'COALESCE(pu.usr_profile_acc, 10)',
             'IF(a_pub.act_access IS NULL OR a_pub.act_access <= 0, 10, a_pub.act_access)',
             'NOT EXISTS (SELECT 1 FROM wp_peepso_activities a_hid',
+            // Each subquery reads its OWN alias. A mix-up (a_hid's level
+            // built on a_pub) would only fail on MySQL, at runtime.
+            'IF(a_hid.act_access IS NULL OR a_hid.act_access <= 0, 10, a_hid.act_access)',
             // The feed's range ladder: <= 10 is public, anything above hides.
             ' <= 10) AND NOT EXISTS',
             ') > 10)',
