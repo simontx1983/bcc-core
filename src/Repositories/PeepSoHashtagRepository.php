@@ -21,6 +21,7 @@
 namespace BCC\Core\Repositories;
 
 use BCC\Core\Feed\GroupSyndicationGate;
+use BCC\Core\Feed\PostVisibilityLevel;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -281,7 +282,10 @@ final class PeepSoHashtagRepository
         }
 
         $acts  = $wpdb->prefix . 'peepso_activities';
-        $level = static fn (string $a): string => "GREATEST(IF({$a}.act_access IS NULL OR {$a}.act_access <= 0, 10, {$a}.act_access), COALESCE(pu.usr_profile_acc, 10))";
+        // The feed's §F-02 effective level, from its one home. Public
+        // trending admits only the PUBLIC rung.
+        $level  = static fn (string $a): string => PostVisibilityLevel::sqlEffective("{$a}.act_access", 'pu.usr_profile_acc');
+        $public = PostVisibilityLevel::PUBLIC;
 
         // F-23 / Gate 12: the SAME syndication rule as the global feed. A
         // public_all post of a now-closed/secret group drops unless it was
@@ -315,10 +319,10 @@ final class PeepSoHashtagRepository
                    . ($syndication['where'] !== '' ? ' AND ' . $syndication['where'] : '') . '
                    AND EXISTS (SELECT 1 FROM ' . $acts . ' a_pub
                                 WHERE a_pub.act_external_id = p.ID
-                                  AND ' . $level('a_pub') . ' <= 10)
+                                  AND ' . $level('a_pub') . ' <= ' . $public . ')
                    AND NOT EXISTS (SELECT 1 FROM ' . $acts . ' a_hid
                                     WHERE a_hid.act_external_id = p.ID
-                                      AND ' . $level('a_hid') . ' > 10)';
+                                      AND ' . $level('a_hid') . ' > ' . $public . ')';
         // WHERE placeholders follow the SELECT's LIKE placeholders.
         foreach ($syndication['params'] as $param) {
             $params[] = $param;

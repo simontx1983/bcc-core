@@ -4,12 +4,18 @@
  *
  * A post is visible at the STRICTER of its own `act_access` and its
  * AUTHOR's `peepso_users.usr_profile_acc`, so a profile set to "friends"
- * or "only me" also narrows the posts already written under it. The
- * feed, the permalink and every other read apply that rule in SQL, in
- * `PeepSoActivityRepository::f02PostVisibilityClause()`. This class is
- * the same rule for PHP callers that already hold the row and need the
- * LEVEL rather than a yes/no for one viewer. The first one is bcc-trust's
- * repost gate: only a post every member can see may be reposted.
+ * or "only me" also narrows the posts already written under it.
+ *
+ * This class is the rule's ONE home, in both languages:
+ *   - PHP: effective() and rung(), for callers that already hold the row
+ *     and need the LEVEL rather than a yes/no for one viewer. The first is
+ *     bcc-trust's repost gate: only a post every member can see may be
+ *     reposted.
+ *   - SQL: sqlEffective(), sqlStoredLevel() and sqlLadder(), which every
+ *     SQL read applying the ladder is built from. That covers the feed and
+ *     the permalink (`PeepSoActivityRepository::f02PostVisibilityClause()`),
+ *     the follower lists (the listed user's profile level alone) and
+ *     public trending (the PUBLIC rung only).
  *
  * ── The ladder ──────────────────────────────────────────────────────
  *
@@ -60,11 +66,11 @@
  * admin read. Those exemptions stay with the caller. A group-tagged post
  * follows its GROUP's rules, which are also the caller's.
  *
- * ⚠ The SQL twin and this method must agree on every input.
- * `PostVisibilityLevelSqlAgreementTest` runs the real rendered clause
- * over a grid of stored values (NULL, 0, -1, the four rungs, the values
- * between them, 255, and an author with no row) and checks it against
- * this method for every kind of viewer.
+ * ⚠ The SQL twins and the PHP methods must agree on every input.
+ * `PostVisibilityLevelSqlAgreementTest` runs the real rendered activity
+ * and follower clauses over a grid of stored values (NULL, 0, -1, the
+ * four rungs, the values between them, 255, and an author with no row).
+ * It checks them against effective() and rung() for every kind of viewer.
  *
  * @package BCC\Core\Feed
  * @since F-02 (one home for the effective post level)
@@ -124,5 +130,75 @@ final class PostVisibilityLevel
         }
 
         return self::ONLY_ME;
+    }
+
+    // ── The SQL twins ───────────────────────────────────────────────
+    //
+    // Every SQL read that applies this ladder builds it from these, so
+    // the ladder has one home in SQL too: the activity reads
+    // (PeepSoActivityRepository), the follower lists
+    // (PeepSoFollowerRepository) and public trending
+    // (PeepSoHashtagRepository). Snapping happens in sqlLadder()'s range
+    // arms; the level expressions only normalise NULL and <= 0.
+
+    /**
+     * One stored level as SQL, with NULL and `<= 0` read as PUBLIC.
+     * A NULL left as it is would match no `<=` arm in sqlLadder() and be
+     * DENIED, so it must be normalised first. The follower lists use it
+     * on the listed user's `usr_profile_acc`, which is the whole level
+     * there: a follow row has no `act_access`.
+     *
+     * @param string $column a trusted, code-supplied column reference, never input
+     */
+    public static function sqlStoredLevel(string $column): string
+    {
+        return 'IF(' . $column . ' IS NULL OR ' . $column . ' <= 0, ' . self::PUBLIC . ', ' . $column . ')';
+    }
+
+    /**
+     * {@see effective()} as SQL: GREATEST picks the stricter, because the
+     * ladder is ordered.
+     *
+     * ⚠ The profile side is COALESCEd, not passed through sqlStoredLevel():
+     * a profile at 0 or -1 then yields a value below 10, and GREATEST hands
+     * back the post side, which is never below 10. Same answer as
+     * effective(), which reads both as public. Kept as it is because every
+     * statement that uses it is pinned byte for byte.
+     *
+     * @param string $actAccess     a trusted, code-supplied column reference, never input
+     * @param string $profileAccess a trusted, code-supplied column reference, never input
+     */
+    public static function sqlEffective(string $actAccess, string $profileAccess): string
+    {
+        return 'GREATEST('
+            . self::sqlStoredLevel($actAccess) . ','
+            . ' COALESCE(' . $profileAccess . ', ' . self::PUBLIC . ')'
+            . ')';
+    }
+
+    /**
+     * The viewer-facing ladder over an already-built level expression:
+     * the owner always sees their own rows, then `<= PUBLIC` admits
+     * everyone, `<= MEMBERS` any signed-in viewer, `<= FRIENDS` whatever
+     * `$friendBranch` admits, and anything above DENIES. There is
+     * deliberately no admitting catch-all.
+     *
+     * ⚠ PLACEHOLDERS, in order: the viewer id, the viewer id, the viewer
+     * id, then any `$friendBranch` carries. The caller binds them in that
+     * order, at the position where it puts this fragment.
+     *
+     * @param string $ownerColumn  whose rows these are: the post author, or the listed user
+     * @param string $level        from sqlEffective() or sqlStoredLevel()
+     * @param string $friendBranch SQL yielding 1 or 0 for the friends rung; the literal '0' when the viewer has no friends to admit
+     */
+    public static function sqlLadder(string $ownerColumn, string $level, string $friendBranch): string
+    {
+        return 'CASE WHEN %d > 0 AND ' . $ownerColumn . ' = %d THEN 1'
+            . ' ELSE CASE'
+            .   ' WHEN ' . $level . ' <= ' . self::PUBLIC . ' THEN 1'
+            .   ' WHEN ' . $level . ' <= ' . self::MEMBERS . ' THEN IF(%d > 0, 1, 0)'
+            .   ' WHEN ' . $level . ' <= ' . self::FRIENDS . ' THEN ' . $friendBranch
+            .   ' ELSE 0'
+            . ' END END';
     }
 }

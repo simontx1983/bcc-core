@@ -155,15 +155,11 @@ final class PeepSoActivityRepository
         // own writer stores 0, and PeepSo's `is_accessible_static` also
         // treats 0 as public.
         //
-        // ⚠ PostVisibilityLevel::effective() is this expression's PHP
-        // twin, and the ladder's numbers come from it so the two share
-        // one home. PostVisibilityLevelSqlAgreementTest runs this clause
-        // against that method value by value; change one, change both.
-        $public    = PostVisibilityLevel::PUBLIC;
-        $effective = 'GREATEST('
-            . 'IF(a.act_access IS NULL OR a.act_access <= 0, ' . $public . ', a.act_access),'
-            . ' COALESCE(pu.usr_profile_acc, ' . $public . ')'
-            . ')';
+        // ⚠ PostVisibilityLevel builds both the expression and the ladder,
+        // and its effective() is their PHP twin, so the rule has one home.
+        // PostVisibilityLevelSqlAgreementTest runs this clause against
+        // that method value by value.
+        $effective = PostVisibilityLevel::sqlEffective('a.act_access', 'pu.usr_profile_acc');
 
         return [
             // LEFT, not INNER, so an author with no PeepSo row still
@@ -174,14 +170,7 @@ final class PeepSoActivityRepository
             // Searched CASE on RANGES, so a stray level lands on the
             // nearest stricter rung instead of vanishing. See the
             // docblock for why that is the decision.
-            'where' => '('
-                . 'CASE WHEN %d > 0 AND p.post_author = %d THEN 1'
-                . ' ELSE CASE'
-                .   ' WHEN ' . $effective . ' <= ' . $public . ' THEN 1'
-                .   ' WHEN ' . $effective . ' <= ' . PostVisibilityLevel::MEMBERS . ' THEN IF(%d > 0, 1, 0)'
-                .   ' WHEN ' . $effective . ' <= ' . PostVisibilityLevel::FRIENDS . ' THEN ' . $friendBranch
-                .   ' ELSE 0'
-                . ' END END) = 1',
+            'where' => '(' . PostVisibilityLevel::sqlLadder('p.post_author', $effective, $friendBranch) . ') = 1',
             'params' => $params,
         ];
     }

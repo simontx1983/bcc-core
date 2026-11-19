@@ -114,6 +114,49 @@ final class PostVisibilityLevelTest extends TestCase
         self::assertSame(10, PostVisibilityLevel::effective(null, null));
     }
 
+    // ── The SQL twins ─────────────────────────────────────────────────
+    //
+    // What these MEAN is proven by PostVisibilityLevelSqlAgreementTest,
+    // which executes them. These pin the TEXT, because every statement
+    // built from them is pinned byte for byte by its repository's own
+    // golden tests, and a builder change should fail here first, by name.
+
+    public function testTheStoredLevelReadsNullAndNonPositiveAsPublic(): void
+    {
+        self::assertSame(
+            'IF(pu.usr_profile_acc IS NULL OR pu.usr_profile_acc <= 0, 10, pu.usr_profile_acc)',
+            PostVisibilityLevel::sqlStoredLevel('pu.usr_profile_acc')
+        );
+    }
+
+    public function testTheEffectiveLevelIsTheGreatestOfPostAndCoalescedAuthor(): void
+    {
+        self::assertSame(
+            'GREATEST(IF(a_pub.act_access IS NULL OR a_pub.act_access <= 0, 10, a_pub.act_access),'
+            . ' COALESCE(pu.usr_profile_acc, 10))',
+            PostVisibilityLevel::sqlEffective('a_pub.act_access', 'pu.usr_profile_acc')
+        );
+    }
+
+    public function testTheLadderIsRangeBasedOwnerFirstAndEndsInADeny(): void
+    {
+        $sql = PostVisibilityLevel::sqlLadder('p.post_author', 'LVL', 'FRIENDS_BRANCH');
+
+        self::assertSame(
+            'CASE WHEN %d > 0 AND p.post_author = %d THEN 1'
+            . ' ELSE CASE'
+            . ' WHEN LVL <= 10 THEN 1'
+            . ' WHEN LVL <= 20 THEN IF(%d > 0, 1, 0)'
+            . ' WHEN LVL <= 30 THEN FRIENDS_BRANCH'
+            . ' ELSE 0'
+            . ' END END',
+            $sql
+        );
+        // The caller binds exactly three viewer ids, in that order.
+        self::assertSame(3, substr_count($sql, '%d'));
+        self::assertStringNotContainsString('ELSE 1', $sql, 'no admitting catch-all');
+    }
+
     /** Every answer is one of the four rungs, whatever was stored. */
     public function testTheResultIsAlwaysARung(): void
     {

@@ -6,6 +6,7 @@ namespace BCC\Core\Feed\Tests\VisibilityLevelSql;
 
 use BCC\Core\Feed\PostVisibilityLevel;
 use BCC\Core\Repositories\PeepSoActivityRepository;
+use BCC\Core\Repositories\PeepSoFollowerRepository;
 use BCC\Core\Tests\Stubs\RenderingWpdb;
 use PDO;
 use PHPUnit\Framework\Attributes\CoversClass;
@@ -50,9 +51,28 @@ require_once __DIR__ . '/Stubs/rendering-wpdb.php';
  * (TINYINT(3) UNSIGNED NOT NULL) cannot hold. The columns here are a
  * signed SMALLINT NULL on purpose: the clause handles those values, so
  * the helper must agree on them too.
+ *
+ * ⚠⚠ THE FLIP SIDE: these engines cannot see an UNSIGNED-only failure.
+ * Production's act_access is TINYINT(3) UNSIGNED. On MySQL, arithmetic
+ * that goes below zero on an UNSIGNED column (say a future
+ * `act_access - 10`) raises "BIGINT UNSIGNED value is out of range"
+ * (ER_DATA_OUT_OF_RANGE) instead of returning a negative. Both engines
+ * here would return the negative and pass. So a clause change that does
+ * arithmetic on act_access needs its own check against the real column
+ * type; comparisons alone, which is all the clause does today, are safe
+ * on both.
+ *
+ * The FOLLOWER LISTS apply the same ladder to the listed user's
+ * `usr_profile_acc` alone (a follow row has no `act_access`). That clause
+ * runs here too: `getFollowing()`'s real statement over the profile grid,
+ * against `PostVisibilityLevel::rung()`. Public trending also builds its
+ * level from `sqlEffective()`, but its statement uses MySQL-only
+ * `CHAR(… USING utf8mb4)` and isn't run here. It shares the builder
+ * this test executes, and PublicTrendingHashtagsTest pins its text.
  */
 #[CoversClass(PostVisibilityLevel::class)]
 #[CoversClass(PeepSoActivityRepository::class)]
+#[CoversClass(PeepSoFollowerRepository::class)]
 final class PostVisibilityLevelSqlAgreementTest extends TestCase
 {
     private const PREFIX  = 'bcc_f02lvl_';
@@ -91,19 +111,37 @@ final class PostVisibilityLevelSqlAgreementTest extends TestCase
 
     public function testTheClauseAgreesWithTheHelperOnSqlite(): void
     {
+        $this->assertAgreement(self::sqlite(), static fn (string $sql): string => self::toSqlite($sql, true));
+    }
+
+    public function testTheClauseAgreesWithTheHelperOnMysql(): void
+    {
+        $this->assertAgreement(self::mysql(), static fn (string $sql): string => $sql);
+    }
+
+    public function testTheFollowerClauseAgreesWithTheRungOnSqlite(): void
+    {
+        $this->assertFollowerAgreement(self::sqlite(), static fn (string $sql): string => self::toSqlite($sql, false));
+    }
+
+    public function testTheFollowerClauseAgreesWithTheRungOnMysql(): void
+    {
+        $this->assertFollowerAgreement(self::mysql(), static fn (string $sql): string => $sql);
+    }
+
+    private static function sqlite(): PDO
+    {
         if (!extension_loaded('pdo_sqlite')) {
             if (getenv('GITHUB_ACTIONS') === 'true') {
-                self::fail('pdo_sqlite must be loaded in CI: this is the only test that executes the F-02 clause.');
+                self::fail('pdo_sqlite must be loaded in CI: these are the only tests that execute the F-02 clauses.');
             }
             self::markTestSkipped('pdo_sqlite is not loaded (run with -d extension=pdo_sqlite).');
         }
 
-        $pdo = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-
-        $this->assertAgreement($pdo, static fn (string $sql): string => self::toSqlite($sql));
+        return new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     }
 
-    public function testTheClauseAgreesWithTheHelperOnMysql(): void
+    private static function mysql(): PDO
     {
         $port = getenv('BCC_TEST_DB_PORT');
         if ($port === false || $port === '') {
@@ -119,14 +157,13 @@ final class PostVisibilityLevelSqlAgreementTest extends TestCase
             (int) $port,
             getenv('BCC_TEST_DB_NAME') ?: 'bcc_test'
         );
-        $pdo = new PDO(
+
+        return new PDO(
             $dsn,
             getenv('BCC_TEST_DB_USER') ?: 'root',
             getenv('BCC_TEST_DB_PASS') ?: 'root',
             [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
         );
-
-        $this->assertAgreement($pdo, static fn (string $sql): string => $sql);
     }
 
     /**
@@ -228,16 +265,104 @@ final class PostVisibilityLevelSqlAgreementTest extends TestCase
     }
 
     /**
-     * The minimal MySQL → SQLite rewrite: two function names, nothing
-     * else. Each must actually occur, so a rewrite that silently matched
-     * nothing cannot pass for a translation.
+     * The follower lists' clause, run for real: one follow row whose
+     * listed user (the AUTHOR id here) has each profile value in turn, or
+     * no peepso_users row at all. It is read by the same four kinds of
+     * viewer, and the answers must match `PostVisibilityLevel::rung()`.
+     *
+     * @param \Closure(string): string $dialect
      */
-    private static function toSqlite(string $mysql): string
+    private function assertFollowerAgreement(PDO $pdo, \Closure $dialect): void
+    {
+        $pdo->exec('CREATE TEMPORARY TABLE ' . self::PREFIX . 'peepso_user_followers ('
+            . 'uf_id INT NOT NULL, uf_active_user_id INT NOT NULL, uf_passive_user_id INT NOT NULL,'
+            . ' uf_follow SMALLINT NOT NULL)');
+        $pdo->exec('CREATE TEMPORARY TABLE ' . self::PREFIX . 'peepso_users ('
+            . 'usr_id INT NOT NULL, usr_profile_acc SMALLINT NULL)');
+
+        $follower   = 1;
+        $statements = [];
+        foreach (self::viewers() as $label => [$viewerId, $friendIds]) {
+            $wpdb            = new RenderingWpdb();
+            $wpdb->prefix    = self::PREFIX;
+            $GLOBALS['wpdb'] = $wpdb;
+
+            // Who $follower follows: the listed column is uf_passive_user_id.
+            PeepSoFollowerRepository::getFollowing($follower, 24, 0, $viewerId, $friendIds, true);
+
+            $sql = trim($wpdb->lastSql);
+            self::assertStringContainsString('LEFT JOIN ' . self::PREFIX . 'peepso_users pu', $sql, 'the visibility clause must be in the statement');
+            self::assertStringNotContainsString('wp_', $sql, 'every table must be the test copy');
+            $statements[$label] = $dialect($sql);
+        }
+
+        $mismatches = [];
+        $rungsSeen  = [];
+        foreach (self::PROFILE_ACC as $profile) {
+            $pdo->exec('DELETE FROM ' . self::PREFIX . 'peepso_user_followers');
+            $pdo->exec('DELETE FROM ' . self::PREFIX . 'peepso_users');
+            $pdo->prepare('INSERT INTO ' . self::PREFIX . 'peepso_user_followers'
+                . ' (uf_id, uf_active_user_id, uf_passive_user_id, uf_follow) VALUES (1, ?, ?, 1)')
+                ->execute([$follower, self::AUTHOR]);
+            if (!is_string($profile)) {
+                $user = $pdo->prepare('INSERT INTO ' . self::PREFIX . 'peepso_users (usr_id, usr_profile_acc) VALUES (?, ?)');
+                $user->bindValue(1, self::AUTHOR, PDO::PARAM_INT);
+                $user->bindValue(2, $profile, $profile === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+                $user->execute();
+            }
+
+            $rung = PostVisibilityLevel::rung(is_string($profile) ? null : $profile);
+            $rungsSeen[$rung] = true;
+
+            $expected = [
+                'signed out'           => $rung <= PostVisibilityLevel::PUBLIC,
+                'member, not a friend' => $rung <= PostVisibilityLevel::MEMBERS,
+                'the author\'s friend' => $rung <= PostVisibilityLevel::FRIENDS,
+                'the author'           => true,
+            ];
+
+            foreach ($statements as $label => $sql) {
+                $listed = $pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+                $listed = array_map('intval', $listed);
+                if ($listed !== [] && $listed !== [self::AUTHOR]) {
+                    $mismatches[] = sprintf('profile=%s, viewer=%s: unexpected rows %s', var_export($profile, true), $label, json_encode($listed));
+                    continue;
+                }
+                $visible = $listed === [self::AUTHOR];
+                if ($visible !== $expected[$label]) {
+                    $mismatches[] = sprintf(
+                        'profile=%s, viewer=%s: SQL %s, rung %d says %s',
+                        is_string($profile) ? $profile : var_export($profile, true),
+                        $label,
+                        $visible ? 'lists them' : 'hides them',
+                        $rung,
+                        $expected[$label] ? 'list' : 'hide'
+                    );
+                }
+            }
+        }
+
+        self::assertSame([], $mismatches, "the follower clause and PostVisibilityLevel::rung() disagree:\n" . implode("\n", $mismatches));
+
+        ksort($rungsSeen);
+        self::assertSame([10, 20, 30, 40], array_keys($rungsSeen));
+    }
+
+    /**
+     * The minimal MySQL → SQLite rewrite: two function names, nothing
+     * else. Each expected one must actually occur, so a rewrite that
+     * silently matched nothing cannot pass for a translation.
+     */
+    private static function toSqlite(string $mysql, bool $expectGreatest): string
     {
         $sql = (string) preg_replace('/\bGREATEST\(/', 'MAX(', $mysql, -1, $greatest);
         $sql = (string) preg_replace('/\bIF\(/', 'IIF(', $sql, -1, $if);
 
-        self::assertGreaterThan(0, $greatest, 'expected GREATEST( in the clause');
+        if ($expectGreatest) {
+            self::assertGreaterThan(0, $greatest, 'expected GREATEST( in the clause');
+        } else {
+            self::assertSame(0, $greatest, 'this clause has no GREATEST(');
+        }
         self::assertGreaterThan(0, $if, 'expected IF( in the clause');
 
         return $sql;
