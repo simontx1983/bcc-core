@@ -2,6 +2,7 @@
 
 namespace BCC\Core\Repositories;
 
+use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\Feed\FeedItemNormalizer;
 
 if (!defined('ABSPATH')) {
@@ -55,6 +56,9 @@ if (!defined('ABSPATH')) {
  */
 final class PeepSoActivityRepository
 {
+    // F-275: `trustedRows()` for the opt-in fail-loud reads below.
+    use ProbesReads;
+
     private const TABLE_SUFFIX = 'peepso_activities';
 
     /**
@@ -281,8 +285,10 @@ final class PeepSoActivityRepository
      * @param list<int>|null $viewerMemberGroupIds The groups the viewer BELONGS to. Only read on the {@see self::GROUP_GATE_VIEWER_ACCESS} path, where it carries the members_only parity rule: a post in one of these groups is visible at ANY visibility, while a post in a group the viewer merely can SEE (an open group they have not joined) is visible only at `public_group` / `public_all` — matching what the group feed already does for a non-member. Absent visibility meta counts as members_only and is therefore hidden from a non-member. null/[] = treat the viewer as a member of nothing, which is correct for an anonymous reader. Bounded by {@see self::RESTRICTED_GROUP_IDS_MAX}; over the bound the membership clause is dropped, which costs a member sight of their own groups' members_only posts and leaks nothing.
      * @param list<int>|null $viewerFriendIds The authors the VIEWER is a friend of, for the level-30 branch of `$enforcePostVisibility`. ⚠ bcc-core deliberately does NOT discover this itself: friendship lives in `peepso_user_friends`, a table owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed query depend on an add-on that may not be installed - a missing table turns the most important read in the product into a SQL error. bcc-trust computes the list (it already wraps `PeepSoFriendsModel` behind `PeepSoFriendGate`) and passes it, exactly the coupling-avoidance pattern `$excludedAuthorIds`, `$excludedActIds` and `$restrictedGroupIds` already use - bcc-core stays unaware of what a "friend" is and only applies the rule. null/[] = the viewer is a friend of nobody, which is correct for an anonymous reader and makes every level-30 post invisible except the viewer's own. Ids are de-duplicated and integer-cast. Capped at {@see self::VIEWER_FRIEND_IDS_MAX}, and over the cap treated as EMPTY (deny), never truncated.
      * @param bool $enforcePostVisibility OPT-IN switch for the §F-02 per-post gate; `false` (the default, and every pre-existing caller) leaves behaviour byte-identical. When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows the posts already written under it. The ladder: 0 and 10 = everyone (0 is what BCC's own writer stores, and PeepSo's `is_accessible_static` also treats 0 as public); 20 = any signed-in viewer; 30 = `$viewerFriendIds`; 40 = nobody. The viewer ALWAYS sees their own posts at any level, which must be in the SQL because a feed page carries many authors. ⚠ An unrecognised level DENIES - the `CASE` has no catch-all that admits. ⚠ ADMINS are NOT exempted here: an admin read is expressed by the caller passing `false`, because encoding a capability check in a repository would put policy in the wrong layer. ⚠ A missing `peepso_users` row counts as 10 (public), matching that column's schema default and what bcc-trust's own reader returns when PeepSo is absent - not a deliberate fail-open, but say so when auditing.
+     * @param bool $throwOnReadFailure F-275, OPT-IN. `false` (the default, and every pre-existing caller) keeps the historical answer, where a failed read returns `[]` exactly like "no rows". When true, a read that did not run throws {@see ActivityReadFailedException} instead, so a feed can answer "try again" rather than "nothing here". The statement is the same either way; only how its result is read differs ({@see ProbesReads::trustedRows()}). ⚠ The `[]` short-circuits above (an empty author or module list, a non-positive group or page id) are genuine "no matches" and never throw.
      * @return list<ActivityRow>
      * @phpstan-return list<ActivityRow>
+     * @throws ActivityReadFailedException only when `$throwOnReadFailure` is true
      */
     public static function getActivities(
         ?array $authorIds = null,
@@ -303,7 +309,8 @@ final class PeepSoActivityRepository
         ?array $viewerMemberGroupIds = null,
         int $viewerId = 0,
         ?array $viewerFriendIds = null,
-        bool $enforcePostVisibility = false
+        bool $enforcePostVisibility = false,
+        bool $throwOnReadFailure = false
     ): array {
         global $wpdb;
 
@@ -836,9 +843,42 @@ final class PeepSoActivityRepository
                  ORDER BY p.post_date_gmt DESC, a.act_id DESC
                  LIMIT %d';
 
+        $prepared = $wpdb->prepare($sql, ...$allParams);
+
+        // F-275: a caller that asked to be told reads the rows through the
+        // trusted path, so a failed read throws instead of passing for "no
+        // rows". Everyone else keeps the historical read below, unchanged.
+        if ($throwOnReadFailure) {
+            return self::trustedActivityRows($prepared, 'getActivities');
+        }
+
         /** @phpstan-var list<ActivityRow>|null $rows */
-        $rows = $wpdb->get_results($wpdb->prepare($sql, ...$allParams));
+        $rows = $wpdb->get_results($prepared);
         return $rows ?: [];
+    }
+
+    /**
+     * F-275: the rows of `$sql`, or {@see ActivityReadFailedException} when
+     * the read did not run. Shared by the two opt-in fail-loud reads.
+     *
+     * ⚠ `prepare()` can hand back an empty or null statement on a
+     * placeholder mismatch. That counts as a failed read here (`query('')`
+     * returns false), where the historical path read it as "no rows".
+     *
+     * @return list<ActivityRow>
+     * @throws ActivityReadFailedException
+     */
+    private static function trustedActivityRows(?string $sql, string $method): array
+    {
+        $rows = self::trustedRows((string) $sql);
+        if ($rows === null) {
+            throw new ActivityReadFailedException(
+                '[bcc-core] PeepSoActivityRepository::' . $method . '() read failed. An empty result here is NOT "no rows".'
+            );
+        }
+
+        /** @phpstan-var list<ActivityRow> $rows */
+        return $rows;
     }
 
     /**
@@ -857,14 +897,17 @@ final class PeepSoActivityRepository
      *   kind.
      * @param list<int>|null $viewerFriendIds See {@see f02PostVisibilityClause}. Only read when `$enforcePostVisibility` is true.
      * @param bool $enforcePostVisibility OPT-IN §F-02 per-post gate, matching {@see getActivities}. `false` (the default, and every pre-existing caller including {@see getAuthorId}) leaves this query byte-identical. ⚠ Enforcing here is what stops a permalink from serving a post the feed hides: the two readers share one predicate for exactly that reason.
+     * @param bool $throwOnReadFailure F-275, OPT-IN, matching {@see getActivities}. `false` (the default, and every pre-existing caller) keeps the historical answer, where a failed read returns null exactly like "not found". When true, a read that did not run throws {@see ActivityReadFailedException}, so a permalink can answer "try again" rather than 404. A genuine miss is still null.
      * @phpstan-return ActivityRow|null
+     * @throws ActivityReadFailedException only when `$throwOnReadFailure` is true
      */
     public static function getById(
         int $actId,
         ?array $allowedModuleIds = null,
         ?array $viewerFriendIds = null,
         bool $enforcePostVisibility = false,
-        int $viewerId = 0
+        int $viewerId = 0,
+        bool $throwOnReadFailure = false
     ): ?object {
         global $wpdb;
 
@@ -891,8 +934,7 @@ final class PeepSoActivityRepository
             }
         }
 
-        /** @phpstan-var ActivityRow|null $row */
-        $row = $wpdb->get_row($wpdb->prepare(
+        $prepared = $wpdb->prepare(
             'SELECT ' . self::COLUMNS . '
                FROM ' . self::table() . ' a
                INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
@@ -900,7 +942,16 @@ final class PeepSoActivityRepository
               WHERE ' . implode(' AND ', $where) . '
               LIMIT 1',
             ...$params
-        ));
+        );
+
+        // F-275: see getActivities(). Same statement, read so that a
+        // failure throws; a genuine miss is still null.
+        if ($throwOnReadFailure) {
+            return self::trustedActivityRows($prepared, 'getById')[0] ?? null;
+        }
+
+        /** @phpstan-var ActivityRow|null $row */
+        $row = $wpdb->get_row($prepared);
         return $row ?: null;
     }
 

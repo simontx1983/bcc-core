@@ -100,4 +100,30 @@ trait ProbesReads
 
         return $ok !== false && !self::lastReadFailed();
     }
+
+    /**
+     * Run a SELECT and return its rows, or null when they cannot be
+     * TRUSTED (F-275).
+     *
+     * The row-returning sibling of `runProbe()`, with the same two checks
+     * and the same reasons: `query()`'s own return value (the pre-`flush()`
+     * bails that leave the PREVIOUS query's rows in `last_result`) and
+     * `last_error`. A genuine empty result is `[]`, never null.
+     *
+     * ⚠ A non-array `last_result` after a successful query reads as `[]`,
+     * matching what `get_results()` would have handed back.
+     *
+     * @return list<object>|null null = the read failed
+     */
+    private static function trustedRows(string $sql): ?array
+    {
+        global $wpdb;
+
+        if (!self::runProbe($sql)) {
+            return null;
+        }
+        $rows = $wpdb->last_result;
+
+        return is_array($rows) ? array_values($rows) : [];
+    }
 }
