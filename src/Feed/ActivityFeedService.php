@@ -251,7 +251,7 @@ final class ActivityFeedService
      * @param list<int>|null $excludedGroupIds  Group-exclusion list — drop wall posts authored inside a closed/secret/NFT-gated group the viewer doesn't belong to. The wall is the same data stream as `getFeed()`, so the same leak surface applies; the same exclude-list pattern closes it.
      * @param list<int>|null $viewerFriendIds §F-02: the authors the VIEWER is a friend of, for the level-30 branch. Only read when `$enforcePostVisibility` is true. ⚠ bcc-core does NOT discover this itself — friendship lives in `peepso_user_friends`, owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed depend on an add-on that may not be installed. The caller computes it and passes it. ⚠ null/[] means "a friend of nobody", which DENIES level 30 (except the viewer's own posts) rather than ignoring the branch — correct for an anonymous reader, and currently the only possible value in BCC, where peepso-friends is not installed.
      * @param bool $enforcePostVisibility §F-02 per-post gate, OPT-IN. ⚠⚠ `false` is the default AND what every pre-existing caller gets, so this method stays BYTE-IDENTICAL for them — the switch is the caller's to throw, which is also how an admin read is expressed (pass false). When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows posts already written under it. ⚠ Forwarded to the repository BY NAME: `getActivities()` takes nineteen parameters and these sit at 17-19, so positional padding would mean several bare nulls per call site, and a positional slip there is silent.
-     * @param list<int>|null $moduleIds Caller-supplied module ALLOWLIST, forwarded to {@see PeepSoActivityRepository::getActivities()}. `null` (the default, and every pre-existing caller) leaves the query BYTE-IDENTICAL: the repository then applies its own `FeedItemNormalizer::publicFeedModuleIds()` gate. A non-empty list narrows the wall to those modules, and `[]` returns no rows. ⚠ The list can only NARROW, never widen: it is intersected with `publicFeedModuleIds()` first, so a module outside the public feed (6 DMs, 8 group-join stream, 30 polls, any unknown module) is dropped rather than queried, and a list with nothing left returns no rows — never the default "every public module". ⚠ Beyond that ceiling this carries NO policy — it is a channel. bcc-trust decides which kinds a wall may show (its profile-section switches are a bcc-trust concept, and a module→section map in core would be policy in the wrong layer). ⚠ Narrowing here filters CANDIDATES, not a fetched page, which is what keeps pages full and the cursor honest. ⚠ Appended LAST deliberately: the parameters before it are passed positionally by existing callers.
+     * @param list<int>|null $moduleIds Caller-supplied module ALLOWLIST, forwarded to {@see PeepSoActivityRepository::getActivities()}. `null` (the default, and every pre-existing caller) leaves the query BYTE-IDENTICAL: the repository then applies its own `FeedItemNormalizer::publicFeedModuleIds()` gate. A non-empty list narrows the wall to those modules, and `[]` returns no rows. ⚠ The list can only NARROW, never widen: the repository intersects every explicit list with `publicFeedModuleIds()` (`FeedItemNormalizer::withinPublicFeedModules()`), so a module outside the public feed (6 DMs, 8 group-join stream, 30 polls, any unknown module) is dropped rather than queried, and a list with nothing left returns no rows — never the default "every public module". ⚠ Beyond that ceiling this carries NO policy — it is a channel. bcc-trust decides which kinds a wall may show (its profile-section switches are a bcc-trust concept, and a module→section map in core would be policy in the wrong layer). ⚠ Narrowing here filters CANDIDATES, not a fetched page, which is what keeps pages full and the cursor honest. ⚠ Appended LAST deliberately: the parameters before it are passed positionally by existing callers.
      * @return array{items: list<array<string, mixed>>, pagination: array{next_cursor: ?string, has_more: bool}}
      */
     public function getActivityForAuthor(
@@ -269,14 +269,15 @@ final class ActivityFeedService
         if ($authorId <= 0) {
             return ['items' => [], 'pagination' => ['next_cursor' => null, 'has_more' => false]];
         }
-        // The caller's list can only NARROW the public feed, never widen it.
-        // The repository honours an explicit list VERBATIM, so without this
-        // a caller passing [6] would put direct messages on a wall. Core
-        // owns that ceiling; no caller has to remember it.
-        if ($moduleIds !== null) {
-            $moduleIds = self::withinPublicFeedModules($moduleIds);
-        }
-
+        // The caller's list can only NARROW the public feed, never widen it,
+        // so a caller passing [6] cannot put direct messages on a wall. The
+        // ceiling is the REPOSITORY's
+        // (FeedItemNormalizer::withinPublicFeedModules() inside
+        // getActivities()), so it holds for every caller, not only this
+        // one. It is deliberately not repeated here: a second copy would be
+        // an equivalent mutant, for the same reason as the empty-list guard
+        // below.
+        //
         // An empty `$moduleIds` ("every kind this wall could show is
         // switched off", or nothing the caller asked for is public) is a
         // real answer, not a missing filter. It must stay `[]` and never
@@ -580,30 +581,6 @@ final class ActivityFeedService
             return false;
         }
         return in_array((int) $module, FeedItemNormalizer::publicFeedModuleIds(), true);
-    }
-
-    /**
-     * A caller's module allowlist, cut down to the modules the public feed
-     * may expose ({@see FeedItemNormalizer::publicFeedModuleIds()}).
-     * Anything else (a DM, a poll, an unknown module) is dropped. The result
-     * may be `[]`, which still means "no rows".
-     *
-     * Walks the canonical list rather than the caller's, so the result is
-     * de-duplicated and in canonical order. Strict comparison: only real
-     * integer module ids match.
-     *
-     * @param list<int> $moduleIds
-     * @return list<int>
-     */
-    private static function withinPublicFeedModules(array $moduleIds): array
-    {
-        $kept = [];
-        foreach (FeedItemNormalizer::publicFeedModuleIds() as $publicId) {
-            if (in_array($publicId, $moduleIds, true)) {
-                $kept[] = $publicId;
-            }
-        }
-        return $kept;
     }
 
     /**

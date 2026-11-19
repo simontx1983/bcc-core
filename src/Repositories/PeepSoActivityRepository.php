@@ -266,7 +266,7 @@ final class PeepSoActivityRepository
      * scopes (the `for_you` scope adds ranking on top — out of scope here).
      *
      * @param list<int>|null $authorIds         null = no author filter; [] = no posts (returns []); non-empty list = only those authors.
-     * @param list<int|string>|null $moduleIds  null = all public modules; [] = no posts; non-empty list = only those modules. Each entry is a numeric module id or a module NAME ('blog', 'signal'); names are resolved through FeedItemNormalizer::moduleIdsFor() (F-392), and a list that resolves to nothing returns no posts.
+     * @param list<int|string>|null $moduleIds  null = all public modules; [] = no posts; non-empty list = only those modules. Each entry is a numeric module id or a module NAME ('blog', 'signal'); names are resolved through FeedItemNormalizer::moduleIdsFor() (F-392). The result is then cut down to the public feed's modules (FeedItemNormalizer::withinPublicFeedModules()), so a list can only NARROW the public feed: a non-public module such as 6 (DMs) is dropped, never queried. A list with nothing left returns no posts.
      * @param list<int>|null $excludedAuthorIds null/[] = no exclusion; non-empty list = drop these authors. Used by the feed ranker to apply §O4.1 caution/risky shadow-limit without coupling bcc-core to bcc-trust's tier concept.
      * @param list<int>|null $excludedActIds    null/[] = no exclusion; non-empty list = drop these specific act_ids. Used by §K1 Phase C moderation hide so individual posts can be suppressed without touching their author or module. Same coupling-avoidance pattern as $excludedAuthorIds — bcc-core stays unaware of WHY the ids are hidden.
      * @param int|null $onlyForGroupId          null = no group filter; positive int = only activities whose backing wp_post lives in this PeepSo group (joined via `peepso_group_id` post-meta). Used by /bcc/v1/groups/{id}/feed for the group-scoped feed; bcc-trust's caller handles the privacy gate before invoking this.
@@ -322,8 +322,17 @@ final class PeepSoActivityRepository
         // `IN ('signal')` matched the legacy module-0 rows the default gate
         // denies, and `IN ('blog')` never matched a blog (204). A list that
         // resolves to nothing is the empty set below, never "every module".
+        //
+        // ⚠ Then it is cut down to the public feed's modules, for EVERY
+        // caller. A list can only narrow the public feed, never widen it:
+        // without this, a caller passing [6] would read direct messages.
+        // Today every explicit list is a code constant, so this is a
+        // ceiling, not a filter anything currently trips. A list with
+        // nothing public left is the same empty set: no rows, no query.
         if ($moduleIds !== null) {
-            $moduleIds = FeedItemNormalizer::moduleIdsFor($moduleIds);
+            $moduleIds = FeedItemNormalizer::withinPublicFeedModules(
+                FeedItemNormalizer::moduleIdsFor($moduleIds)
+            );
         }
 
         // Empty filter set means "no possible matches" — short-circuit before
@@ -473,8 +482,9 @@ final class PeepSoActivityRepository
         // module leak into the public feed. The default now narrows to the
         // canonical public-feed allowlist ({@see FeedItemNormalizer::publicFeedModuleIds()}
         // — status/photo + BCC 200-range). An explicit $moduleIds list
-        // (e.g. the signals scope, or the blog tab's ['blog']) is honored as
-        // the numeric ids it resolved to above, bound as integers.
+        // (e.g. the signals scope, or the blog tab's ['blog']) binds the
+        // numeric ids it resolved to above, as integers, already cut down
+        // to that same allowlist.
         if ($moduleIds === null) {
             $allowedModuleIds = FeedItemNormalizer::publicFeedModuleIds();
             if ($allowedModuleIds === []) {

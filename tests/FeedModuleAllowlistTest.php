@@ -279,6 +279,66 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
             self::assertSame([], $wpdb->prepared, 'an all-junk list falls back to NO rows, not the default gate');
         }
 
+        /**
+         * ⚠ Defense in depth (security Info on F-392): an explicit list can
+         * only NARROW the public feed. 6 is PeepSo's direct-message module;
+         * a caller passing it must not read DMs, whatever else it asks for.
+         * The public module in the same list still binds.
+         */
+        public function testANonPublicModuleInAnExplicitListNeverReachesTheQuery(): void
+        {
+            $wpdb = $this->installWpdb();
+            PeepSoActivityRepository::getActivities([5], [6, 204, '30', 8], null, null, 10);
+
+            self::assertStringContainsString('a.act_module_id IN (%d)', $wpdb->lastSql());
+            self::assertContains(204, $wpdb->lastArgs());
+            foreach ([6, 30, 8] as $nonPublic) {
+                self::assertNotContains($nonPublic, $wpdb->lastArgs(), "module {$nonPublic} must never be bound");
+            }
+        }
+
+        /**
+         * A list holding ONLY non-public modules is the empty set: no rows,
+         * and no statement at all. It must never fall back to the default
+         * gate, which would mean "every public module".
+         */
+        public function testAListOfOnlyNonPublicModulesReturnsNoRowsAndIssuesNoQuery(): void
+        {
+            foreach ([[6], ['6'], [8, 30], [6, 9999]] as $list) {
+                $wpdb = $this->installWpdb();
+                self::assertSame([], PeepSoActivityRepository::getActivities([5], $list, null, null, 10));
+                self::assertSame([], $wpdb->prepared, 'no statement for ' . json_encode($list));
+            }
+        }
+
+        /** The same ceiling holds on the global path, with no author filter. */
+        public function testTheCeilingHoldsWithoutAnAuthorFilterToo(): void
+        {
+            $wpdb = $this->installWpdb();
+            self::assertSame([], PeepSoActivityRepository::getActivities(null, [6], null, null, 10));
+            self::assertSame([], $wpdb->prepared);
+        }
+
+        /**
+         * The helper itself: canonical order, de-duplicated, strict (a digit
+         * STRING is not a module id here; getActivities resolves those
+         * through moduleIdsFor() first), and nothing outside the public
+         * feed survives.
+         */
+        public function testWithinPublicFeedModulesKeepsOnlyPublicIdsInCanonicalOrder(): void
+        {
+            self::assertSame([1, 204], FeedItemNormalizer::withinPublicFeedModules([204, 6, 1, 204, 0, 9999]));
+            self::assertSame([], FeedItemNormalizer::withinPublicFeedModules([6, 8, 30, 111, 6661]));
+            self::assertSame([], FeedItemNormalizer::withinPublicFeedModules([]));
+            // Deliberately the wrong type: strictness is the point.
+            self::assertSame([], FeedItemNormalizer::withinPublicFeedModules(['1', '204']));
+            self::assertSame(
+                FeedItemNormalizer::publicFeedModuleIds(),
+                FeedItemNormalizer::withinPublicFeedModules(array_reverse(FeedItemNormalizer::publicFeedModuleIds())),
+                'every public module survives, in canonical order'
+            );
+        }
+
         /** The scope the Signals tab calls: an empty page, no query. */
         public function testTheSignalsScopeIsAnEmptyPageWithNoQuery(): void
         {

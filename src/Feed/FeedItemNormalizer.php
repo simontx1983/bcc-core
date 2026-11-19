@@ -236,6 +236,37 @@ final class FeedItemNormalizer
     }
 
     /**
+     * A module allowlist, cut down to the modules the public feed may
+     * expose ({@see publicFeedModuleIds()}). Anything else (6 DMs, 8 the
+     * group-join stream, 30 polls, an unknown module) is dropped. The
+     * result may be `[]`, which still means "no rows", never "every
+     * public module".
+     *
+     * ⚠ The ONE ceiling on an explicit module list.
+     * `PeepSoActivityRepository::getActivities()` applies it to every
+     * caller's list, so a list can only NARROW the public feed, never
+     * widen it, whoever builds it.
+     *
+     * Walks the canonical list rather than the caller's, so the result is
+     * de-duplicated and in canonical order. Strict comparison: only real
+     * integer module ids match, which is why callers resolve names and
+     * digit strings through {@see moduleIdsFor()} first.
+     *
+     * @param list<int> $moduleIds
+     * @return list<int>
+     */
+    public static function withinPublicFeedModules(array $moduleIds): array
+    {
+        $kept = [];
+        foreach (self::publicFeedModuleIds() as $publicId) {
+            if (in_array($publicId, $moduleIds, true)) {
+                $kept[] = $publicId;
+            }
+        }
+        return $kept;
+    }
+
+    /**
      * @param ActivityRow $row     A row from PeepSoActivityRepository::getActivities().
      * @param array<string, mixed> $author Pre-hydrated author block (kind/id/handle/display_name/avatar_url/reputation_tier/rank_label/is_in_good_standing/is_followed_by_viewer).
      * @param array<string, mixed> $body   Pre-hydrated kind-specific body (per §3.3.1–3.3.8). Empty = use defaults.
