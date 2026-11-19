@@ -410,9 +410,14 @@ final class PeepSoGroupRepository
 
     /**
      * Inverse of getPrimaryHallForUsers. Given a Hall group_id, return
-     * every user who's designated it as primary. Used by the
-     * "post in your primary Hall" notification dispatcher (bcc-trust)
-     * to fan out to the recipient set.
+     * every user who's designated it as primary AND is still an active,
+     * unbanned member of it. Used by the "post in your primary Hall"
+     * notification dispatcher (bcc-trust) to fan out to the recipient set.
+     *
+     * Membership is read from peepso_group_members, not inferred from the
+     * pointer: a removal or a ban done through PeepSo never clears the
+     * pointer. EXISTS / NOT EXISTS, so a duplicated (user, group) pair can
+     * neither repeat a user nor hide a ban.
      *
      * The meta key string is hardcoded here rather than imported from
      * bcc-trust's HallsService::META_PRIMARY_GROUP because bcc-core
@@ -440,18 +445,41 @@ final class PeepSoGroupRepository
         }
 
         global $wpdb;
+        $members = self::membersTable();
 
+        // The pointer alone is not membership: only BCC's own leaveHall()
+        // clears it, so a member removed or banned through PeepSo kept the
+        // pointer and kept getting the Hall's post bells. A recipient must
+        // also hold an ACTIVE (member%) row and NO banned row: a ban
+        // outranks any stray active row beside it (F-354's rank).
         /** @var list<string>|null $rows */
         $rows = $wpdb->get_col(
             $wpdb->prepare(
-                "SELECT user_id
-                   FROM {$wpdb->usermeta}
-                  WHERE meta_key = %s
-                    AND meta_value = %s
-                  ORDER BY user_id ASC
+                "SELECT um.user_id
+                   FROM {$wpdb->usermeta} um
+                  WHERE um.meta_key = %s
+                    AND um.meta_value = %s
+                    AND EXISTS (
+                        SELECT 1
+                          FROM {$members} gm
+                         WHERE gm.gm_group_id = %d
+                           AND gm.gm_user_id = um.user_id
+                           AND gm.gm_user_status LIKE %s
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM {$members} gb
+                         WHERE gb.gm_group_id = %d
+                           AND gb.gm_user_id = um.user_id
+                           AND gb.gm_user_status = 'banned'
+                    )
+                  ORDER BY um.user_id ASC
                   LIMIT %d",
                 self::PRIMARY_HALL_META_KEY,
                 (string) $groupId,
+                $groupId,
+                self::ACTIVE_MEMBER_STATUS,
+                $groupId,
                 $limit
             )
         );
