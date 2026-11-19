@@ -125,6 +125,13 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
          */
         private const MODULE_IN_PLACEHOLDERS = 'a.act_module_id IN (%d,%d,%d,%d,%d,%d,%d,%d)';
 
+        /**
+         * The comment-excluding predicate, spelled ONCE here and asserted
+         * against both readers. ⚠ It is NULL-safe on purpose: a non-comment
+         * row may store NULL rather than 0, and `= 0` alone would drop it.
+         */
+        private const TOP_LEVEL_PREDICATE = '(a.act_comment_object_id = 0 OR a.act_comment_object_id IS NULL)';
+
         /** @var mixed */
         private $priorWpdb;
 
@@ -272,6 +279,98 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
         {
             $this->installWpdb();
             self::assertNull(PeepSoActivityRepository::getById(7, []));
+        }
+
+        // ── COMMENT rows are not feed items (the act-id permalink leak) ──
+
+        /**
+         * ⚠⚠ THE LEAK THIS CLOSES, stated plainly because the module
+         * allowlist looks like it should already cover it and does not.
+         *
+         * PeepSo writes an activities row for EVERY comment and stores
+         * `act_module_id = PeepSoActivity::MODULE_ID` (1) on it — its own
+         * source says "comments always belong to the activity module". So a
+         * comment act id satisfies the allowlist above, its backing wp_post
+         * is published, and it resolves here as though it were a top-level
+         * post.
+         *
+         * ⛔ And a comment post carries NO `peepso_group_id` — PeepSo's own
+         * groups add-on walks UP to the parent to find the group — so every
+         * group rule keyed on the resolved post reads "not group-tagged"
+         * for a comment and admits it. The net effect was that comment act
+         * ids were readable by link regardless of the group they live in,
+         * and act ids are sequential, so they can be walked.
+         *
+         * `getActivities()` has carried the excluding predicate all along;
+         * this is the single-row reader catching up to it.
+         */
+        public function testGetByIdWithAllowlistExcludesCommentRows(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getById(7, FeedItemNormalizer::publicFeedModuleIds());
+
+            self::assertStringContainsString(
+                self::TOP_LEVEL_PREDICATE,
+                $wpdb->lastSql(),
+                'a feed-shaped getById must exclude comment rows in SQL'
+            );
+        }
+
+        /**
+         * ⭐ The drift guard, and the reason this predicate is not re-worded
+         * here: the single-row reader and the candidate query must carry the
+         * IDENTICAL fragment. Two spellings of the same rule is how one of
+         * them later loses a leg.
+         */
+        public function testTheTopLevelPredicateIsIdenticalInBothReaders(): void
+        {
+            $wpdb = $this->installWpdb();
+            PeepSoActivityRepository::getActivities(null, null, null, null, 10);
+            $candidateSql = $wpdb->lastSql();
+
+            $wpdb = $this->installWpdb();
+            PeepSoActivityRepository::getById(7, FeedItemNormalizer::publicFeedModuleIds());
+            $byIdSql = $wpdb->lastSql();
+
+            self::assertStringContainsString(self::TOP_LEVEL_PREDICATE, $candidateSql);
+            self::assertStringContainsString(self::TOP_LEVEL_PREDICATE, $byIdSql);
+        }
+
+        /**
+         * The internal callers are deliberately unchanged. Author
+         * resolution, the comment-PARENT lookup, moderation and the
+         * interaction gate's comment branch all pass no allowlist and must
+         * still resolve a comment act — `GroupInteractionGate` resolves a
+         * comment to its parent BEFORE it ever reaches a feed-shaped read,
+         * and breaking that would break comment moderation rather than
+         * protect anything.
+         */
+        public function testGetByIdWithoutAllowlistStillResolvesCommentRows(): void
+        {
+            $wpdb = $this->installWpdb();
+
+            PeepSoActivityRepository::getById(7);
+
+            self::assertStringNotContainsString(
+                'act_comment_object_id',
+                $wpdb->lastSql(),
+                'internal callers must keep resolving comment acts'
+            );
+        }
+
+        /** The flag overrides the default in BOTH directions. */
+        public function testTopLevelOnlyCanBeForcedOnAndOff(): void
+        {
+            $wpdb = $this->installWpdb();
+            // Forced ON with no allowlist.
+            PeepSoActivityRepository::getById(7, null, null, false, 0, false, true);
+            self::assertStringContainsString(self::TOP_LEVEL_PREDICATE, $wpdb->lastSql());
+
+            $wpdb = $this->installWpdb();
+            // Forced OFF despite an allowlist.
+            PeepSoActivityRepository::getById(7, FeedItemNormalizer::publicFeedModuleIds(), null, false, 0, false, false);
+            self::assertStringNotContainsString('act_comment_object_id', $wpdb->lastSql());
         }
 
         // ── getActivityById() permalink rejection ───────────────────────
