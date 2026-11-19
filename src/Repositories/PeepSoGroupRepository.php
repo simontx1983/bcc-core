@@ -640,11 +640,18 @@ final class PeepSoGroupRepository
                FROM {$members}
               WHERE gm_user_id = %d
                 AND gm_group_id IN ({$placeholders})
-              ORDER BY gm_id ASC
+              ORDER BY (gm_user_status = 'banned') DESC, gm_id ASC
               LIMIT %d",
             // 2× the ids: with no unique (user, group) index a pair can have
             // a duplicate row, and a limit equal to the id count would let
             // duplicates push a real group past it — read as "no row".
+            //
+            // Banned rows FIRST: the limit is shared by every pair, so a pair
+            // with three or more rows can push its own NEWER ban past it and
+            // read as a member (security review, F-416). A ban therefore never
+            // falls outside the window while any active row is inside it.
+            // Within each class gm_id still orders the rows, so the tie-break
+            // below is unchanged.
             ...array_merge([$userId], $groupIds, [2 * count($groupIds)])
         ));
         if ($ok === false || (string) $wpdb->last_error !== '') {
@@ -652,8 +659,8 @@ final class PeepSoGroupRepository
         }
 
         // F-354: no unique (user, group) index, so a pair can carry a stale
-        // duplicate. Rows arrive in gm_id order; per group the best-ranked
-        // row wins and the lowest gm_id breaks a tie, so the answer never
+        // duplicate. Rows arrive bans first, then in gm_id order; per group
+        // the best-ranked row wins and the lowest gm_id breaks a tie, so the answer never
         // depends on which duplicate happened to be inserted first:
         //   banned  >  member_owner  >  other active (member%)  >  anything else (pending_*, …)
         // A ban outranks membership (fail closed, and the write doors
@@ -947,6 +954,90 @@ final class PeepSoGroupRepository
         ));
 
         return array_values(array_map('intval', $ids ?: []));
+    }
+
+    /**
+     * The PUBLISHED groups the user is an active member of, for a read that
+     * shows those groups' MEMBER content (the home feed's "My Groups" scope,
+     * F-416). Most recently joined first, at most `$limit` (capped at 200).
+     *
+     * Stricter than {@see getUserMemberGroupIds()} in three ways, each one
+     * load-bearing for a member read:
+     *   - F-354: a pair can carry a stale duplicate row, so a `member%` row
+     *     alone does not prove membership. Each candidate is re-read through
+     *     {@see findUserMembershipStatuses()} and kept only when its RANKED
+     *     status is active: a `banned` row beside a `member` row wins, and a
+     *     group is out;
+     *   - only published `peepso-group` posts: a trashed or drafted group's
+     *     member rows do not reach a feed;
+     *   - a read that did not run answers NULL, never `[]`. `[]` is "a member
+     *     of nothing" (an empty feed); null lets the caller answer "try again"
+     *     instead of showing a member an empty page during an outage.
+     *
+     * Uncached for the same reason as getUserMemberGroupIds(): a stale
+     * "still a member" would show a removed or banned member the group's
+     * members-only posts.
+     *
+     * @return list<int>|null null when either read failed
+     */
+    public static function getActiveMemberGroupIdsOrFail(int $userId, int $limit = 200): ?array
+    {
+        if ($userId <= 0) {
+            return [];
+        }
+        // findUserMembershipStatuses() ranks at most 200 ids.
+        $limit = max(1, min(200, $limit));
+
+        global $wpdb;
+        $members = self::membersTable();
+
+        // GROUP BY, not DISTINCT: the order is the latest join of the pair,
+        // which DISTINCT could not sort by on MySQL 8 (it rejects ORDER BY
+        // over a column that is not selected). gm_group_id breaks a tie.
+        $ok = $wpdb->query($wpdb->prepare(
+            "SELECT gm.gm_group_id
+               FROM {$members} gm
+              INNER JOIN {$wpdb->posts} p ON p.ID = gm.gm_group_id
+              WHERE gm.gm_user_id     = %d
+                AND gm.gm_user_status LIKE %s
+                AND p.post_type       = %s
+                AND p.post_status     = %s
+              GROUP BY gm.gm_group_id
+              ORDER BY MAX(gm.gm_joined) DESC, gm.gm_group_id DESC
+              LIMIT %d",
+            $userId,
+            self::ACTIVE_MEMBER_STATUS,
+            self::POST_TYPE,
+            self::POST_STATUS,
+            $limit
+        ));
+        if ($ok === false || (string) $wpdb->last_error !== '') {
+            return null;
+        }
+
+        $candidates = [];
+        foreach (is_array($wpdb->last_result) ? $wpdb->last_result : [] as $row) {
+            if (isset($row->gm_group_id)) {
+                $candidates[] = (int) $row->gm_group_id;
+            }
+        }
+        if ($candidates === []) {
+            return [];
+        }
+
+        $statuses = self::findUserMembershipStatuses($userId, $candidates);
+        if ($statuses === null) {
+            return null;
+        }
+
+        $active = [];
+        foreach ($candidates as $groupId) {
+            $status = $statuses[$groupId] ?? null;
+            if ($status !== null && str_starts_with($status, 'member')) {
+                $active[] = $groupId;
+            }
+        }
+        return $active;
     }
 
     /**
