@@ -68,6 +68,25 @@ namespace BCC\Core\Feed\Tests\ModuleAllowlist {
             return $this->rowToReturn;
         }
 
+        public string $last_error = '';
+
+        /** @var list<object> */
+        public array $last_result = [];
+
+        /**
+         * F-461: the permalink's row is read through ProbesReads (query() +
+         * last_result), as real wpdb answers it: the single row the test
+         * set, as a one-row result.
+         *
+         * @return int
+         */
+        public function query(string $sql)
+        {
+            $this->last_result = $this->rowToReturn === null ? [] : [$this->rowToReturn];
+
+            return count($this->last_result);
+        }
+
         /** The single most-recent captured prepare() call. */
         public function lastSql(): string
         {

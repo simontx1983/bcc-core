@@ -468,13 +468,17 @@ final class ActivityFeedService
         // unknown-module activity is filtered out in SQL so it can never
         // be resolved by id (same allowlist the global feed query uses).
         $allowedModuleIds = FeedItemNormalizer::publicFeedModuleIds();
+        // F-461: the group visibility comes back IN this row, read by the
+        // same statement, so a failed meta read fails the row instead of
+        // reading as "not a group post" through a poisoned meta cache.
         $row = PeepSoActivityRepository::getById(
             $actId,
             $allowedModuleIds,
             viewerFriendIds: $viewerFriendIds,
             enforcePostVisibility: $enforcePostVisibility,
             viewerId: $viewerId,
-            throwOnReadFailure: $this->throwOnReadFailure
+            throwOnReadFailure: $this->throwOnReadFailure,
+            withGroupVisibility: true
         );
         if ($row === null || (string) $row->act_status !== 'publish') {
             return null;
@@ -493,7 +497,7 @@ final class ActivityFeedService
             return null;
         }
 
-        if (!self::isVisibleGlobally((int) $row->act_external_id, $deferGroupVisibilityToCaller)) {
+        if (!self::isVisibleGlobally($row, $deferGroupVisibilityToCaller)) {
             return null;
         }
 
@@ -528,14 +532,24 @@ final class ActivityFeedService
      * What it does NOT touch: the `$postId <= 0` guard (a row with no
      * backing post is still refused) and the non-group `true` (those
      * were always visible).
+     *
+     * ⚠⚠ F-461: THE GROUP FACTS COME FROM THE ROW, NEVER FROM
+     * get_post_meta(). `$row` is a getById(withGroupVisibility: true) row,
+     * so `bcc_group_ids`, `bcc_post_visibility` and `bcc_privacy_at_post`
+     * were read by the same statement as the row itself. WordPress caches
+     * an EMPTY meta array for an id whose meta read failed, and a
+     * persistent object cache keeps it until the post is edited; through
+     * it, a closed or secret group's members-only post read as "not a
+     * group post" and was served by permalink, content and all.
      */
-    private static function isVisibleGlobally(int $postId, bool $deferGroupsToCaller = false): bool
+    private static function isVisibleGlobally(object $row, bool $deferGroupsToCaller = false): bool
     {
+        $postId = (int) ($row->act_external_id ?? 0);
         if ($postId <= 0) {
             return false;
         }
         $groupIds = array_values(array_filter(
-            array_map('intval', (array) get_post_meta($postId, 'peepso_group_id', false)),
+            array_map('intval', explode(',', (string) ($row->bcc_group_ids ?? ''))),
             static fn(int $id): bool => $id > 0
         ));
         if ($groupIds === []) {
@@ -551,10 +565,10 @@ final class ActivityFeedService
             return true;
         }
 
-        if (get_post_meta($postId, '_bcc_post_visibility', true) !== 'public_all') {
+        if ((string) ($row->bcc_post_visibility ?? '') !== 'public_all') {
             return false;
         }
-        $privacyAtPost = get_post_meta($postId, GroupSyndicationGate::META_PRIVACY_AT_POST, true);
+        $privacyAtPost = $row->bcc_privacy_at_post ?? '';
         if (GroupSyndicationGate::madeWhileNonOpen($privacyAtPost)) {
             // A deliberate non-open syndication passes whatever the
             // group's state is now: no need to read the non-open set.

@@ -50,9 +50,36 @@ namespace BCC\Core\Feed\Tests {
 
         private static function isVisibleGlobally(int $postId): bool
         {
+            return self::isVisibleGloballyRow(self::rowFor($postId));
+        }
+
+        /**
+         * F-461: the predicate reads the post's group facts from the ROW
+         * (getById(withGroupVisibility: true)), never from get_post_meta().
+         * These tests keep describing a post by its meta fixture; this builds
+         * the row the repository would return for it.
+         */
+        private static function rowFor(int $postId): object
+        {
+            $meta   = $GLOBALS['__test_post_meta'][$postId] ?? [];
+            $groups = array_values(array_filter(
+                array_map('strval', (array) ($meta['peepso_group_id'] ?? [])),
+                static fn (string $id): bool => $id !== ''
+            ));
+
+            return (object) [
+                'act_external_id'     => (string) $postId,
+                'bcc_group_ids'       => $groups === [] ? null : implode(',', $groups),
+                'bcc_post_visibility' => $meta['_bcc_post_visibility'] ?? null,
+                'bcc_privacy_at_post' => $meta['_bcc_post_group_privacy_at_post'] ?? null,
+            ];
+        }
+
+        private static function isVisibleGloballyRow(object $row, bool $defer = false): bool
+        {
             $ref = new ReflectionMethod(ActivityFeedService::class, 'isVisibleGlobally');
             $ref->setAccessible(true);
-            $out = $ref->invoke(null, $postId);
+            $out = $ref->invoke(null, $row, $defer);
             self::assertIsBool($out);
             return $out;
         }
@@ -63,11 +90,46 @@ namespace BCC\Core\Feed\Tests {
          */
         private static function isVisibleGloballyDeferred(int $postId): bool
         {
-            $ref = new ReflectionMethod(ActivityFeedService::class, 'isVisibleGlobally');
-            $ref->setAccessible(true);
-            $out = $ref->invoke(null, $postId, true);
-            self::assertIsBool($out);
-            return $out;
+            return self::isVisibleGloballyRow(self::rowFor($postId), true);
+        }
+
+        // ── F-461: a poisoned meta cache cannot make a group post public ──
+
+        /**
+         * WordPress caches an EMPTY meta array for a post whose meta read
+         * failed, and a persistent object cache keeps it. Here get_post_meta()
+         * says "no group" (the poisoned cache) while the row, read by the
+         * same statement as the post, says it is a members-only post in
+         * group 7: the row wins, and the post is refused.
+         */
+        public function testAPoisonedMetaCacheCannotMakeAGroupPostPublic(): void
+        {
+            $GLOBALS['__test_post_meta'][123] = []; // what the poisoned cache answers
+            $row = (object) [
+                'act_external_id'     => '123',
+                'bcc_group_ids'       => '7',
+                'bcc_post_visibility' => 'members_only',
+                'bcc_privacy_at_post' => null,
+            ];
+
+            self::assertFalse(self::isVisibleGloballyRow($row));
+        }
+
+        /** The visibility marker comes from the row too: meta claiming public_all is ignored. */
+        public function testThePostsVisibilityIsTheRowsNotTheMetaCaches(): void
+        {
+            $GLOBALS['__test_post_meta'][123] = [
+                'peepso_group_id'      => '7',
+                '_bcc_post_visibility' => 'public_all',
+            ];
+            $row = (object) [
+                'act_external_id'     => '123',
+                'bcc_group_ids'       => '7',
+                'bcc_post_visibility' => 'members_only',
+                'bcc_privacy_at_post' => null,
+            ];
+
+            self::assertFalse(self::isVisibleGloballyRow($row));
         }
 
         public function testInvalidActIdReturnsNullWithoutTouchingTheDb(): void
