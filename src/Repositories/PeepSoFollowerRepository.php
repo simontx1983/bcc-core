@@ -2,6 +2,8 @@
 
 namespace BCC\Core\Repositories;
 
+use BCC\Core\Feed\PostVisibilityLevel;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -102,14 +104,12 @@ final class PeepSoFollowerRepository
         // unaffected, and there is deliberately no admitting catch-all.
         // NULL / <= 0 normalise to 10 first: a NULL level would otherwise
         // match no `<=` arm and be denied.
-        $level = 'IF(pu.usr_profile_acc IS NULL OR pu.usr_profile_acc <= 0, 10, pu.usr_profile_acc)';
-        $where = ' AND (CASE WHEN %d > 0 AND ' . $listedCol . ' = %d THEN 1'
-            . ' ELSE CASE'
-            .   ' WHEN ' . $level . ' <= 10 THEN 1'
-            .   ' WHEN ' . $level . ' <= 20 THEN IF(%d > 0, 1, 0)'
-            .   ' WHEN ' . $level . ' <= 30 THEN ' . $friendBranch
-            .   ' ELSE 0'
-            . ' END END) = 1';
+        //
+        // Both the level and the ladder come from PostVisibilityLevel, the
+        // rule's one home; its rung() is their PHP twin, and
+        // PostVisibilityLevelSqlAgreementTest runs this clause against it.
+        $level = PostVisibilityLevel::sqlStoredLevel('pu.usr_profile_acc');
+        $where = ' AND (' . PostVisibilityLevel::sqlLadder($listedCol, $level, $friendBranch) . ') = 1';
 
         return [$join, $where, $params];
     }
