@@ -126,9 +126,7 @@ namespace BCC\Core\Feed\Tests\MyGroups {
     final class ActivityMyGroupsScopeTest extends TestCase
     {
         private const ALLOW_7_9 = "EXISTS (SELECT 1 FROM wp_postmeta og_pm WHERE og_pm.post_id = p.ID"
-            . " AND og_pm.meta_key = 'peepso_group_id' AND og_pm.meta_value IN ('7','9'))"
-            . " AND NOT EXISTS (SELECT 1 FROM wp_postmeta og_neg WHERE og_neg.post_id = p.ID"
-            . " AND og_neg.meta_key = 'peepso_group_id' AND og_neg.meta_value NOT IN ('7','9'))";
+            . " AND og_pm.meta_key = 'peepso_group_id' AND og_pm.meta_value IN ('7','9'))";
 
         private const PUBLIC_ALL_GATE = "(gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')";
 
@@ -171,7 +169,7 @@ namespace BCC\Core\Feed\Tests\MyGroups {
 
         // ── the repository: a member read across the viewer's groups ──────
 
-        /** FAILS IF THE LIST IS IGNORED, OR IF IT IS JUDGED PER ROW. */
+        /** FAILS IF THE LIST IS IGNORED. Same admission as a room: in one of the viewer's groups. */
         public function testTheAllowListIsAPerPostMemberRead(): void
         {
             // A group that is non-open NOW: the syndication gate would name it.
@@ -180,7 +178,8 @@ namespace BCC\Core\Feed\Tests\MyGroups {
             PeepSoActivityRepository::getActivities(null, null, null, null, 10, onlyForGroupIds: [7, 9, 7, 0]);
 
             $sql = $this->activitySql();
-            self::assertStringContainsString(self::ALLOW_7_9, $sql, 'in one of them and in none outside them');
+            self::assertStringContainsString(self::ALLOW_7_9, $sql, 'in one of the viewer groups');
+            self::assertStringNotContainsString('og_neg', $sql, 'no stricter than the room, which admits a post carrying the group whatever else it carries');
             self::assertStringNotContainsString(self::PUBLIC_ALL_GATE, $sql, 'members see members_only posts');
             self::assertStringNotContainsString('gx_pm', $sql);
             self::assertStringNotContainsString("'55'", $sql, 'no syndication gate on a member read');

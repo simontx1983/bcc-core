@@ -286,7 +286,7 @@ final class PeepSoActivityRepository
      * @param list<int>|null $viewerFriendIds The authors the VIEWER is a friend of, for the level-30 branch of `$enforcePostVisibility`. ⚠ bcc-core deliberately does NOT discover this itself: friendship lives in `peepso_user_friends`, a table owned by the OPTIONAL peepso-friends plugin, and joining it would make the main feed query depend on an add-on that may not be installed - a missing table turns the most important read in the product into a SQL error. bcc-trust computes the list (it already wraps `PeepSoFriendsModel` behind `PeepSoFriendGate`) and passes it, exactly the coupling-avoidance pattern `$excludedAuthorIds`, `$excludedActIds` and `$restrictedGroupIds` already use - bcc-core stays unaware of what a "friend" is and only applies the rule. null/[] = the viewer is a friend of nobody, which is correct for an anonymous reader and makes every level-30 post invisible except the viewer's own. Ids are de-duplicated and integer-cast. Capped at {@see self::VIEWER_FRIEND_IDS_MAX}, and over the cap treated as EMPTY (deny), never truncated.
      * @param bool $enforcePostVisibility OPT-IN switch for the §F-02 per-post gate; `false` (the default, and every pre-existing caller) leaves behaviour byte-identical. When true, a post is visible only at the STRICTER of its own `act_access` and its AUTHOR's `peepso_users.usr_profile_acc`, so setting a profile to "friends" or "only me" retroactively narrows the posts already written under it. The ladder: 0 and 10 = everyone (0 is what BCC's own writer stores, and PeepSo's `is_accessible_static` also treats 0 as public); 20 = any signed-in viewer; 30 = `$viewerFriendIds`; 40 = nobody. The viewer ALWAYS sees their own posts at any level, which must be in the SQL because a feed page carries many authors. ⚠ An unrecognised level DENIES - the `CASE` has no catch-all that admits. ⚠ ADMINS are NOT exempted here: an admin read is expressed by the caller passing `false`, because encoding a capability check in a repository would put policy in the wrong layer. ⚠ A missing `peepso_users` row counts as 10 (public), matching that column's schema default and what bcc-trust's own reader returns when PeepSo is absent - not a deliberate fail-open, but say so when auditing.
      * @param bool $throwOnReadFailure F-275, OPT-IN. `false` (the default, and every pre-existing caller) keeps the historical answer, where a failed read returns `[]` exactly like "no rows". When true, a read that did not run throws {@see ActivityReadFailedException} instead, so a feed can answer "try again" rather than "nothing here". The statement is the same either way; only how its result is read differs ({@see ProbesReads::trustedRows()}). ⚠ The `[]` short-circuits above (an empty author or module list, a non-positive group or page id) are genuine "no matches" and never throw.
-     * @param list<int>|null $onlyForGroupIds F-416 "My Groups": the groups the viewer is an ACTIVE member of. null (the default, and every pre-existing caller) = no such filter, byte-identical SQL. Non-null = a MEMBER read across those groups: a post qualifies only when it is in at least one of them AND in no group outside them (per-post EXISTS / NOT EXISTS, so a duplicate `peepso_group_id` row can neither multiply nor rescue a row). The global `public_all` gate and the F-23 syndication gate are SKIPPED, as on the `$onlyForGroupId` path, because members see every post in their own groups, members_only included. ⚠ bcc-core does not check membership here: the caller passes the list (bcc-trust reads it through {@see PeepSoGroupRepository::getActiveMemberGroupIdsOrFail()}). `[]` = a member of nothing → no rows; over {@see self::RESTRICTED_GROUP_IDS_MAX} → no rows (refused, never truncated). Ignored when `$onlyForGroupId` is set. ⚠ Appended LAST: the parameters before it are passed positionally by existing callers.
+     * @param list<int>|null $onlyForGroupIds F-416 "My Groups": the groups the viewer is an ACTIVE member of. null (the default, and every pre-existing caller) = no such filter, byte-identical SQL. Non-null = a MEMBER read across those groups: a post qualifies when it is in at least one of them (a per-post EXISTS, so a duplicate `peepso_group_id` row cannot multiply rows) - the same admission as a group's own feed, which admits any post carrying the group, so the union of the viewer's rooms shows exactly what each room shows. The global `public_all` gate and the F-23 syndication gate are SKIPPED, as on the `$onlyForGroupId` path, because members see every post in their own groups, members_only included. ⚠ bcc-core does not check membership here: the caller passes the list (bcc-trust reads it through {@see PeepSoGroupRepository::getActiveMemberGroupIdsOrFail()}). `[]` = a member of nothing → no rows; over {@see self::RESTRICTED_GROUP_IDS_MAX} → no rows (refused, never truncated). Ignored when `$onlyForGroupId` is set. ⚠ Appended LAST: the parameters before it are passed positionally by existing callers.
      * @param list<int>|null $softExcludedAuthorIds Authors dropped EXCEPT on a post inside one of `$softExclusionExemptGroupIds` (F-416: bcc-trust's reputation shadow-limit on "My Groups", which a group's own feed lifts inside NFT holder rooms). null/[] = no such filter. Hard exclusions (blocks) belong in `$excludedAuthorIds`, which no group exempts. A channel only: bcc-core does not know why an author is listed.
      * @param list<int>|null $softExclusionExemptGroupIds Groups whose posts are exempt from `$softExcludedAuthorIds`. Per-post EXISTS. null/[] or over {@see self::RESTRICTED_GROUP_IDS_MAX} = no exemption, so the soft exclusion applies everywhere (restrictive, never leaky). Read only when `$softExcludedAuthorIds` is non-empty.
      * @return list<ActivityRow>
@@ -441,24 +441,20 @@ final class PeepSoActivityRepository
             }
         }
 
-        // "My Groups" allow-list, decided PER POST: the post is in at least
-        // one of the viewer's groups AND in no group outside them. A post
-        // carrying {member group, other group} (WP writes one row per key,
-        // but nothing enforces it) is therefore NOT admitted by the member
-        // row — the same per-row trap the deny list below documents.
+        // "My Groups" allow-list: the post is in at least one of the viewer's
+        // groups. A per-post EXISTS, so a duplicate `peepso_group_id` row
+        // cannot multiply rows. ⚠ Deliberately the SAME admission as a
+        // group's own feed (the `$onlyForGroupId` INNER JOIN admits any post
+        // carrying that group, whatever else it carries): "My Groups" is the
+        // union of the viewer's rooms and must show exactly what opening each
+        // room shows. A post tagged {member group, other group} is therefore
+        // shown here because its member room already shows it.
         if ($onlyForGroupIdsClean !== null) {
             $ogPlaceholders = implode(',', array_fill(0, count($onlyForGroupIdsClean), '%s'));
             $where[] = 'EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' og_pm'
                 . ' WHERE og_pm.post_id = p.ID'
                 . ' AND og_pm.meta_key = \'peepso_group_id\''
                 . ' AND og_pm.meta_value IN (' . $ogPlaceholders . '))';
-            $where[] = 'NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' og_neg'
-                . ' WHERE og_neg.post_id = p.ID'
-                . ' AND og_neg.meta_key = \'peepso_group_id\''
-                . ' AND og_neg.meta_value NOT IN (' . $ogPlaceholders . '))';
-            foreach ($onlyForGroupIdsClean as $gid) {
-                $params[] = (string) $gid;
-            }
             foreach ($onlyForGroupIdsClean as $gid) {
                 $params[] = (string) $gid;
             }
