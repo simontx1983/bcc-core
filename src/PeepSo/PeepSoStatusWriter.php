@@ -42,6 +42,13 @@ final class PeepSoStatusWriter
      *   - ['ok' => false, 'reason' => 'forbidden']              PeepSo permission check failed
      *   - ['ok' => false, 'reason' => 'empty_content']          stripped content was empty
      *   - ['ok' => false, 'reason' => 'persist_failed']         wp_insert_post or activity insert failed
+     *   - ['ok' => false, 'reason' => 'hijacked']               a PeepSo listener stamped the post; it was deleted
+     *
+     * ⚠ `empty_content` is NOT returned when $repostOfRootActId > 0. A bare
+     * repost with no comment is a legitimate post, and PeepSo agrees — its
+     * own `add_post` refuses empty content only when there is no repost
+     * either (activity.php:163-165). The guard is relaxed in exactly that
+     * shape rather than removed.
      */
     /**
      * Create a status post on $authorId's own wall, or on a group wall
@@ -82,7 +89,8 @@ final class PeepSoStatusWriter
         int $authorId,
         string $content,
         int $groupId = 0,
-        string $visibility = 'members_only'
+        string $visibility = 'members_only',
+        int $repostOfRootActId = 0
     ): array {
         if ($authorId <= 0) {
             return ['ok' => false, 'reason' => 'forbidden'];
@@ -97,7 +105,7 @@ final class PeepSoStatusWriter
             return ['ok' => false, 'reason' => 'unavailable'];
         }
         $stripped = trim($content);
-        if ($stripped === '') {
+        if ($stripped === '' && $repostOfRootActId <= 0) {
             return ['ok' => false, 'reason' => 'empty_content'];
         }
 
@@ -123,6 +131,27 @@ final class PeepSoStatusWriter
         // the posts of any member who set "only me". Group creates keep
         // PeepSo's existing behaviour exactly.
         $extra = [];
+
+        // F-346 â a REPOST. `$extra['repost']` is the one and only seam into
+        // `act_repost_id`: PeepSo reads it at activity.php:153-155, and there
+        // is no other way in (`add_activity` lives in bcc-trust and does not
+        // reach this column).
+        //
+        // â  PeepSo stores the chain ROOT, not the id handed to it â it calls
+        // `get_repost_root()` first. The parameter is named for that: callers
+        // must resolve the root THEMSELVES and pass it, because the
+        // once-per-post rule and the 409 have to be keyed on the same value
+        // PeepSo will store. Keyed on a submitted repost's own act_id
+        // instead, the rule is bypassable by reposting someone's repost.
+        //
+        // â  Deriving the root needs no recursion despite PeepSo's recursive
+        // query: because every repost row already stores the ROOT, one hop is
+        // exact â `root = act.act_repost_id > 0 ? act.act_repost_id :
+        // act.act_id`.
+        if ($repostOfRootActId > 0) {
+            $extra['repost'] = $repostOfRootActId;
+        }
+
         if ($groupId <= 0) {
             $audience = self::storedDefaultAudience($authorId);
             if ($audience !== null) {

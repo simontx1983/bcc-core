@@ -49,7 +49,8 @@ if (!defined('ABSPATH')) {
  *   act_external_id: int|numeric-string,
  *   act_time: string,
  *   act_access: int|numeric-string,
- *   act_status: string
+ *   act_status: string,
+ *   act_repost_id: int|numeric-string
  * }
  */
 final class PeepSoActivityRepository
@@ -241,7 +242,17 @@ final class PeepSoActivityRepository
      * downstream services) so call sites don't need to know about the
      * JOIN.
      */
-    private const COLUMNS = 'a.act_id, p.post_author AS act_user_id, a.act_owner_id, a.act_module_id, a.act_external_id, p.post_date_gmt AS act_time, a.act_access, p.post_status AS act_status';
+    /**
+     * â  `act_repost_id` is here for F-346. It is on the same row, so it
+     * costs nothing to select, and it is what makes the repost ROOT
+     * resolvable from one `getById()` â PeepSo always stores the ROOT in
+     * this column (it calls `get_repost_root()` first), so
+     * `root = act_repost_id > 0 ? act_repost_id : act_id` is exact in ONE
+     * hop and no caller has to reimplement PeepSo's recursive hierarchy
+     * query. Widening COLUMNS rather than adding a second read keeps a
+     * single path onto this table (Â§1).
+     */
+    private const COLUMNS = 'a.act_id, p.post_author AS act_user_id, a.act_owner_id, a.act_module_id, a.act_external_id, p.post_date_gmt AS act_time, a.act_access, p.post_status AS act_status, a.act_repost_id';
 
     private static function table(): string
     {
@@ -891,6 +902,47 @@ final class PeepSoActivityRepository
             ...$params
         ));
         return $row ?: null;
+    }
+
+    /**
+     * The REPOST ROOT of an activity: the post a repost ultimately points
+     * at, or the activity itself when it is not a repost.
+     *
+     * ⭐ ONE HOP IS EXACT, and that is a property of PeepSo's writer rather
+     * than an optimisation: `add_post` calls `get_repost_root()` BEFORE
+     * storing (peepso/activity/classes/activity.php:153-155), so every
+     * repost row already holds the ROOT in `act_repost_id` — never its
+     * immediate parent. Reposting a repost of X therefore stores X, and
+     * PeepSo's own recursive hierarchy query never has to be reimplemented
+     * here.
+     *
+     * ⚠⚠ WHY ANY CALLER NEEDS THIS. A once-per-post rule, or anything
+     * keyed on "which post is this a repost of", MUST key on the root. Keyed
+     * on the id a client submitted, the rule is bypassed by submitting
+     * someone else's repost of the same post — a different act_id for the
+     * same underlying content.
+     *
+     * ⚠ FAILS CLOSED: 0 when the activity does not exist, is deleted, or
+     * its backing wp_post is gone (`getById()` INNER JOINs wp_posts). 0 is
+     * NOT "it is its own root" — callers must refuse rather than carry on,
+     * or a vanished post becomes a writable target.
+     *
+     * @return int the root act_id, or 0 when it cannot be determined
+     */
+    public static function resolveRepostRoot(int $actId): int
+    {
+        if ($actId <= 0) {
+            return 0;
+        }
+
+        $row = self::getById($actId);
+        if ($row === null) {
+            return 0;
+        }
+
+        $storedRoot = (int) ($row->act_repost_id ?? 0);
+
+        return $storedRoot > 0 ? $storedRoot : (int) $row->act_id;
     }
 
     /**
