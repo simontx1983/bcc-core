@@ -26,7 +26,10 @@ jobs:
           # one environment that does not match production is false confidence.
           php-version: '8.3'
           # gmp is required by EthSignatureVerifier (secp256k1 ecrecover).
-          extensions: mbstring, gmp
+          # pdo_sqlite runs the §F-02 visibility clause for real in
+          # PostVisibilityLevelSqlAgreementTest, which FAILS rather than
+          # skips in Actions when it is missing.
+          extensions: mbstring, gmp, pdo_sqlite
           tools: composer:v2
           coverage: none
 

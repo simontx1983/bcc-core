@@ -4,6 +4,7 @@ namespace BCC\Core\Repositories;
 
 use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\Feed\FeedItemNormalizer;
+use BCC\Core\Feed\PostVisibilityLevel;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -153,9 +154,15 @@ final class PeepSoActivityRepository
         // (10 < 20 < 30 < 40). `act_access <= 0` normalises to 10 - BCC's
         // own writer stores 0, and PeepSo's `is_accessible_static` also
         // treats 0 as public.
+        //
+        // ⚠ PostVisibilityLevel::effective() is this expression's PHP
+        // twin, and the ladder's numbers come from it so the two share
+        // one home. PostVisibilityLevelSqlAgreementTest runs this clause
+        // against that method value by value; change one, change both.
+        $public    = PostVisibilityLevel::PUBLIC;
         $effective = 'GREATEST('
-            . 'IF(a.act_access IS NULL OR a.act_access <= 0, 10, a.act_access),'
-            . ' COALESCE(pu.usr_profile_acc, 10)'
+            . 'IF(a.act_access IS NULL OR a.act_access <= 0, ' . $public . ', a.act_access),'
+            . ' COALESCE(pu.usr_profile_acc, ' . $public . ')'
             . ')';
 
         return [
@@ -170,9 +177,9 @@ final class PeepSoActivityRepository
             'where' => '('
                 . 'CASE WHEN %d > 0 AND p.post_author = %d THEN 1'
                 . ' ELSE CASE'
-                .   ' WHEN ' . $effective . ' <= 10 THEN 1'
-                .   ' WHEN ' . $effective . ' <= 20 THEN IF(%d > 0, 1, 0)'
-                .   ' WHEN ' . $effective . ' <= 30 THEN ' . $friendBranch
+                .   ' WHEN ' . $effective . ' <= ' . $public . ' THEN 1'
+                .   ' WHEN ' . $effective . ' <= ' . PostVisibilityLevel::MEMBERS . ' THEN IF(%d > 0, 1, 0)'
+                .   ' WHEN ' . $effective . ' <= ' . PostVisibilityLevel::FRIENDS . ' THEN ' . $friendBranch
                 .   ' ELSE 0'
                 . ' END END) = 1',
             'params' => $params,
