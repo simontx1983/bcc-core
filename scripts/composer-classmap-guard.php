@@ -51,8 +51,16 @@ if (PHP_SAPI !== 'cli') {
  *      which is what makes Composer classmap those classes in the first place.
  *      Without that setting a PSR-4 class is resolved by path and has no
  *      business being in the classmap, so requiring it would be wrong.
+ *   3. autoload_static.php's `$classMap` must be the SAME map as
+ *      autoload_classmap.php, entry for entry. Checks 1 and 2 read
+ *      autoload_classmap.php, but at runtime Composer 2's autoload_real.php
+ *      loads the STATIC copy. So a hand edit or a bad merge in only one of
+ *      the two files would pass checks 1 and 2 while production loads the
+ *      other. Paths are compared after normalising `..`, because the two
+ *      files spell the same path differently (`$baseDir . '/src/…'` versus
+ *      `__DIR__ . '/../..' . '/src/…'`).
  *
- * Vendor package mappings are outside this guard; Composer generates them from
+ * Vendor package mappings are outside checks 1 and 2; Composer generates them from
  * the installed package metadata rather than from this repository's first-party
  * source tree.
  *
@@ -192,6 +200,40 @@ if ($optimized && $psr4 !== []) {
     $note('  resolved by path and are not required to appear in the classmap.');
 }
 
+// ── Check 3: the static map the runtime loads is the same map ───────────────
+$staticFile = $root . '/vendor/composer/autoload_static.php';
+if (!is_file($staticFile)) {
+    $note('  FATAL: vendor/composer/autoload_static.php is missing — the runtime has no classmap to load');
+    exit(2);
+}
+if (!preg_match('/^class (ComposerStaticInit\w+)/m', (string) file_get_contents($staticFile), $m)) {
+    $note('  FATAL: no ComposerStaticInit class in vendor/composer/autoload_static.php');
+    exit(2);
+}
+require $staticFile;
+$staticClass = 'Composer\\Autoload\\' . $m[1];
+/** @var array<string, string> $staticMap */
+$staticMap = $staticClass::$classMap;
+$mismatch = [];
+foreach (array_keys($classmap + $staticMap) as $class) {
+    $a = isset($classmap[$class]) ? normalisedPath((string) $classmap[$class]) : '(absent)';
+    $b = isset($staticMap[$class]) ? normalisedPath((string) $staticMap[$class]) : '(absent)';
+    if ($a !== $b) {
+        $mismatch[$class] = [$a, $b];
+    }
+}
+$note(sprintf('  static classmap entries: %d', count($staticMap)));
+if ($mismatch !== []) {
+    $fail[] = sprintf('%d entr%s between autoload_classmap.php and autoload_static.php (the one the runtime loads):', count($mismatch), count($mismatch) === 1 ? 'y differs' : 'ies differ');
+    $rootPrefix = normalisedPath($root) . '/';
+    foreach (array_slice($mismatch, 0, 25, true) as $class => [$a, $b]) {
+        $fail[] = '    ' . $class . '  classmap: ' . str_replace($rootPrefix, '', $a) . '  static: ' . str_replace($rootPrefix, '', $b);
+    }
+    if (count($mismatch) > 25) {
+        $fail[] = '    …and ' . (count($mismatch) - 25) . ' more';
+    }
+}
+
 $note('  ' . str_repeat('─', 68));
 if ($fail !== []) {
     foreach ($fail as $line) {
@@ -201,8 +243,36 @@ if ($fail !== []) {
     echo '        Run `' . $fixCommand . "` and commit vendor/composer/.\n";
     exit(1);
 }
-echo "  PASS: every first-party mapping resolves, and every first-party class is mapped.\n";
+echo "  PASS: every first-party mapping resolves, every first-party class is mapped,\n";
+echo "        and the static map the runtime loads is the same map.\n";
 exit(0);
+
+/**
+ * A path with `\` as `/` and its `.` and `..` segments resolved, lexically:
+ * the file need not exist, so a mapping to a deleted file still compares.
+ */
+function normalisedPath(string $path): string
+{
+    $path = str_replace('\\', '/', $path);
+    $prefix = '';
+    if (preg_match('#^(?:[A-Za-z]:)?/#', $path, $m)) {
+        $prefix = $m[0];
+        $path = substr($path, strlen($prefix));
+    }
+    $segments = [];
+    foreach (explode('/', $path) as $segment) {
+        if ($segment === '' || $segment === '.') {
+            continue;
+        }
+        if ($segment === '..') {
+            array_pop($segments);
+            continue;
+        }
+        $segments[] = $segment;
+    }
+
+    return $prefix . implode('/', $segments);
+}
 
 /**
  * Fully-qualified class/interface/trait/enum names declared in one PHP source.
