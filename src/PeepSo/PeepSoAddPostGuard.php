@@ -320,10 +320,9 @@ final class PeepSoAddPostGuard
      * PIN-ONLY: no hook is touched, the request is still neutralised.
      *
      * ⚠ For a write that is a bare `wp_insert_post()` rather than an
-     * ⚠ For a write that is a bare `wp_insert_post()` rather than an
-     * `add_post()`. PeepSo listeners sit on `wp_insert_post` itself and read
-     * request input there; one of them has a privacy consequence rather than
-     * a cosmetic one. The per-listener inventory is with the security review (private tracker).
+     * `add_post()`. The request is PINNED so that listeners on
+     * `wp_insert_post` cannot act on this request's input. The per-listener
+     * inventory is with the security review (private tracker).
      *
      * ⚠⚠ DETACHING IS NOT AN OPTION HERE, and that is the whole reason this
      * mode exists. `wp_insert_post` is a CORE WordPress hook: WordPress
