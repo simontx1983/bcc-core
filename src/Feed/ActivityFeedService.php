@@ -6,6 +6,7 @@ use BCC\Core\Contracts\ActivityReadFailedException;
 use BCC\Core\PeepSo\PeepSoGraphService;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 use BCC\Core\Repositories\PeepSoGroupRepository;
+use BCC\Core\Repositories\UserMetaRepository;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -65,6 +66,17 @@ final class ActivityFeedService
      * downstream `WHERE act_user_id IN (...)`. [audit M-B1]
      */
     private const FOLLOWING_AUTHOR_CAP = 5000;
+
+    /** The two user-meta values an author's public name depends on. */
+    private const HANDLE_META           = 'bcc_handle';
+    private const REAL_NAME_HIDDEN_META = 'bcc_privacy_real_name_hidden';
+
+    /**
+     * Author batches this request whose name inputs could not be read, so
+     * every name in them was masked. Read by a caller that caches a feed
+     * for everyone ({@see authorReadFailures()}).
+     */
+    private static int $authorReadFailures = 0;
 
     private PeepSoGraphService $graph;
 
@@ -712,6 +724,16 @@ final class ActivityFeedService
         // per author (see PeepSoMediaCache::avatarUrlBulk).
         $avatars = \BCC\Core\PeepSo\PeepSoMediaCache::avatarUrlBulk($authorIds);
 
+        // The handle and the "Hide my real name" flag, for every author, in
+        // ONE guarded read (UserMetaRepository). null = it could not be
+        // trusted: every name in this batch is then masked, and the batch
+        // is counted so a shared cache can decline to keep the page.
+        // Rationale: M3 (private tracker).
+        $nameMeta = UserMetaRepository::valuesOrUnknown($authorIds, [self::HANDLE_META, self::REAL_NAME_HIDDEN_META]);
+        if ($nameMeta === null) {
+            self::$authorReadFailures++;
+        }
+
         $byId = [];
         foreach ($users as $u) {
             $id = (int) $u->ID;
@@ -720,7 +742,12 @@ final class ActivityFeedService
             // missing handle shows 'member-{id}', and a display_name that
             // is just the login (WordPress's default for wp-admin / WP-CLI
             // accounts) counts as missing and shows the handle instead.
-            $handle = trim((string) get_user_meta($id, 'bcc_handle', true));
+            // An unread batch takes the handle from the primed meta cache;
+            // the handle is public either way.
+            $handleRaw = $nameMeta !== null
+                ? ($nameMeta[$id][self::HANDLE_META][0] ?? '')
+                : get_user_meta($id, self::HANDLE_META, true);
+            $handle = trim((string) $handleRaw);
             if ($handle === '') {
                 $handle = 'member-' . $id;
             }
@@ -732,9 +759,11 @@ final class ActivityFeedService
             // stored as user meta bcc_privacy_real_name_hidden = '1'/'0').
             // Everyone but the author sees '@handle'. Same rule as
             // bcc-trust's PublicIdentity::visibleName (bcc-core can't
-            // depend on bcc-trust, so it is spelled out here).
+            // depend on bcc-trust, so it is spelled out here): a flag that
+            // could not be read counts as ON, and with duplicate rows the
+            // strictest wins.
             if ($id !== $viewerId
-                && filter_var(get_user_meta($id, 'bcc_privacy_real_name_hidden', true), FILTER_VALIDATE_BOOLEAN)
+                && ($nameMeta === null || self::anyOn($nameMeta[$id][self::REAL_NAME_HIDDEN_META] ?? []))
             ) {
                 $name = '@' . $handle;
             }
@@ -882,6 +911,35 @@ final class ActivityFeedService
             }
         }
         return array_values(array_unique($ids));
+    }
+
+    /**
+     * How many author batches this request had their names masked because
+     * the name inputs could not be read. Monotonic within a request, so a
+     * caller that caches a feed for everyone snapshots it before the build
+     * and declines to cache when it moved, however many pages the build
+     * read. Never decreases; never part of a payload.
+     */
+    public static function authorReadFailures(): int
+    {
+        return self::$authorReadFailures;
+    }
+
+    /**
+     * Any stored row ON (FILTER_VALIDATE_BOOLEAN), the strictest reading of
+     * a duplicated hide flag.
+     *
+     * @param list<string> $rawValues
+     */
+    private static function anyOn(array $rawValues): bool
+    {
+        foreach ($rawValues as $raw) {
+            if (filter_var($raw, FILTER_VALIDATE_BOOLEAN)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** @return array<string, mixed> */

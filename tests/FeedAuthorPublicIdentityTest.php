@@ -68,17 +68,33 @@ final class FeedAuthorPublicIdentityTest extends TestCase
         }
     }
 
+    /**
+     * The `$wpdb` the name inputs are read through (UserMetaRepository's
+     * guarded read), served from `__fa_meta`. Any other statement finds
+     * nothing, so a signed-in viewer's follow-graph read follows nobody.
+     */
+    private static function db(string ...$modes): \BCC\Core\Tests\Stubs\UserMetaWpdb
+    {
+        require_once __DIR__ . '/Stubs/usermeta-wpdb.php';
+        $db        = new \BCC\Core\Tests\Stubs\UserMetaWpdb('__fa_meta');
+        $db->modes = array_values($modes);
+        $GLOBALS['wpdb'] = $db;
+
+        return $db;
+    }
+
     /** @return array<int, array<string, mixed>> */
     private static function hydrate(int $viewerId = 0): array
     {
+        if (!(($GLOBALS['wpdb'] ?? null) instanceof \BCC\Core\Tests\Stubs\UserMetaWpdb)) {
+            self::db();
+        }
         /** @var ActivityFeedService $svc */
         $svc = (new ReflectionClass(ActivityFeedService::class))->newInstanceWithoutConstructor();
         if ($viewerId > 0) {
             // A signed-in viewer makes hydrateAuthors ask the follow graph;
-            // give it a real one over the rendering $wpdb double (follows
-            // nobody), so these tests isolate the name rule.
-            require_once __DIR__ . '/Stubs/rendering-wpdb.php';
-            $GLOBALS['wpdb'] = new \BCC\Core\Tests\Stubs\RenderingWpdb();
+            // give it a real one over the $wpdb double (follows nobody), so
+            // these tests isolate the name rule.
             $graph = (new ReflectionClass(\BCC\Core\PeepSo\PeepSoGraphService::class))->newInstanceWithoutConstructor();
             $prop  = new \ReflectionProperty(ActivityFeedService::class, 'graph');
             $prop->setValue($svc, $graph);
@@ -139,5 +155,59 @@ final class FeedAuthorPublicIdentityTest extends TestCase
     {
         $GLOBALS['__fa_meta'][1]['bcc_privacy_real_name_hidden'] = '0';
         self::assertSame('Alice Smith', self::hydrate(99)[1]['display_name']);
+    }
+
+    public function testDuplicateFlagRowsTakeTheStrictest(): void
+    {
+        $GLOBALS['__fa_meta'][1]['bcc_privacy_real_name_hidden'] = ['0', '1'];
+        self::assertSame('@alice', self::hydrate(99)[1]['display_name']);
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function unreadable(): iterable
+    {
+        yield 'a driver error'     => ['error'];
+        yield 'the pre-flush bail' => ['preflush'];
+    }
+
+    /**
+     * Rationale: M3 (private tracker). A batch whose name inputs cannot be
+     * read shows every other viewer each author's @handle, and counts the
+     * batch so a shared cache can decline to keep the page.
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('unreadable')]
+    public function testAnUnreadableBatchShowsHandlesAndIsCounted(string $mode): void
+    {
+        $GLOBALS['__fa_meta'][1]['bcc_privacy_real_name_hidden'] = '0';
+        $db              = self::db($mode);
+        $db->last_result = [(object) ['user_id' => '1', 'meta_key' => 'bcc_privacy_real_name_hidden', 'meta_value' => '0']];
+        $before          = ActivityFeedService::authorReadFailures();
+
+        $out = self::hydrate(99);
+
+        self::assertSame('@alice', $out[1]['display_name'], 'the handle comes from the primed cache');
+        self::assertSame('@member-2', $out[2]['display_name']);
+        self::assertSame('@dave', $out[4]['display_name']);
+        self::assertSame($before + 1, ActivityFeedService::authorReadFailures());
+    }
+
+    public function testAnUnreadableBatchStillShowsTheAuthorTheirOwnName(): void
+    {
+        self::db('error');
+        self::assertSame('Alice Smith', self::hydrate(1)[1]['display_name']);
+    }
+
+    public function testATrustedBatchIsNotCounted(): void
+    {
+        $before = ActivityFeedService::authorReadFailures();
+        self::hydrate(99);
+        self::assertSame($before, ActivityFeedService::authorReadFailures());
+    }
+
+    public function testOneGuardedReadServesTheWholeBatch(): void
+    {
+        $db = self::db();
+        self::hydrate(0);
+        self::assertSame(1, $db->metaQueries, 'handle and flag for every author, one query');
     }
 }
