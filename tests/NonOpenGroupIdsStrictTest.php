@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BCC\Core\Repositories\Tests\NonOpenStrict;
 
+use BCC\Core\Repositories\PeepSoGroupPrivacy;
 use BCC\Core\Repositories\PeepSoGroupRepository;
 use PHPUnit\Framework\Attributes\CoversMethod;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
@@ -284,7 +285,30 @@ final class NonOpenGroupIdsStrictTest extends TestCase
 
         self::assertStringNotContainsString('post_status', $wpdb->lastSql);
         self::assertStringContainsString("p.post_type = 'peepso-group'", $wpdb->lastSql);
-        self::assertStringContainsString("pm.meta_value IN ('1','2')", $wpdb->lastSql);
+        self::assertStringContainsString(PeepSoGroupPrivacy::nonOpenSql('p.ID'), $wpdb->lastSql);
+    }
+
+    /**
+     * ONE PREDICATE. Both deny lists ask PeepSoGroupPrivacy::nonOpenSql(),
+     * which reads the value with the same `CAST … AS UNSIGNED` as
+     * notSecretSql() and privacyForGroup(), so all four readers agree on
+     * every stored value. PeepSoGroupPrivacyReadTest executes both lists on
+     * SQLite and MySQL; this pins that neither keeps a string compare or a
+     * JOIN of its own.
+     */
+    public function testBothDenyListsUseTheSharedCastPredicateAndNoStringCompare(): void
+    {
+        $wpdb = $this->installWpdb([]);
+
+        PeepSoGroupRepository::getNonOpenGroupIdsStrict(500);
+        self::assertStringContainsString(PeepSoGroupPrivacy::nonOpenSql('p.ID'), $wpdb->lastSql);
+        self::assertStringNotContainsString("meta_value IN ('", $wpdb->lastSql);
+        self::assertStringNotContainsString('JOIN', $wpdb->lastSql, 'a JOIN returns a group once per matching row');
+
+        PeepSoGroupRepository::getNonOpenGroupIds(500);
+        self::assertStringContainsString(PeepSoGroupPrivacy::nonOpenSql('p.ID'), $wpdb->lastSql);
+        self::assertStringNotContainsString("meta_value IN ('", $wpdb->lastSql);
+        self::assertStringNotContainsString('JOIN', $wpdb->lastSql, 'a JOIN returns a group once per matching row');
     }
 
     /**

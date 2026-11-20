@@ -152,6 +152,37 @@ final class PeepSoGroupPrivacyTest extends TestCase
         PeepSoGroupPrivacy::notSecretSql($argument);
     }
 
+    // ── the deny predicate (nonOpenSql) ────────────────────────────────
+
+    /**
+     * The exact text of both predicates. notSecretSql() now goes through the
+     * same builder as nonOpenSql() and must emit what it always did, and
+     * nonOpenSql() must read the value the same way: `CAST … AS UNSIGNED`,
+     * never a string compare. The engines are in PeepSoGroupPrivacyReadTest.
+     */
+    public function testBothPredicatesReadTheValueWithTheSameCast(): void
+    {
+        $row = 'SELECT 1 FROM wp_postmeta bcc_group_priv WHERE bcc_group_priv.post_id = p.ID'
+            . " AND bcc_group_priv.meta_key = 'peepso_group_privacy'"
+            . ' AND CAST(bcc_group_priv.meta_value AS UNSIGNED) ';
+
+        self::assertSame('NOT EXISTS (' . $row . '= 2)', PeepSoGroupPrivacy::notSecretSql('p.ID'));
+        self::assertSame('EXISTS (' . $row . 'IN (1, 2))', PeepSoGroupPrivacy::nonOpenSql('p.ID'));
+    }
+
+    public function testTheDenyPredicateCarriesNoPlaceholderForPrepare(): void
+    {
+        self::assertStringNotContainsString('%', PeepSoGroupPrivacy::nonOpenSql('p.ID'));
+    }
+
+    #[DataProvider('refusedArguments')]
+    public function testTheDenyPredicateRefusesAnythingThatIsNotAColumnReference(string $argument): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('nonOpenSql() takes a column reference');
+        PeepSoGroupPrivacy::nonOpenSql($argument);
+    }
+
     /** @return iterable<string, array{0: string}> */
     public static function refusedArguments(): iterable
     {

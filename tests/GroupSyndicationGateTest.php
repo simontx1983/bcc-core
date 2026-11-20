@@ -133,10 +133,10 @@ final class GroupSyndicationGateTest extends TestCase
     }
 
     /**
-     * ⚠ The writer must not read privacy through get_post_meta() any more. A
-     * failed meta load is cached as "no rows", and `$single = true` saw only
-     * the first row. The meta double would hand back a secret '2' here, so a
-     * writer that still read it would stamp '2' while the table read says 1.
+     * ⚠ The writer reads privacy through ProbesReads (PeepSoGroupPrivacy),
+     * never get_post_meta(). The meta double would hand back a secret '2'
+     * here, so a writer that still read it would stamp '2' while the table
+     * read says 1.
      */
     public function testTheWriterReadsPrivacyFromTheTableNotTheMetaCache(): void
     {
