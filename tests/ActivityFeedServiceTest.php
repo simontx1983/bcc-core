@@ -96,18 +96,16 @@ namespace BCC\Core\Feed\Tests {
             return self::isVisibleGloballyRow(self::rowFor($postId), true);
         }
 
-        // ── F-461: a poisoned meta cache cannot make a group post public ──
+        // ── F-461: the group facts are the row's, never get_post_meta()'s ──
 
         /**
-         * WordPress caches an EMPTY meta array for a post whose meta read
-         * failed, and a persistent object cache keeps it. Here get_post_meta()
-         * says "no group" (the poisoned cache) while the row, read by the
-         * same statement as the post, says it is a members-only post in
-         * group 7: the row wins, and the post is refused.
+         * get_post_meta() says "no group" while the row, read in the same
+         * statement as the post, says it is a members-only post in group 7:
+         * the row decides, and the post is refused.
          */
-        public function testAPoisonedMetaCacheCannotMakeAGroupPostPublic(): void
+        public function testTheRowsGroupFactsWinOverGetPostMeta(): void
         {
-            $GLOBALS['__test_post_meta'][123] = []; // what the poisoned cache answers
+            $GLOBALS['__test_post_meta'][123] = []; // get_post_meta() disagrees with the row
             $row = (object) [
                 'act_external_id'     => '123',
                 'bcc_group_ids'       => '7',

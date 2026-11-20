@@ -1021,12 +1021,9 @@ final class PeepSoActivityRepository
      *   separator between each; NULL with no values), `bcc_post_visibility`
      *   (`_bcc_post_visibility`) and `bcc_privacy_at_post`
      *   ({@see \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST}).
-     *   ⚠⚠ WHY NOT get_post_meta(): WordPress's `update_meta_cache()`
-     *   caches an EMPTY meta array for an id whose meta SELECT failed, and
-     *   with a persistent object cache that answer outlives the fault until
-     *   the post is next edited. Read through it, a closed or secret group's
-     *   members-only post reads as "not a group post" and is served by
-     *   permalink to anyone. Read here, a failed meta read fails THE ROW.
+     *   ⚠⚠ Read in the same statement as the row, through ProbesReads,
+     *   never get_post_meta(): a read that cannot be trusted refuses the
+     *   row.
      *   ⚠ Always read through {@see trustedRows()} (never `get_row()`): a
      *   wpdb bail before `flush()` leaves the PREVIOUS query's row in
      *   `last_result` with no `last_error`, and that would be someone else's

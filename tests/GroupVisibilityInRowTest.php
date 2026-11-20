@@ -19,12 +19,8 @@ require_once __DIR__ . '/Stubs/rendering-wpdb.php';
  * F-461: a post's group visibility is read IN the permalink's row, by the
  * same statement, so a failed meta read fails the row.
  *
- * ⚠⚠ THE DEFECT. getActivityById() decided "is this a group post" through
- * get_post_meta(). WordPress's update_meta_cache() caches an EMPTY meta array
- * for every id whose meta SELECT failed, and a persistent object cache keeps
- * it until the post is next edited. Through that cache a closed or secret
- * group's members-only post read as "not a group post", and the permalink
- * served it, content included, to anyone.
+ * ⚠⚠ Read in the same statement as the row, through ProbesReads, never
+ * get_post_meta(): a read that cannot be trusted refuses the row.
  *
  * ⚠⚠ AND THE ROW MUST BE THIS QUERY'S. wpdb::query() can bail BEFORE flush()
  * (a failed reconnect, an emptied statement), returning false with no
@@ -160,11 +156,11 @@ final class GroupVisibilityInRowTest extends TestCase
     }
 
     /**
-     * The service end to end, through the repository: get_post_meta() is
-     * poisoned (no group), the row says members-only in group 7, and the
-     * permalink refuses before any hydration.
+     * The service end to end, through the repository: get_post_meta() says
+     * "no group", the row says members-only in group 7, and the permalink
+     * refuses before any hydration.
      */
-    public function testAPoisonedMetaCacheCannotOpenAGroupPostByPermalink(): void
+    public function testThePermalinkFollowsTheRowsGroupFactsNotGetPostMeta(): void
     {
         $GLOBALS['__test_post_meta'][123] = [];
         $this->wpdb->resultsToReturn = [self::row(5, '7', 'members_only', null)];

@@ -468,9 +468,9 @@ final class ActivityFeedService
         // unknown-module activity is filtered out in SQL so it can never
         // be resolved by id (same allowlist the global feed query uses).
         $allowedModuleIds = FeedItemNormalizer::publicFeedModuleIds();
-        // F-461: the group visibility comes back IN this row, read by the
-        // same statement, so a failed meta read fails the row instead of
-        // reading as "not a group post" through a poisoned meta cache.
+        // F-461: the group visibility comes back IN this row. Read in the
+        // same statement as the row, through ProbesReads, never
+        // get_post_meta(): a read that cannot be trusted refuses the row.
         $row = PeepSoActivityRepository::getById(
             $actId,
             $allowedModuleIds,
@@ -536,11 +536,8 @@ final class ActivityFeedService
      * ⚠⚠ F-461: THE GROUP FACTS COME FROM THE ROW, NEVER FROM
      * get_post_meta(). `$row` is a getById(withGroupVisibility: true) row,
      * so `bcc_group_ids`, `bcc_post_visibility` and `bcc_privacy_at_post`
-     * were read by the same statement as the row itself. WordPress caches
-     * an EMPTY meta array for an id whose meta read failed, and a
-     * persistent object cache keeps it until the post is edited; through
-     * it, a closed or secret group's members-only post read as "not a
-     * group post" and was served by permalink, content and all.
+     * were read in the same statement as the row, through ProbesReads,
+     * never get_post_meta(): a read that cannot be trusted refuses the row.
      */
     private static function isVisibleGlobally(object $row, bool $deferGroupsToCaller = false): bool
     {
