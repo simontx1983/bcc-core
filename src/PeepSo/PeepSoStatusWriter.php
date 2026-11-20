@@ -389,9 +389,8 @@ final class PeepSoStatusWriter
         // `_bcc_activity_module='blog'` post_meta marker, NOT by the
         // post_type field — see BlogStatusTransitionHandler.
         // ⚠⚠ F-361 — PIN-ONLY, because this is a bare wp_insert_post() and
-        // three PeepSo listeners sit on that CORE hook reading the request:
-        // moods (`mood`), location (`location`) and the anonymous-OP marker
-        // (`anon_id`, which makes the post render as "posted anonymously").
+        // PeepSo listeners sit on that CORE hook and read request input, so
+        // the request is pinned for the duration of the write.
         // Nothing is detached — `wp_insert_post` is WordPress's own hook and
         // emptying it would break far more than it protected — so the pin is
         // the whole control here. {@see PeepSoAddPostGuard::pinOnly()}.
