@@ -831,13 +831,18 @@ add_filter('bcc_system_health', function (array $health): array {
         //     the bound, so it counts as no list (the request answers 503).
         //   - no_last_good: a failed read with no last-good list (503; the
         //     hot feed writes no cache).
-        // ⚠ BAKE BEFORE ALERTING: expected steady state is zero, never yet
-        // observed over a real window. Record first; threshold later.
+        //   - ceiling_reached: more caution/risky members than the reader's
+        //     row ceiling, so the list as read may be missing some of them.
+        // Expected steady state is zero. It alerts like every subsystem
+        // (DegradationAlerter's one threshold: 5 events over the current +
+        // previous hour → P2 mail), which is intended: each event is a
+        // moderation filter that could not be fully applied.
         'caution_list' => [
             'list_read_failed',
             'served_last_good',
             'last_good_expired',
             'no_last_good',
+            'ceiling_reached',
         ],
         // auth_throttle — the route-wide ceilings (300/min) on the two
         // sign-in routes the frontend calls server-side, bcc-trust
