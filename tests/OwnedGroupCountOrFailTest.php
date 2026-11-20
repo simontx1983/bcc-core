@@ -86,16 +86,28 @@ final class OwnedGroupCountOrFailTest extends TestCase
             }
 
             /** The lenient twin's read path. @return string|null */
+            /**
+             * ⚠⚠ FAITHFUL TO wpdb, AND THE FIDELITY IS LOAD-BEARING.
+             * `wpdb::get_var()` calls `query()` and **DISCARDS its return
+             * value**, then reads `last_result[$y]`. It has no idea the
+             * query failed.
+             *
+             * So on a pre-`flush()` bail — where `last_result` still holds
+             * the PREVIOUS query's rows — the real `get_var()` hands back a
+             * value belonging to an unrelated query. An earlier version of
+             * this double returned null there, which made it MORE defensive
+             * than production and let a strict read built on
+             * `get_var()` + `last_error` pass this suite. That is the whole
+             * defect this class exists to remove, so the double must not
+             * paper over it.
+             */
             public function get_var(string $sql): ?string
             {
                 $this->getVars++;
-                $ok = $this->query($sql);
-                if ($ok === false) {
-                    // What wpdb really does: no signal in the return value.
-                    return null;
-                }
+                $this->query($sql); // return deliberately ignored, as wpdb does
+
                 $rows = is_array($this->last_result) ? $this->last_result : [];
-                if ($rows === []) {
+                if ($rows === [] || !isset($rows[0]->owned_count)) {
                     return null;
                 }
                 return (string) $rows[0]->owned_count;
@@ -182,6 +194,35 @@ final class OwnedGroupCountOrFailTest extends TestCase
 
         self::assertSame(0, PeepSoGroupRepository::countOwnedUserGroups(7));
         self::assertNull(PeepSoGroupRepository::countOwnedUserGroupsOrFail(7));
+    }
+
+    /**
+     * ⭐⭐ AND ON A PRE-FLUSH BAIL THE LENIENT TWIN IS WORSE THAN 0 — it
+     * returns a count belonging to an UNRELATED query, because
+     * `wpdb::get_var()` discards `query()`'s return and reads
+     * `last_result`, which the bail never cleared.
+     *
+     * A cap check cannot defend against this at all: 0 at least looks like
+     * "owns none", whereas 99 looks like a real answer and would deny when
+     * it should allow, or allow when it should deny, depending on whose row
+     * was left behind. This is the strongest argument for the strict twin,
+     * and it is only observable because the double is faithful about
+     * `get_var()` ignoring the return value.
+     */
+    public function testOnAPreFlushBailTheLenientTwinReturnsAnotherQuerysCount(): void
+    {
+        $this->wpdb->last_result = [(object) ['owned_count' => '99']];
+        $this->wpdb->mode        = 'pre_flush_bail';
+
+        self::assertSame(
+            99,
+            PeepSoGroupRepository::countOwnedUserGroups(7),
+            'the premise of this PR: the lenient read cannot see the bail'
+        );
+        self::assertNull(
+            PeepSoGroupRepository::countOwnedUserGroupsOrFail(7),
+            'the strict twin must refuse where the lenient one invents an answer'
+        );
     }
 
     // ── the shared SQL ─────────────────────────────────────────────────

@@ -35,9 +35,9 @@ final class PeepSoGroupRepository
     // inline in three places; new reads that gate anything use the trait.
     //
     // ⚠ Loading this file BY PATH now also requires ProbesReads.php first —
-    // bcc-trust's FeedItemReportVisibilityTest and bcc-search's suites do
-    // exactly that, and the trait is not autoloaded there. trust #793 added
-    // that line ahead of this change.
+    // bcc-trust's FeedItemReportVisibilityTest does exactly that, and the
+    // trait is not autoloaded there. trust #793 added that line ahead of
+    // this change. It is the only by-path loader of this file.
     use ProbesReads;
 
     private const TABLE_MEMBERS_SUFFIX = 'peepso_group_members';
