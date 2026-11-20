@@ -41,11 +41,32 @@
  * ⚠ Not PeepSo's own global `PeepSoGroupPrivacy` (its privacy constants).
  *   This class is namespaced and holds BCC's reads.
  *
- * No writes, no reads of its own — it returns a SQL fragment and nothing else.
- * The single-group question ("is THIS group secret") is answered elsewhere, by
- * `BCC\Trust\Core\ValueObjects\PeepSoPrivacy::fromGroupPostId()`, so this class
- * deliberately has no `isSecretOrUnknown()` / `isVisibleTo()` twin: there is no
- * caller for one, and an unused privacy helper is worse than none.
+ * ── The single-group read (F-460) ────────────────────────────────────
+ *
+ * `privacyForGroup()` / `privacyForGroups()` answer "what IS this group's
+ * privacy" for every BCC PHP caller: bcc-trust's `PeepSoPrivacy` (and through
+ * it GroupContextResolver and every group gate), and core's
+ * `PeepSoStatusWriter::attachToGroup()`. They exist because the old answer,
+ * `get_post_meta()`, cannot fail.
+ *
+ * ⚠⚠ WHY NOT get_post_meta(). WordPress's `update_meta_cache()` runs a plain
+ * `get_results()`. When it FAILS, WordPress stores an EMPTY meta set for
+ * every requested id in the `post_meta` object cache. So a failed read is
+ * not just "no rows": it is CACHED as "no rows", for the rest of the
+ * request, and with a persistent object cache until that post's meta is
+ * next written. "No rows" read as Open, so one fault turned a secret group
+ * open for every gate at once.
+ *
+ * These reads go to the table through `ProbesReads::trustedRows()`, never
+ * through the meta cache, and answer NULL when the read cannot be trusted.
+ * That includes the pre-`flush()` bail, where `get_col()` would hand back
+ * the PREVIOUS query's rows with no `last_error`. Callers fail closed on
+ * null.
+ *
+ * Same rule as `notSecretSql()`: the STRICTEST row wins (any 2 → secret,
+ * else any 1 → closed), read with the same `CAST … AS UNSIGNED`, so the
+ * single-group answer can never disagree with the list predicate. A group
+ * with NO privacy row is open (0), for the reason given above.
  *
  * @package BCC\Core\Repositories
  */
@@ -58,8 +79,91 @@ if (!defined('ABSPATH')) {
 
 final class PeepSoGroupPrivacy
 {
+    use ProbesReads;
+
     public const META_KEY = 'peepso_group_privacy';
+    public const OPEN     = 0;
+    public const CLOSED   = 1;
     public const SECRET   = 2;
+
+    /** Ceiling on ids per `privacyForGroups()` call, for §3 bounded queries. */
+    public const BATCH_MAX = 500;
+
+    /**
+     * This group's privacy: 2 secret, 1 closed, 0 open, or NULL when the
+     * read could not be trusted (callers fail closed).
+     *
+     * The STRICTEST of its privacy rows wins, and a group with no row is
+     * open. See the class docblock for why this never goes through
+     * `get_post_meta()`.
+     */
+    public static function privacyForGroup(int $groupId): ?int
+    {
+        if ($groupId <= 0) {
+            return null;
+        }
+
+        $byGroup = self::privacyForGroups([$groupId]);
+
+        return $byGroup === null ? null : ($byGroup[$groupId] ?? null);
+    }
+
+    /**
+     * `privacyForGroup()` for many groups in ONE query, keyed by group id.
+     * Every valid id in the input has an entry: a group with no privacy row
+     * is 0.
+     *
+     * NULL when the read could not be trusted, or the input is over
+     * `BATCH_MAX`. That is refused, never truncated: truncating would answer
+     * for the first N groups and leave the rest unknown with no signal.
+     *
+     * @param list<int> $groupIds
+     * @return array<int, int>|null
+     */
+    public static function privacyForGroups(array $groupIds): ?array
+    {
+        $ids = [];
+        foreach ($groupIds as $id) {
+            $id = (int) $id;
+            if ($id > 0) {
+                $ids[$id] = true;
+            }
+        }
+        $ids = array_keys($ids);
+        if ($ids === []) {
+            return [];
+        }
+        if (count($ids) > self::BATCH_MAX) {
+            return null;
+        }
+
+        global $wpdb;
+        $rows = self::trustedRows($wpdb->prepare(
+            'SELECT post_id, MAX(CASE'
+                . ' WHEN CAST(meta_value AS UNSIGNED) = ' . self::SECRET . ' THEN ' . self::SECRET
+                . ' WHEN CAST(meta_value AS UNSIGNED) = ' . self::CLOSED . ' THEN ' . self::CLOSED
+                . ' ELSE ' . self::OPEN . ' END) AS strictest'
+                . " FROM {$wpdb->postmeta}"
+                . ' WHERE meta_key = %s'
+                . ' AND post_id IN (' . implode(',', array_fill(0, count($ids), '%d')) . ')'
+                . ' GROUP BY post_id',
+            self::META_KEY,
+            ...$ids
+        ));
+        if ($rows === null) {
+            return null;
+        }
+
+        $out = array_fill_keys($ids, self::OPEN);
+        foreach ($rows as $row) {
+            $groupId = (int) ($row->post_id ?? 0);
+            if (isset($out[$groupId])) {
+                $out[$groupId] = (int) ($row->strictest ?? self::OPEN);
+            }
+        }
+
+        return $out;
+    }
 
     /**
      * A WHERE condition that is TRUE when the group whose id is `$idColumn`

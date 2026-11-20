@@ -91,29 +91,108 @@ final class GroupSyndicationGateTest extends TestCase
         self::assertStringContainsString('gsg_at.meta_value IN', $p['where'], 'Gate 12 escape kept');
     }
 
-    /** @return array<string, array{mixed, string}> */
+    /**
+     * What the group privacy read (PeepSoGroupPrivacy::privacyForGroups,
+     * F-460) hands back, and the stamp the writer must record.
+     *
+     * The value side is the read's STRICTEST row, as the engine computes it.
+     * Stray values such as '7' are decided by that SQL, and are pinned
+     * where the SQL is executed (PeepSoGroupPrivacyReadTest).
+     *
+     * @return array<string, array{string, list<object>, string}>
+     */
     public static function privacyCases(): array
     {
         return [
-            'open'       => ['0', '0'],
-            'closed'     => ['1', '1'],
-            'secret'     => ['2', '2'],
-            'missing'    => ['', '0'],
-            'unexpected' => ['7', '0'],
+            'open'           => ['ok', [(object) ['post_id' => '40', 'strictest' => '0']], '0'],
+            'closed'         => ['ok', [(object) ['post_id' => '40', 'strictest' => '1']], '1'],
+            'secret'         => ['ok', [(object) ['post_id' => '40', 'strictest' => '2']], '2'],
+            'no privacy row' => ['ok', [], '0'],
+            // An unreadable privacy is recorded as open: the direction that
+            // DROPS a public_all post once the group is non-open, never leaks.
+            'read failed'    => ['error', [], '0'],
+            'pre-flush bail' => ['preflush', [(object) ['post_id' => '40', 'strictest' => '2']], '0'],
         ];
     }
 
+    /**
+     * @param list<object> $rows
+     */
     #[\PHPUnit\Framework\Attributes\DataProvider('privacyCases')]
-    public function testTheWriterRecordsTheGroupsPrivacyAtPostTime(mixed $groupPrivacy, string $recorded): void
+    public function testTheWriterRecordsTheGroupsPrivacyAtPostTime(string $mode, array $rows, string $recorded): void
     {
         self::defineMetaDoubles();
-        $GLOBALS['__gsg_meta'] = [40 => ['peepso_group_privacy' => $groupPrivacy]];
+        $GLOBALS['__gsg_meta'] = [];
+        $GLOBALS['wpdb']       = self::privacyWpdb($mode, $rows);
 
         PeepSoStatusWriter::attachToGroup(500, 40, 'public_all');
 
         self::assertSame('40', $GLOBALS['__gsg_meta'][500]['peepso_group_id'] ?? null);
         self::assertSame('public_all', $GLOBALS['__gsg_meta'][500]['_bcc_post_visibility'] ?? null);
         self::assertSame($recorded, $GLOBALS['__gsg_meta'][500][GroupSyndicationGate::META_PRIVACY_AT_POST] ?? null);
+    }
+
+    /**
+     * ⚠ The writer must not read privacy through get_post_meta() any more. A
+     * failed meta load is cached as "no rows", and `$single = true` saw only
+     * the first row. The meta double would hand back a secret '2' here, so a
+     * writer that still read it would stamp '2' while the table read says 1.
+     */
+    public function testTheWriterReadsPrivacyFromTheTableNotTheMetaCache(): void
+    {
+        self::defineMetaDoubles();
+        $GLOBALS['__gsg_meta'] = [40 => ['peepso_group_privacy' => '2']];
+        $GLOBALS['wpdb']       = self::privacyWpdb('ok', [(object) ['post_id' => '40', 'strictest' => '1']]);
+
+        PeepSoStatusWriter::attachToGroup(500, 40, 'public_all');
+
+        self::assertSame('1', $GLOBALS['__gsg_meta'][500][GroupSyndicationGate::META_PRIVACY_AT_POST] ?? null);
+    }
+
+    /**
+     * A `$wpdb` double for the privacy read. 'preflush' returns false BEFORE
+     * flush(), with no last_error and the given rows left in last_result.
+     *
+     * @param list<object> $rows
+     */
+    private static function privacyWpdb(string $mode, array $rows): object
+    {
+        return new class ($mode, $rows) {
+            public string $postmeta = 'wp_postmeta';
+            public string $last_error = '';
+            /** @var list<object> */
+            public array $last_result;
+
+            /** @param list<object> $rows */
+            public function __construct(private string $mode, private array $rows)
+            {
+                $this->last_result = $mode === 'preflush' ? $rows : [];
+            }
+
+            /** @param mixed ...$args */
+            public function prepare(string $sql, ...$args): string
+            {
+                return $sql;
+            }
+
+            /** @return int|false */
+            public function query(string $sql)
+            {
+                if ($this->mode === 'preflush') {
+                    return false;
+                }
+                $this->last_error  = '';
+                $this->last_result = [];
+                if ($this->mode === 'error') {
+                    $this->last_error = 'Lost connection to MySQL server during query';
+
+                    return false;
+                }
+                $this->last_result = $this->rows;
+
+                return count($this->rows);
+            }
+        };
     }
 
     private static function defineMetaDoubles(): void

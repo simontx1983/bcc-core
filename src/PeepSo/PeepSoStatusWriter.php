@@ -304,11 +304,21 @@ final class PeepSoStatusWriter
         // (\BCC\Core\Feed\GroupSyndicationGate). An unreadable privacy is
         // recorded as open ('0'), the direction that drops rather than
         // leaks.
-        $privacy = get_post_meta($groupId, 'peepso_group_privacy', true);
-        $privacy = is_scalar($privacy) && in_array((string) $privacy, ['0', '1', '2'], true)
-            ? (string) $privacy
-            : '0';
-        update_post_meta($postId, \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST, $privacy);
+        //
+        // F-460: read through PeepSoGroupPrivacy, never get_post_meta(). A
+        // failed meta load is CACHED as "no rows", and `$single = true`
+        // returned only the FIRST row, so a group carrying '0' and '2'
+        // was stamped open. This read takes the STRICTEST row, and answers
+        // null (stamped '0', as before) when it cannot be trusted.
+        // ⚠ The stamp is written once and never revisited. So an unknown
+        // read stamps a post made in a group that was ALREADY non-open as
+        // '0', and it will not syndicate later: it drops, it never leaks.
+        $privacy = \BCC\Core\Repositories\PeepSoGroupPrivacy::privacyForGroup($groupId);
+        update_post_meta(
+            $postId,
+            \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST,
+            (string) ($privacy ?? \BCC\Core\Repositories\PeepSoGroupPrivacy::OPEN)
+        );
         do_action('peepso_groups_new_post', $groupId, $postId);
     }
 

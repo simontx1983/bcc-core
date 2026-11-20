@@ -63,6 +63,27 @@ namespace {
         $GLOBALS['__bcc_swa_wpdb_installed'] = true;
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
+            public string $postmeta = 'wp_postmeta';
+            public string $last_error = '';
+            /** @var list<object> */
+            public array $last_result = [];
+
+            /**
+             * The group privacy read (PeepSoGroupPrivacy, F-460) that
+             * attachToGroup() stamps from: a successful read with no
+             * privacy row, so the group reads open. No test here asserts
+             * the stamp; GroupSyndicationGateTest does.
+             *
+             * @param string $sql
+             */
+            public function query($sql): int
+            {
+                unset($sql);
+                $this->last_error  = '';
+                $this->last_result = [];
+
+                return 0;
+            }
 
             /** @param mixed ...$args */
             public function prepare(string $sql, ...$args): string
