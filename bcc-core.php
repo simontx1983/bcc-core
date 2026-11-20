@@ -843,6 +843,34 @@ add_filter('bcc_system_health', function (array $health): array {
             'no_last_good',
             'ceiling_reached',
         ],
+        // caution_list — bcc-trust's fail-closed reader of the §O4.1
+        // caution/risky shadow-limit list (F-454), which every per-viewer
+        // feed, the permalink, the anonymous hot feed and member suggestions
+        // EXCLUDE. A failed read used to answer [] and show shadow-limited
+        // authors everywhere, and the anonymous hot feed cached that
+        // unfiltered page for every logged-out reader. Same last-good pattern
+        // as moderation_hidden_ids:
+        //   - list_read_failed: the list read errored (never answered as []).
+        //   - served_last_good: the persisted last-known-good list, no older
+        //     than its 24 h bound, was served; the paired error log carries
+        //     its age.
+        //   - last_good_expired: a failed read whose last-good list is past
+        //     the bound, so it counts as no list (the request answers 503).
+        //   - no_last_good: a failed read with no last-good list (503; the
+        //     hot feed writes no cache).
+        //   - ceiling_reached: more caution/risky members than the reader's
+        //     row ceiling, so the list as read may be missing some of them.
+        // Expected steady state is zero. It alerts like every subsystem
+        // (DegradationAlerter's one threshold: 5 events over the current +
+        // previous hour → P2 mail), which is intended: each event is a
+        // moderation filter that could not be fully applied.
+        'caution_list' => [
+            'list_read_failed',
+            'served_last_good',
+            'last_good_expired',
+            'no_last_good',
+            'ceiling_reached',
+        ],
         // auth_throttle — the route-wide ceilings (300/min) on the two
         // sign-in routes the frontend calls server-side, bcc-trust
         // AuthSupport::allowIdentityAttempt() (F-123 / F-131). Their
