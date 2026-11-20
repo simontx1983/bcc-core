@@ -126,4 +126,45 @@ trait ProbesReads
 
         return is_array($rows) ? array_values($rows) : [];
     }
+
+    /**
+     * The same rows as ASSOCIATIVE ARRAYS, or null when they cannot be
+     * TRUSTED — the `ARRAY_A` sibling of `trustedRows()` (F-472).
+     *
+     * ⚠⚠ WHY THIS EXISTS RATHER THAN CALLERS CASTING. Most reads that need
+     * to tell "no rows" from "the read failed" were written as
+     * `get_results($sql, ARRAY_A)` followed by a `last_error` check, and
+     * their consumers index rows as `$row['col']`. Without an `ARRAY_A`
+     * path, adopting this trait would mean rewriting every one of those
+     * consumers to `$row->col` — a large diff through DTO hydration, for no
+     * behavioural gain. This lets them delegate while their row shape stays
+     * exactly what it was.
+     *
+     * The conversion is the one `wpdb::get_results()` performs for
+     * `ARRAY_A`: `get_object_vars()` per row (wp-includes/class-wpdb.php —
+     * the `ARRAY_A === $output` branch). So a caller that swaps
+     * `get_results($sql, ARRAY_A)` for this gets the same arrays on the
+     * success path, and `null` instead of a silently wrong answer on the
+     * failure path.
+     *
+     * ⚠ Delegates to `trustedRows()` rather than repeating the checks, so
+     * there is ONE failure path for both shapes. A genuine empty result is
+     * `[]`, never null.
+     *
+     * @return list<array<string, mixed>>|null null = the read failed
+     */
+    private static function trustedRowsAssoc(string $sql): ?array
+    {
+        $rows = self::trustedRows($sql);
+        if ($rows === null) {
+            return null;
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $out[] = is_object($row) ? get_object_vars($row) : (array) $row;
+        }
+
+        return $out;
+    }
 }
