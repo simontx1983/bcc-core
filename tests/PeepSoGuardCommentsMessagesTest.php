@@ -294,12 +294,11 @@ final class PeepSoGuardCommentsMessagesTest extends TestCase
      * 0` is deleted from `PINNED_KEYS`.
      *
      * ⚠ And `location` has NO such test on purpose, because none is possible:
-     * it is read with `value()`, which has no raw-body leg at all
-     * (peepso/classes/input.php:38-46). With `$_GET` emptied and `$_POST`
-     * replaced, `value('location')` returns its default whether or not
+     * the reader used for it has no raw-body leg at all. With `$_GET` emptied
+     * and `$_POST` replaced, it returns its default whether or not
      * `'location'` is in `PINNED_KEYS` — the entry cannot change a verdict.
-     * It is kept for symmetry and as a record of the attack surface, and this
-     * is said out loud rather than dressed up as coverage. The same is true
+     * It is kept for symmetry, and this is said out loud rather than dressed
+     * up as coverage. The same is true
      * of every other `value()`-read key in that list; the load-bearing ones
      * are the `int()`-read keys: group_id, page_id, post_as_page, module_id,
      * anon_id, post_id, privacy, allow_multiple and mood.

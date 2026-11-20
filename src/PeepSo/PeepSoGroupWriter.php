@@ -606,9 +606,7 @@ final class PeepSoGroupWriter
         // matching the class name.
         //
         // This is reached from a MEMBER creating a community (trust's
-        // MyGroupsEndpoint), so the three request-reading listeners
-        // (moods.php:47, location.php:90, peepso-anon) see whatever that
-        // member sent.
+        // MyGroupsEndpoint), so the write must stay inside `pinOnly`.
         $group = PeepSoAddPostGuard::pinOnly(
             [], // creating a community drives nothing through the request
             static fn () => new \PeepSoGroup(null, $data)

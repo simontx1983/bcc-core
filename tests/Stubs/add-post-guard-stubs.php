@@ -168,7 +168,7 @@ namespace {
 
     // ── the listeners ───────────────────────────────────────────────────
 
-    /** groups.php:1616 — the HIGH. Stamps the group, notifies its followers. */
+    /** groups.php:1616 — reads the request. Cited for stub fidelity. */
     if (!class_exists('PeepSoGroupsPlugin', false)) {
         class PeepSoGroupsPlugin
         {

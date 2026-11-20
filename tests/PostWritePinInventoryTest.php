@@ -34,11 +34,10 @@ use PHPUnit\Framework\TestCase;
  *
  * ── WHAT COUNTS AS A POST WRITE ─────────────────────────────────────
  *
- * Anything reaching the `wp_insert_post` ACTION, which is where
- * `PeepSoMoods::save_mood` (moods.php:47),
- * `PeepSoLocation::insert_post` (location.php:90) and
- * `PeepSo3_Anon::save_anon_op` (peepso-anon) are registered. ⚠ Every
- * entry in {@see WRITERS} was confirmed by reading WordPress's source.
+ * Anything reaching the `wp_insert_post` ACTION, which third-party
+ * listeners hook. The listener inventory itself is with the security review (private tracker)
+ * — this repo is public. ⚠ Every entry in {@see WRITERS} was confirmed by
+ * reading WordPress's source.
  *
  * ── THE THREE WAYS A NAIVE GUARD IS WRONG ───────────────────────────
  *
