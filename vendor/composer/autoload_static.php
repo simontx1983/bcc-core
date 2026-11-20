@@ -68,6 +68,8 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\Http\\SafeHttpClient' => __DIR__ . '/../..' . '/src/Http/SafeHttpClient.php',
         'BCC\\Core\\Log\\Logger' => __DIR__ . '/../..' . '/src/Log/Logger.php',
         'BCC\\Core\\Mail\\BccMailer' => __DIR__ . '/../..' . '/src/Mail/BccMailer.php',
+        'BCC\\Core\\Meta\\MetaCacheGuard' => __DIR__ . '/../..' . '/src/Meta/MetaCacheGuard.php',
+        'BCC\\Core\\Meta\\MetaReadHealth' => __DIR__ . '/../..' . '/src/Meta/MetaReadHealth.php',
         'BCC\\Core\\NullServices\\NullChainRead' => __DIR__ . '/../..' . '/src/NullServices/NullChainRead.php',
         'BCC\\Core\\NullServices\\NullDisputeAdjudication' => __DIR__ . '/../..' . '/src/NullServices/NullDisputeAdjudication.php',
         'BCC\\Core\\NullServices\\NullOnchainDataRead' => __DIR__ . '/../..' . '/src/NullServices/NullOnchainDataRead.php',
