@@ -67,9 +67,12 @@ namespace BCC\Core\Feed\Tests {
                 static fn (string $id): bool => $id !== ''
             ));
 
+            // The engine returns the complete list's byte length as a string
+            // (SUM(LENGTH(value) + 1) - 1), NULL when there are no values.
             return (object) [
                 'act_external_id'     => (string) $postId,
                 'bcc_group_ids'       => $groups === [] ? null : implode(',', $groups),
+                'bcc_group_ids_len'   => $groups === [] ? null : (string) strlen(implode(',', $groups)),
                 'bcc_post_visibility' => $meta['_bcc_post_visibility'] ?? null,
                 'bcc_privacy_at_post' => $meta['_bcc_post_group_privacy_at_post'] ?? null,
             ];
@@ -108,6 +111,7 @@ namespace BCC\Core\Feed\Tests {
             $row = (object) [
                 'act_external_id'     => '123',
                 'bcc_group_ids'       => '7',
+                'bcc_group_ids_len'   => '1',
                 'bcc_post_visibility' => 'members_only',
                 'bcc_privacy_at_post' => null,
             ];
@@ -125,11 +129,81 @@ namespace BCC\Core\Feed\Tests {
             $row = (object) [
                 'act_external_id'     => '123',
                 'bcc_group_ids'       => '7',
+                'bcc_group_ids_len'   => '1',
                 'bcc_post_visibility' => 'members_only',
                 'bcc_privacy_at_post' => null,
             ];
 
             self::assertFalse(self::isVisibleGloballyRow($row));
+        }
+
+        /**
+         * A row read WITHOUT the group columns (a getById() call that did not
+         * pass withGroupVisibility) is refused, never read as "no group".
+         * Through `?? ''` it used to read as an ungrouped, public post.
+         */
+        public function testARowWithoutTheGroupColumnsIsRefusedNotReadAsUngrouped(): void
+        {
+            $row = (object) ['act_external_id' => '123'];
+
+            self::assertFalse(self::isVisibleGloballyRow($row));
+            self::assertFalse(self::isVisibleGloballyRow($row, true), 'deferring to the caller does not rescue it');
+        }
+
+        /** ...while a NULL column, a post with no group at all, still passes. */
+        public function testANullGroupColumnIsAGenuinelyUngroupedPost(): void
+        {
+            self::assertTrue(self::isVisibleGloballyRow((object) [
+                'act_external_id'     => '123',
+                'bcc_group_ids'       => null,
+                'bcc_group_ids_len'   => null,
+                'bcc_post_visibility' => null,
+                'bcc_privacy_at_post' => null,
+            ]));
+        }
+
+        /**
+         * GROUP_CONCAT() truncates silently at group_concat_max_len. Here
+         * '7,12,13' arrived cut to '7,12,1': the same number of ids, the last
+         * one wrong. Its length (6) is not the complete list's (7), so it is
+         * refused. Without the check it would pass: public_all, made while
+         * non-open.
+         */
+        public function testATruncatedGroupListIsRefused(): void
+        {
+            $row = (object) [
+                'act_external_id'     => '123',
+                'bcc_group_ids'       => '7,12,1',
+                'bcc_group_ids_len'   => '7',
+                'bcc_post_visibility' => 'public_all',
+                'bcc_privacy_at_post' => '1',
+            ];
+
+            self::assertFalse(self::isVisibleGloballyRow($row));
+            self::assertFalse(self::isVisibleGloballyRow($row, true), 'deferring to the caller does not rescue it');
+        }
+
+        /** The same post with its complete list passes: the check is not a blanket refusal. */
+        public function testACompleteGroupListPassesTheLengthCheck(): void
+        {
+            self::assertTrue(self::isVisibleGloballyRow((object) [
+                'act_external_id'     => '123',
+                'bcc_group_ids'       => '7,12,13',
+                'bcc_group_ids_len'   => '7',
+                'bcc_post_visibility' => 'public_all',
+                'bcc_privacy_at_post' => '1',
+            ]));
+        }
+
+        /** A group list with no length to check it against is refused. */
+        public function testAGroupListWithoutItsLengthIsRefused(): void
+        {
+            self::assertFalse(self::isVisibleGloballyRow((object) [
+                'act_external_id'     => '123',
+                'bcc_group_ids'       => '7',
+                'bcc_post_visibility' => 'public_all',
+                'bcc_privacy_at_post' => '1',
+            ]));
         }
 
         public function testInvalidActIdReturnsNullWithoutTouchingTheDb(): void

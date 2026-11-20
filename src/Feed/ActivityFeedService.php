@@ -548,8 +548,27 @@ final class ActivityFeedService
         if ($postId <= 0) {
             return false;
         }
+        // ⚠ A row read WITHOUT the group facts is refused, never read as
+        // "not a group post". property_exists() is true for a NULL column,
+        // so a post that genuinely has no group still passes; only a row
+        // from a getById() call that did not ask for the columns fails.
+        if (!property_exists($row, 'bcc_group_ids')) {
+            return false;
+        }
+        $rawGroupIds = $row->bcc_group_ids;
+        // ⚠ GROUP_CONCAT() TRUNCATES SILENTLY at `group_concat_max_len`
+        // (1024 bytes by default), dropping trailing ids or cutting one in
+        // half. A cut list is refused: its byte length must be exactly the
+        // complete list's, `bcc_group_ids_len`, read by the same statement.
+        // Exact under any server setting, and a COUNT comparison would miss
+        // a half-cut last id ("7,12,1" counts 3, like "7,12,13").
+        if ($rawGroupIds !== null
+            && strlen((string) $rawGroupIds) !== (int) ($row->bcc_group_ids_len ?? -1)
+        ) {
+            return false;
+        }
         $groupIds = array_values(array_filter(
-            array_map('intval', explode(',', (string) ($row->bcc_group_ids ?? ''))),
+            array_map('intval', explode(',', (string) ($rawGroupIds ?? ''))),
             static fn(int $id): bool => $id > 0
         ));
         if ($groupIds === []) {

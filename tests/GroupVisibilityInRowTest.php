@@ -81,9 +81,15 @@ final class GroupVisibilityInRowTest extends TestCase
         foreach (["'peepso_group_id'", "'_bcc_post_visibility'", "'" . GroupSyndicationGate::META_PRIVACY_AT_POST . "'"] as $key) {
             self::assertStringContainsString($key, $sql);
         }
-        foreach (['AS bcc_group_ids', 'AS bcc_post_visibility', 'AS bcc_privacy_at_post'] as $alias) {
+        foreach (['AS bcc_group_ids,', 'AS bcc_group_ids_len', 'AS bcc_post_visibility', 'AS bcc_privacy_at_post'] as $alias) {
             self::assertStringContainsString($alias, $sql);
         }
+        self::assertStringContainsString('SUM(LENGTH(gl.meta_value) + 1) - 1', $sql, "the complete list's byte length, to catch a GROUP_CONCAT truncation");
+        // Each subquery reads ITS key: the SELECT-list placeholders are in order.
+        self::assertStringContainsString("gm.meta_key = 'peepso_group_id'", $sql);
+        self::assertStringContainsString("gl.meta_key = 'peepso_group_id'", $sql);
+        self::assertStringContainsString("vm.meta_key = '_bcc_post_visibility'", $sql);
+        self::assertStringContainsString("sm.meta_key = '" . GroupSyndicationGate::META_PRIVACY_AT_POST . "'", $sql);
         self::assertStringContainsString('a.act_id = 5', $sql, 'the SELECT-list placeholders did not shift the WHERE values');
     }
 
@@ -211,6 +217,7 @@ final class GroupVisibilityInRowTest extends TestCase
             'act_status'          => 'publish',
             'act_repost_id'       => '0',
             'bcc_group_ids'       => $groups,
+            'bcc_group_ids_len'   => $groups === null ? null : (string) strlen($groups),
             'bcc_post_visibility' => $visibility,
             'bcc_privacy_at_post' => $privacyAtPost,
         ];

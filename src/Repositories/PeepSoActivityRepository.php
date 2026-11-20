@@ -1016,7 +1016,9 @@ final class PeepSoActivityRepository
      * @param bool $withGroupVisibility F-461, OPT-IN. Also return the
      *   post's group visibility AS COLUMNS OF THIS ROW, read by this same
      *   statement: `bcc_group_ids` (every `peepso_group_id` value,
-     *   comma-separated, or NULL), `bcc_post_visibility`
+     *   comma-separated, or NULL), `bcc_group_ids_len` (the byte length
+     *   that list has when it is complete: every value's LENGTH plus one
+     *   separator between each; NULL with no values), `bcc_post_visibility`
      *   (`_bcc_post_visibility`) and `bcc_privacy_at_post`
      *   ({@see \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST}).
      *   ⚠⚠ WHY NOT get_post_meta(): WordPress's `update_meta_cache()`
@@ -1058,6 +1060,9 @@ final class PeepSoActivityRepository
                 (SELECT GROUP_CONCAT(gm.meta_value ORDER BY gm.meta_id SEPARATOR ',')
                    FROM {$wpdb->postmeta} gm
                   WHERE gm.post_id = p.ID AND gm.meta_key = %s) AS bcc_group_ids,
+                (SELECT SUM(LENGTH(gl.meta_value) + 1) - 1
+                   FROM {$wpdb->postmeta} gl
+                  WHERE gl.post_id = p.ID AND gl.meta_key = %s) AS bcc_group_ids_len,
                 (SELECT vm.meta_value
                    FROM {$wpdb->postmeta} vm
                   WHERE vm.post_id = p.ID AND vm.meta_key = %s
@@ -1067,6 +1072,7 @@ final class PeepSoActivityRepository
                   WHERE sm.post_id = p.ID AND sm.meta_key = %s
                   ORDER BY sm.meta_id LIMIT 1) AS bcc_privacy_at_post";
             $selectParams = [
+                'peepso_group_id',
                 'peepso_group_id',
                 '_bcc_post_visibility',
                 \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST,
