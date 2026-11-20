@@ -106,12 +106,9 @@ final class PeepSoGifWriter
 
         // ⚠⚠ F-361 — the write goes through the GUARD, never straight to
         // add_post. PeepSo's `peepso_activity_after_add_post` listeners read
-        // the CURRENT REQUEST — query string FIRST — with no authorization of
-        // their own, so without this a create carrying
-        // `?group_id=<a secret group>&module_id=8` lands stamped as that
-        // group's post and notifies its followers, while BCC's group gate
-        // never ran because BCC was never told about a group.
-        // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
+        // request input and carry no authorization of their own, so the guard
+        // pins the request for the duration of the write: only BCC's own
+        // arguments reach them. {@see PeepSoAddPostGuard}.
         //
         // @mentions are NOT kept (F-423): BCC's own NotificationDispatcher
         // notifies mentionees, gated on the post's audience. See the class

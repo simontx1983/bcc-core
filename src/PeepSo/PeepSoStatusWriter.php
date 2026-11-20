@@ -74,7 +74,7 @@ final class PeepSoStatusWriter
      * `peepso_group_id` post-meta and fire `peepso_groups_new_post`.
      * That mirrors what PeepSoGroupsPlugin::after_add_post does at
      * peepso-groups/groups.php:1600 when its $_POST-driven flow fires.
-     * Driving the same `$_POST['group_id'] + module_id=8` path here
+     * Driving PeepSo's routing keys through the request superglobals here
      * was considered but rejected — it would still work, but would
      * leak group state into request superglobals AND collide with
      * `module_id` driving when this writer is shared with future
@@ -161,12 +161,9 @@ final class PeepSoStatusWriter
 
         // ⚠⚠ F-361 — the write goes through the GUARD, never straight to
         // add_post. PeepSo's `peepso_activity_after_add_post` listeners read
-        // the CURRENT REQUEST — query string FIRST — with no authorization of
-        // their own, so without this a create carrying
-        // `?group_id=<a secret group>&module_id=8` lands stamped as that
-        // group's post and notifies its followers, while BCC's group gate
-        // never ran because BCC was never told about a group.
-        // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
+        // request input and carry no authorization of their own, so the guard
+        // pins the request for the duration of the write: only BCC's own
+        // arguments reach them. {@see PeepSoAddPostGuard}.
         //
         // @mentions are NOT kept (F-423): BCC's own NotificationDispatcher
         // notifies mentionees, gated on the post's audience. See the class
@@ -273,7 +270,7 @@ final class PeepSoStatusWriter
      *     `after_add_post` body at line 1630).
      *
      * Mirrors the side effects PeepSoGroupsPlugin::after_add_post would
-     * have produced if we'd driven the $_POST['group_id'] + module_id=8
+     * have produced if we'd driven PeepSo's routing keys through the
      * path. We don't drive that path because (a) it would also stamp
      * the post-meta — second source of truth → race risk; (b) the
      * module_id slot conflicts with the photo/gif writers when this

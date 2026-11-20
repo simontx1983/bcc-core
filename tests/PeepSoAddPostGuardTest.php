@@ -14,15 +14,13 @@ use PHPUnit\Framework\TestCase;
 /**
  * F-361 — a BCC post-create must not let the REQUEST route the post.
  *
- * ⚠⚠ THE BUG. `PeepSoActivity::add_post()` fires
+ * ⚠⚠ THE PROPERTY UNDER TEST. `PeepSoActivity::add_post()` fires
  * `peepso_activity_after_add_post`, and every listener on it but one reads
- * the current request to decide what to do, with no authorization of its own.
- * `PeepSoInput` reads the QUERY STRING FIRST, then `$_POST`, then the raw
- * body. So one BCC create could say two different things: "a post on my own
- * wall" in the JSON body WordPress parses, and `?group_id=<a secret
- * group>&module_id=8` in the query string PeepSo reads. The post came back
- * stamped `peepso_group_id` and PeepSo notified that group's followers, while
- * BCC's group gate never ran — it was never told about a group.
+ * the current request to decide what to do, with no authorization of its
+ * own. So request input BCC never set must not be able to reach a listener
+ * and route the post — the guard pins the request for the duration of the
+ * write so that only BCC's own arguments reach them. The mechanism and the
+ * reachability analysis are with the security review (private tracker).
  *
  * ⚠ WHAT THESE TESTS CAN AND CANNOT SHOW. The listeners here are faithful
  * re-implementations of PeepSo's, cited line by line in
@@ -112,7 +110,7 @@ final class PeepSoAddPostGuardTest extends TestCase
         return $out;
     }
 
-    // ── the HIGH ────────────────────────────────────────────────────────
+    // ── request input must not route the post ────────────────────────────────────────────────────────
 
     /**
      * ⭐ THE FIX. A query string naming a group BCC was never told about does
@@ -358,9 +356,9 @@ final class PeepSoAddPostGuardTest extends TestCase
     }
 
     /**
-     * ⚠ The query string must not beat the values a writer PINS. This is the
-     * sharpest form of the bug: the photo writer sets `module_id = 4` to
-     * drive PeepSo's photo path, and `?module_id=8` used to outrank it.
+     * ⚠ Request input must not beat the values a writer PINS. This is the
+     * sharpest form of it: the photo writer sets a routing value to drive
+     * PeepSo's photo path, and request input used to outrank it.
      */
     public function testAQueryStringCannotOverrideAPinnedValue(): void
     {

@@ -213,15 +213,11 @@ final class PeepSoCommentWriter
         // `wp_insert_post()`, and that fires the `wp_insert_post` action at
         // :5204 with `$update = true`. Traced, not assumed.
         //
-        //   PeepSoMoods::save_mood       moods.php:47     int('mood')
-        //   PeepSoLocation::insert_post  location.php:90  value('location')
-        //   PeepSo3_Anon::save_anon_op   anon.php (peepso-anon) int('anon_id')
-        //
-        // ⚠ And `save_mood`'s "don't touch it unless there's a mood" guard
-        // does NOT save us: the action passes `$post`, so the branch that
-        // DELETES the meta is skipped while `else if ($mood)` still fires.
-        // A delete-my-comment request carrying `?mood=…&location=…`
-        // therefore stamps that meta on the way out.
+        // ⚠ A TRASH is a post write: `wp_trash_post()` reaches the
+        // `wp_insert_post` action, where third-party listeners run and read
+        // request input. A listener that appears to opt out by payload may
+        // still fire on this path, so "it would not do anything here" is not
+        // a reason to leave the write unpinned. Details are with the security review (private tracker).
         //
         // The consequence here is smaller than on a create — the row is
         // being trashed — but an untrash would restore it carrying whatever

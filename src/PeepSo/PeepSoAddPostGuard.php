@@ -13,33 +13,21 @@ if (!defined('ABSPATH')) {
  *
  * ── THE BUG THIS EXISTS FOR ──────────────────────────────────────────
  *
- * `add_post()` fires `peepso_activity_after_add_post`
- * (peepso/activity/classes/activity.php:270), and EVERY listener on that
- * hook except one reads the CURRENT REQUEST to decide what to do — with no
- * authorization check of its own, because in PeepSo's own UI the request
- * was shaped by PeepSo's own form:
+ * `add_post()` fires `peepso_activity_after_add_post`, and EVERY listener
+ * on that hook except one reads the CURRENT REQUEST to decide what to do,
+ * with no authorization check of its own — because in PeepSo's own UI the
+ * request was shaped by PeepSo's own form.
  *
- *   PeepSoGroupsPlugin::after_add_post   groups.php:1616   group_id, module_id
- *   PeepSoPagesPlugin::after_add_post    pages.php:1764    page_id, module_id, post_as_page
- *   PeepSoActivity::handle_embed_data    activity.php:5769 type, embed  → OUTBOUND FETCH
- *   PeepSoSharePhotos::after_add_post    …photos.php:729   type, files
- *   PeepSoSharePhotos::after_add_post_album …photos.php:2212 type, photo, name, privacy, module_id
- *   PeepSoGiphy::after_add_post          giphy.php:408     type, giphy
- *   PeepSoPolls::after_add_post          polls.php:241     options, allow_multiple
- *   PeepSoPostBackgrounds::after_add_post postbackgrounds.php:279 background, text_color, preset_id
+ * ⚠⚠ AND `after_add_post` IS NOT THE ONLY PLACE. That hook runs AFTER the
+ * row exists; others run DURING the same write, including the CORE WordPress
+ * `wp_insert_post` hook and a FILTER on the row about to be written — one of
+ * which can override the audience BCC passed in `$extra` (the F-291
+ * default-audience fix). Two of these were missed in the first pass, which
+ * is why the guard covers the WRITE and not one hook.
  *
- * ⚠⚠ AND `after_add_post` IS NOT THE ONLY PLACE. The listener list above is
- * what runs AFTER the row exists; these run DURING the same write, and two of
- * them were missed in the first pass:
- *
- *   `wp_insert_post` (a CORE WordPress hook, fired inside add_post)
- *     PeepSoMoods::save_mood        moods.php:141     int('mood')      prio 100
- *     PeepSoLocation::insert_post   location.php:248  value('location') prio 30
- *     PeepSo3_Anon::save_anon_op    anon.php:113      int('anon_id')   prio 100
- *   `peepso_activity_insert_data` (a FILTER on the row about to be written)
- *     PeepSoPagesPlugin::activity_insert_data  pages.php:3037  int('page_id')
- *       — forces `act_access` to PUBLIC, overriding the audience BCC passed
- *         in `$extra` (the F-291 default-audience fix)
+ * ⚠ The per-listener inventory — which listener, at which line, reading
+ * which key — is with the security review (private tracker). This repo is public.
+ * {@see PINNED_KEYS} is the operative list.
  *     PeepSoSharePhotos::activity_insert_data  — rewrites act_module_id
  *
  * ⚠ None of those can be DETACHED safely — `wp_insert_post` is WordPress's
@@ -66,33 +54,26 @@ if (!defined('ABSPATH')) {
  * `do_tags` content filter and BCC's MentionExtractor, both reading the
  * stored content, never these listeners.
  *
- * ⚠⚠ AND `PeepSoInput` READS THE QUERY STRING FIRST. Measured in
- * peepso/classes/input.php:
- *
- *   value($k)  $_GET  → $_POST            → (never the raw body)
- *   int($k)    $_GET  → $_POST            → raw body (parse_str of php://input)
- *   raw($k)    —      → $_POST            → (get_raw() at :89 is an EMPTY stub,
- *                                           so $_GET is ignored for raw())
- *
- * Two consequences, and the second is the one that is easy to miss:
- *
- *   1. A BCC REST create can carry its real arguments in the JSON body and
- *      a SECOND, contradictory set in the query string. BCC sees "post on my
- *      own wall"; PeepSo sees `?group_id=<a secret group>&module_id=8` and
- *      stamps `peepso_group_id` on the post, then fires
- *      `peepso_groups_new_post`, which notifies that group's followers. BCC's
- *      group gate never ran, because BCC was never told about a group — and
- *      `peepso_group_id` post-meta is what ~14 BCC files read to decide which
- *      group a post belongs to, so from that moment the post IS that group's
- *      as far as the feeds, {@see \BCC\Core\Repositories\PeepSoGroupRepository}
- *      and the interaction gate are concerned.
- *
- *   2. The query string OUTRANKS the `$_POST` values OUR OWN WRITERS SET.
- *      {@see PeepSoPhotoWriter} sets `$_POST['module_id'] = 4` and
- *      `$_POST['type'] = 'photo'` to drive PeepSo's photo path; a request
- *      carrying `?module_id=8` wins over both. So the integration surface the
- *      writers depend on is itself hijackable, which is why clearing the
- *      superglobals is part of this guard and not a separate nicety.
+     * ⚠⚠ AND PeepSo's INPUT HELPERS DO NOT READ ONLY WHAT BCC SET. One of
+     * them also falls back to the raw request body for a key absent from the
+     * usual places, which is why a key has to be PINNED to a neutral value
+     * rather than unset — the next section depends on exactly that.
+     *
+     * Two consequences, and the second is the one that is easy to miss:
+     *
+     *   1. Request input BCC never set can reach a listener, so a listener
+     *      can stamp post-meta that BCC's own gates never authorised. That
+     *      meta is read across the codebase to decide where a post belongs,
+     *      so a value arriving this way is treated as fact from then on.
+     *
+     *   2. It also outranks the `$_POST` values OUR OWN WRITERS SET to drive
+     *      PeepSo's paths, so the integration surface the writers depend on
+     *      is not trustworthy on its own. That is why clearing the
+     *      superglobals is part of this guard and not a separate nicety.
+     *
+     * ⚠ Deliberately not spelled out here: the specific parameters, their
+     * precedence, and a worked request. This repo is public — that detail is
+     * with the security review (private tracker).
  *
  * ── PIN THE INPUT, THEN DETACH ───────────────────────────────────────
  *
@@ -175,9 +156,10 @@ if (!defined('ABSPATH')) {
  * writers in `src/PeepSo/` rather than in `src/Support/`.
  *
  * ⚠ THIS DOES NOT CONTRADICT {@see PeepSoStatusWriter}'s standing decision.
- * That writer's docblock records that driving `$_POST['group_id'] +
- * module_id=8` was considered and REJECTED because it would "leak group
- * state into request superglobals". It still is rejected: this guard never
+ * That writer's docblock records that driving PeepSo's routing keys through
+ * the request superglobals was considered and REJECTED because it would
+ * "leak group state into request superglobals". It still is rejected: this
+ * guard never
  * WRITES a routing value into a superglobal — it CLEARS the ones an attacker
  * may have supplied. The status writer stays superglobal-free in the sense
  * that decision meant, and keeps stamping groups through
@@ -288,12 +270,8 @@ final class PeepSoAddPostGuard
         'text_color'     => '',
         'preset_id'      => '',
         // ⚠⚠ READ ON `wp_insert_post`, NOT on an after-the-fact action, so
-        // these run inside add_post() AND inside any bare wp_insert_post():
-        //   PeepSoMoods::save_mood         moods.php:141     int('mood')
-        //   PeepSoLocation::insert_post    location.php:248  value('location')
-        //   PeepSo3_Anon::save_anon_op     anon.php:113      int('anon_id')
-        // `anon_id` is already pinned above for the photos path; `mood` and
-        // `location` were missed in the first pass and are a real gap, since
+        // these run inside add_post() AND inside any bare wp_insert_post().
+        // Two were missed in the first pass and are a real gap, since
         // `wp_insert_post` is a CORE hook that can never be detached.
         'mood'           => 0,
         'location'       => '',
@@ -342,15 +320,10 @@ final class PeepSoAddPostGuard
      * PIN-ONLY: no hook is touched, the request is still neutralised.
      *
      * ⚠ For a write that is a bare `wp_insert_post()` rather than an
-     * `add_post()`. Three PeepSo listeners sit on `wp_insert_post` itself and
-     * read the request there:
-     *
-     *   PeepSoMoods::save_mood       moods.php:141     int('mood')
-     *   PeepSoLocation::insert_post  location.php:248  value('location')
-     *   PeepSo3_Anon::save_anon_op   anon.php:113      int('anon_id')
-     *
-     * The last one marks a post "posted anonymously", which is the one with a
-     * privacy consequence rather than a cosmetic one.
+     * ⚠ For a write that is a bare `wp_insert_post()` rather than an
+     * `add_post()`. PeepSo listeners sit on `wp_insert_post` itself and read
+     * request input there; one of them has a privacy consequence rather than
+     * a cosmetic one. The per-listener inventory is with the security review (private tracker).
      *
      * ⚠⚠ DETACHING IS NOT AN OPTION HERE, and that is the whole reason this
      * mode exists. `wp_insert_post` is a CORE WordPress hook: WordPress

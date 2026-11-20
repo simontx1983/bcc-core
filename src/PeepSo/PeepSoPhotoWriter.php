@@ -203,24 +203,19 @@ final class PeepSoPhotoWriter
 
         // ⚠⚠ F-361 — the write goes through the GUARD, never straight to
         // add_post. PeepSo's `peepso_activity_after_add_post` listeners read
-        // the CURRENT REQUEST — query string FIRST — with no authorization of
-        // their own, so without this a create carrying
-        // `?group_id=<a secret group>&module_id=8` lands stamped as that
-        // group's post and notifies its followers, while BCC's group gate
-        // never ran because BCC was never told about a group.
-        // {@see PeepSoAddPostGuard} for the mechanism and the measurements.
+        // request input and carry no authorization of their own, so the guard
+        // pins the request for the duration of the write: only BCC's own
+        // arguments reach them. {@see PeepSoAddPostGuard}.
         //
         // @mentions are NOT kept (F-423): BCC's own NotificationDispatcher
         // notifies mentionees, gated on the post's audience. See the class
         // note on PeepSoTags in {@see PeepSoAddPostGuard}.
         //
-        // ⚠⚠ THIS WRITER IS THE SHARPEST CASE. It sets
-        // `$_POST['module_id'] = 4` to drive PeepSo's photo path — and
-        // `PeepSoInput::int()` reads `$_GET` FIRST, so a request carrying
-        // `?module_id=8` OUTRANKED the value this writer had just set.
-        // The hijack was not merely "a stray parameter is also read": the
-        // integration surface the writer depends on was itself overridable
-        // from the query string.
+        // ⚠⚠ THIS WRITER IS THE SHARPEST CASE. It sets a routing value in
+        // `$_POST` to drive PeepSo's photo path, and request input could
+        // outrank the value the writer had just set — so the integration
+        // surface the writer depends on was itself overridable. Details are
+        // with the security review (private tracker).
         //
         // `PeepSoSharePhotos::after_add_post` is kept here and nowhere else:
         // it is request-driven, but THIS writer is the thing driving it.
@@ -230,7 +225,7 @@ final class PeepSoPhotoWriter
         //
         // ⚠ The three keys this writer drives are PINNED by the guard rather
         // than assigned here — that is the whole fix for this writer, since
-        // assigning them is exactly what `?module_id=8` used to beat. The
+        // assigning them is exactly what request input used to beat. The
         // tmp-file catch stays inside the callable: `around()` adds a
         // `finally`, it does not take this writer's `catch` away.
         //
