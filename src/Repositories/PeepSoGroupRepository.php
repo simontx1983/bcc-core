@@ -47,11 +47,11 @@ final class PeepSoGroupRepository
      */
     private const PRIMARY_HALL_META_KEY = 'bcc_primary_hall_group_id';
 
-    // Non-open privacy values per PeepSo's `peepso_group_privacy` post-meta:
+    // Non-open privacy per PeepSo's `peepso_group_privacy` post-meta:
     //   0 = public (open), 1 = closed, 2 = secret. NFT-gated groups carry
     //   privacy = 1 (closed) plus a sidecar marker — they are a strict
-    //   subset of "non-open." See ValueObjects/PeepSoPrivacy.php.
-    private const NON_OPEN_PRIVACY_VALUES = ['1', '2'];
+    //   subset of "non-open." The deny lists below read it through
+    //   PeepSoGroupPrivacy::nonOpenSql(), never a string compare.
 
     // Cache for getNonOpenGroupIds — generation-counter pattern per §5.
     // Read paths key on `:gen`, write paths bump the generation. Hooks
@@ -1138,9 +1138,11 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * IDs of all published peepso-groups whose privacy is NOT open —
-     * `peepso_group_privacy` post-meta IN ('1', '2'), i.e. closed OR
-     * secret (NFT-gated groups are a closed-privacy subset).
+     * IDs of all published peepso-groups whose privacy is NOT open — a
+     * `peepso_group_privacy` row that reads 1 or 2, i.e. closed OR secret
+     * (NFT-gated groups are a closed-privacy subset). The predicate is
+     * {@see PeepSoGroupPrivacy::nonOpenSql()}, the same reading of the
+     * value as every other BCC privacy read.
      *
      * Bounded list (V1 scale: ~hundreds of groups). Used as the
      * candidate pool the bcc-trust feed layer subtracts the viewer's
@@ -1181,30 +1183,24 @@ final class PeepSoGroupRepository
 
         global $wpdb;
 
-        // INNER JOIN postmeta on peepso_group_privacy IN ('1','2'). The
-        // postmeta (post_id, meta_key) index is one of WP's tightest;
-        // restricting the post side to peepso-group + publish keeps the
-        // candidate set tiny on a real install. Explicit column list.
-        $placeholders = implode(',', array_fill(0, count(self::NON_OPEN_PRIVACY_VALUES), '%s'));
-
+        // ⚠ PeepSoGroupPrivacy::nonOpenSql(), never a JOIN or a string
+        // compare of meta_value: it reads the value with the same CAST as
+        // every other privacy read, and returns each group ONCE however many
+        // privacy rows it carries, so every LIMIT slot is a distinct group.
+        // The EXISTS probe uses the postmeta (post_id, meta_key) index per
+        // group; restricting the post side to peepso-group + publish keeps
+        // the candidate set tiny on a real install. Explicit column list.
         $params = [
-            'peepso_group_privacy',
             self::POST_TYPE,
             self::POST_STATUS,
+            $limit,
         ];
-        foreach (self::NON_OPEN_PRIVACY_VALUES as $val) {
-            $params[] = $val;
-        }
-        $params[] = $limit;
 
         $sql = "SELECT p.ID
                   FROM {$wpdb->posts} p
-            INNER JOIN {$wpdb->postmeta} pm
-                       ON pm.post_id  = p.ID
-                      AND pm.meta_key = %s
                  WHERE p.post_type   = %s
                    AND p.post_status = %s
-                   AND pm.meta_value IN ({$placeholders})
+                   AND " . PeepSoGroupPrivacy::nonOpenSql('p.ID') . "
                  ORDER BY p.ID DESC
                  LIMIT %d";
 
@@ -1270,7 +1266,8 @@ final class PeepSoGroupRepository
      *
      * So this variant returns NULL for both failure modes:
      *
-     *   - the query errored (`get_col` → null). Distinct from empty, and
+     *   - the query errored (`query()` false or `last_error` set; `get_col`
+     *     alone cannot tell, it returns `[]`). Distinct from empty, and
      *     not cached, so one bad query cannot hold the answer for the
      *     cache TTL.
      *   - more rows exist than the caller asked for. Detected by asking
@@ -1298,11 +1295,11 @@ final class PeepSoGroupRepository
      *
      *     SELECT p.post_status, COUNT(*) AS groups
      *       FROM wp_posts p
-     *       INNER JOIN wp_postmeta pm
-     *               ON pm.post_id = p.ID
-     *              AND pm.meta_key = 'peepso_group_privacy'
      *      WHERE p.post_type = 'peepso-group'
-     *        AND pm.meta_value IN ('1','2')
+     *        AND EXISTS (SELECT 1 FROM wp_postmeta pm
+     *                     WHERE pm.post_id = p.ID
+     *                       AND pm.meta_key = 'peepso_group_privacy'
+     *                       AND CAST(pm.meta_value AS UNSIGNED) IN (1, 2))
      *      GROUP BY p.post_status;
      *
      * @return list<int>|null null = cannot answer; caller must fail closed
@@ -1327,8 +1324,6 @@ final class PeepSoGroupRepository
 
         global $wpdb;
 
-        $placeholders = implode(',', array_fill(0, count(self::NON_OPEN_PRIVACY_VALUES), '%s'));
-
         // ⚠ NO post_status FILTER HERE, unlike the lenient lookup.
         //
         // A deny list must be OVER-inclusive to be safe, and filtering to
@@ -1345,23 +1340,20 @@ final class PeepSoGroupRepository
         // the feed uses it as one filter among several, its callers are
         // unchanged, and widening it there would alter feed behaviour for
         // no safety gain.
+        //
+        // ⚠ PeepSoGroupPrivacy::nonOpenSql(), for the reasons in
+        // getNonOpenGroupIds. One row per group also keeps the `$limit + 1`
+        // truncation detector counting groups, not privacy rows.
         $params = [
-            'peepso_group_privacy',
             self::POST_TYPE,
+            // limit + 1: the extra row is the truncation detector.
+            $limit + 1,
         ];
-        foreach (self::NON_OPEN_PRIVACY_VALUES as $val) {
-            $params[] = $val;
-        }
-        // limit + 1: the extra row is the truncation detector.
-        $params[] = $limit + 1;
 
         $sql = "SELECT p.ID
                   FROM {$wpdb->posts} p
-            INNER JOIN {$wpdb->postmeta} pm
-                       ON pm.post_id  = p.ID
-                      AND pm.meta_key = %s
                  WHERE p.post_type   = %s
-                   AND pm.meta_value IN ({$placeholders})
+                   AND " . PeepSoGroupPrivacy::nonOpenSql('p.ID') . "
                  ORDER BY p.ID DESC
                  LIMIT %d";
 

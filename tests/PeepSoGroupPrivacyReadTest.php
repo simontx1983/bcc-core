@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
 
     use BCC\Core\Repositories\PeepSoGroupPrivacy;
+    use BCC\Core\Repositories\PeepSoGroupRepository;
     use PDO;
     use PHPUnit\Framework\Attributes\CoversClass;
+    use PHPUnit\Framework\Attributes\PreserveGlobalState;
+    use PHPUnit\Framework\Attributes\RunInSeparateProcess;
     use PHPUnit\Framework\TestCase;
 
     /**
@@ -99,7 +102,9 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
      *     BCC_TEST_DB_PORT), over the cases the rule exists for: two-row
      *     groups, stray values, no row. It is also checked against
      *     `notSecretSql()` on the same data, so the single-group answer
-     *     cannot disagree with the list predicate.
+     *     cannot disagree with the list predicate, and against BOTH deny
+     *     lists (`getNonOpenGroupIds` / `…Strict`, through `nonOpenSql()`),
+     *     so a group is denied exactly when the single read says 1 or 2.
      */
     #[CoversClass(PeepSoGroupPrivacy::class)]
     final class PeepSoGroupPrivacyReadTest extends TestCase
@@ -257,8 +262,20 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
                 48 => [['2 '], 2],          // CAST AS UNSIGNED, as notSecretSql
                 49 => [['7'], 0],           // a stray value is open, as notSecretSql
                 50 => [['abc'], 0],
+                // Every reader CASTs, so these read 2 in all four.
+                51 => [[' 2'], 2],
+                52 => [['02'], 2],
+                53 => [['1', '2'], 2],      // two non-open rows: still ONE deny-list entry
             ];
         }
+
+        /**
+         * Rows outside the grid, for the deny lists only: a TRASHED secret
+         * group (the strict list keeps it, the lenient one does not) and a
+         * non-group post carrying a privacy row (neither list).
+         */
+        private const TRASHED_SECRET_GROUP = 60;
+        private const NON_GROUP_POST       = 61;
 
         public function testTheRuleExecutesOnSqlite(): void
         {
@@ -269,10 +286,45 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
                 self::markTestSkipped('pdo_sqlite is not loaded (run with -d extension=pdo_sqlite).');
             }
 
-            $this->assertRuleOnEngine(new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]));
+            $this->assertRuleOnEngine(self::sqlite());
         }
 
         public function testTheRuleExecutesOnMysql(): void
+        {
+            $this->assertRuleOnEngine(self::mysql());
+        }
+
+        /**
+         * The deny lists, executed. Separate processes: they need the
+         * object-cache stubs, which must not leak into this in-process file.
+         */
+        #[RunInSeparateProcess]
+        #[PreserveGlobalState(false)]
+        public function testTheDenyListsExecuteOnSqlite(): void
+        {
+            $this->assertDenyListsOnEngine(self::sqlite());
+        }
+
+        #[RunInSeparateProcess]
+        #[PreserveGlobalState(false)]
+        public function testTheDenyListsExecuteOnMysql(): void
+        {
+            $this->assertDenyListsOnEngine(self::mysql());
+        }
+
+        private static function sqlite(): PDO
+        {
+            if (!extension_loaded('pdo_sqlite')) {
+                if (getenv('GITHUB_ACTIONS') === 'true') {
+                    self::fail('pdo_sqlite must be loaded in CI: this is the only test that executes the group privacy read.');
+                }
+                self::markTestSkipped('pdo_sqlite is not loaded (run with -d extension=pdo_sqlite).');
+            }
+
+            return new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        }
+
+        private static function mysql(): PDO
         {
             $port = getenv('BCC_TEST_DB_PORT');
             if ($port === false || $port === '') {
@@ -282,7 +334,7 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
                 self::markTestSkipped('pdo_mysql is not loaded (run with -d extension=pdo_mysql).');
             }
 
-            $this->assertRuleOnEngine(new PDO(
+            return new PDO(
                 sprintf(
                     'mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4',
                     getenv('BCC_TEST_DB_HOST') ?: '127.0.0.1',
@@ -292,12 +344,19 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
                 getenv('BCC_TEST_DB_USER') ?: 'root',
                 getenv('BCC_TEST_DB_PASS') ?: 'root',
                 [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
-            ));
+            );
         }
 
-        private function assertRuleOnEngine(PDO $pdo): void
+        /**
+         * Create the two tables, seed the grid plus the deny-list extras,
+         * and install a PDO-backed `$wpdb`. Returns each grid group's answer.
+         *
+         * @return array<int, int>
+         */
+        private function seedEngine(PDO $pdo): array
         {
-            $pdo->exec('CREATE TEMPORARY TABLE ' . self::PREFIX . 'posts (ID INT NOT NULL)');
+            $pdo->exec('CREATE TEMPORARY TABLE ' . self::PREFIX . 'posts ('
+                . "ID INT NOT NULL, post_type VARCHAR(20) NOT NULL DEFAULT 'peepso-group', post_status VARCHAR(20) NOT NULL DEFAULT 'publish')");
             $pdo->exec('CREATE TEMPORARY TABLE ' . self::PREFIX . 'postmeta ('
                 . 'meta_id INT NOT NULL, post_id INT NOT NULL, meta_key VARCHAR(255) NOT NULL, meta_value TEXT NULL)');
 
@@ -313,13 +372,56 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
             // Another key on the same group must not count.
             $insertMeta->execute([$metaId++, 41, '_bcc_group_kind', '2']);
 
-            $wpdb = new PdoWpdb($pdo, self::PREFIX);
-            $GLOBALS['wpdb'] = $wpdb;
+            $pdo->prepare('INSERT INTO ' . self::PREFIX . "posts (ID, post_status) VALUES (?, 'trash')")
+                ->execute([self::TRASHED_SECRET_GROUP]);
+            $insertMeta->execute([$metaId++, self::TRASHED_SECRET_GROUP, PeepSoGroupPrivacy::META_KEY, '2']);
+            $pdo->prepare('INSERT INTO ' . self::PREFIX . "posts (ID, post_type) VALUES (?, 'post')")
+                ->execute([self::NON_GROUP_POST]);
+            $insertMeta->execute([$metaId++, self::NON_GROUP_POST, PeepSoGroupPrivacy::META_KEY, '2']);
+
+            $GLOBALS['wpdb'] = new PdoWpdb($pdo, self::PREFIX);
 
             $expected = [];
             foreach (self::grid() as $groupId => [, $answer]) {
                 $expected[$groupId] = $answer;
             }
+
+            return $expected;
+        }
+
+        /**
+         * Both deny lists on the seeded engine: a group is denied exactly when
+         * `privacyForGroup()` answers 1 or 2, ONCE however many rows it has,
+         * newest first. Strict also keeps the trashed secret group.
+         */
+        private function assertDenyListsOnEngine(PDO $pdo): void
+        {
+            require_once __DIR__ . '/Stubs/object-cache-stubs.php';
+            \BccTestPersistentCache::reset();
+
+            $expected = $this->seedEngine($pdo);
+
+            $nonOpen = array_keys(array_filter($expected, static fn (int $v): bool => $v !== PeepSoGroupPrivacy::OPEN));
+            rsort($nonOpen);
+            foreach ($nonOpen as $groupId) {
+                self::assertSame($expected[$groupId], PeepSoGroupPrivacy::privacyForGroup($groupId), "group {$groupId} reads non-open");
+            }
+
+            self::assertSame($nonOpen, PeepSoGroupRepository::getNonOpenGroupIds(500), 'the lenient deny list');
+
+            $strict = array_merge([self::TRASHED_SECRET_GROUP], $nonOpen);
+            self::assertSame($strict, PeepSoGroupRepository::getNonOpenGroupIdsStrict(500), 'the strict deny list');
+
+            // At exactly the number of non-open groups the strict list still
+            // answers: a group's second row no longer takes a slot and trips
+            // the truncation detector.
+            \BccTestPersistentCache::reset();
+            self::assertSame($strict, PeepSoGroupRepository::getNonOpenGroupIdsStrict(count($strict)), 'one slot per group');
+        }
+
+        private function assertRuleOnEngine(PDO $pdo): void
+        {
+            $expected = $this->seedEngine($pdo);
 
             self::assertSame($expected, PeepSoGroupPrivacy::privacyForGroups(array_keys($expected)), 'the batch read');
             foreach ($expected as $groupId => $answer) {
@@ -385,6 +487,21 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
             $this->last_result = $statement === false ? [] : $statement->fetchAll(PDO::FETCH_OBJ);
 
             return count($this->last_result);
+        }
+
+        /**
+         * Like wpdb: ALWAYS an array, the first column as strings. With a
+         * null `$sql` it reads the `last_result` already fetched.
+         *
+         * @return list<string>
+         */
+        public function get_col(?string $sql = null): array
+        {
+            if ($sql !== null && $sql !== '') {
+                $this->query($sql);
+            }
+
+            return array_map(static fn (object $r): string => (string) array_values(get_object_vars($r))[0], $this->last_result);
         }
     }
 }

@@ -31,12 +31,19 @@
  *   no-row case is a theoretical edge, and treating it as secret would hide
  *   every group on an install whose meta had not been written yet.
  *
- * ⚠ NOT the deny-list reads. {@see PeepSoGroupRepository::getNonOpenGroupIds()}
- *   and `getNonOpenGroupIdsStrict()` ask the opposite question — "which groups
- *   are closed OR secret" — to build an exclusion set. Their
- *   `INNER JOIN … meta_value IN ('1','2')` already MATCHES a two-row group,
- *   which is the fail-closed direction and correct. Do not route them through
- *   this class: an allow-list predicate would invert their safety.
+ * ⚠ The deny-list reads use `nonOpenSql()`, NEVER `notSecretSql()`.
+ *   {@see PeepSoGroupRepository::getNonOpenGroupIds()} and
+ *   `getNonOpenGroupIdsStrict()` ask the opposite question — "which groups
+ *   are closed OR secret" — to build an exclusion set, and an allow-list
+ *   predicate would invert their safety. `nonOpenSql()` is
+ *   `EXISTS (a row that reads 1 or 2)`: it matches a two-row group (the
+ *   fail-closed direction) and returns each group once.
+ *
+ * ⚠ ONE READING OF THE VALUE. Every reader here goes through `valueSql()`,
+ *   `CAST(meta_value AS UNSIGNED)`, so the list predicate, the deny
+ *   predicate and the single-group read always agree on what a stored value
+ *   means (`'2'`, `' 2'`, `'02'` are all 2). Never compare `meta_value` as a
+ *   string in a privacy read.
  *
  * ⚠ Not PeepSo's own global `PeepSoGroupPrivacy` (its privacy constants).
  *   This class is namespaced and holds BCC's reads.
@@ -46,22 +53,12 @@
  * `privacyForGroup()` / `privacyForGroups()` answer "what IS this group's
  * privacy" for every BCC PHP caller: bcc-trust's `PeepSoPrivacy` (and through
  * it GroupContextResolver and every group gate), and core's
- * `PeepSoStatusWriter::attachToGroup()`. They exist because the old answer,
- * `get_post_meta()`, cannot fail.
+ * `PeepSoStatusWriter::attachToGroup()`.
  *
- * ⚠⚠ WHY NOT get_post_meta(). WordPress's `update_meta_cache()` runs a plain
- * `get_results()`. When it FAILS, WordPress stores an EMPTY meta set for
- * every requested id in the `post_meta` object cache. So a failed read is
- * not just "no rows": it is CACHED as "no rows", for the rest of the
- * request, and with a persistent object cache until that post's meta is
- * next written. "No rows" read as Open, so one fault turned a secret group
- * open for every gate at once.
- *
- * These reads go to the table through `ProbesReads::trustedRows()`, never
- * through the meta cache, and answer NULL when the read cannot be trusted.
- * That includes the pre-`flush()` bail, where `get_col()` would hand back
- * the PREVIOUS query's rows with no `last_error`. Callers fail closed on
- * null.
+ * ⚠⚠ Read through ProbesReads, never get_post_meta(): a read that cannot be
+ * trusted answers null, and callers fail closed. These reads go to the table
+ * through `ProbesReads::trustedRows()`, which also answers null on wpdb's
+ * pre-`flush()` early return (`query()` false with no `last_error`).
  *
  * Same rule as `notSecretSql()`: the STRICTEST row wins (any 2 → secret,
  * else any 1 → closed), read with the same `CAST … AS UNSIGNED`, so the
@@ -140,8 +137,8 @@ final class PeepSoGroupPrivacy
         global $wpdb;
         $rows = self::trustedRows($wpdb->prepare(
             'SELECT post_id, MAX(CASE'
-                . ' WHEN CAST(meta_value AS UNSIGNED) = ' . self::SECRET . ' THEN ' . self::SECRET
-                . ' WHEN CAST(meta_value AS UNSIGNED) = ' . self::CLOSED . ' THEN ' . self::CLOSED
+                . ' WHEN ' . self::valueSql() . ' = ' . self::SECRET . ' THEN ' . self::SECRET
+                . ' WHEN ' . self::valueSql() . ' = ' . self::CLOSED . ' THEN ' . self::CLOSED
                 . ' ELSE ' . self::OPEN . ' END) AS strictest'
                 . " FROM {$wpdb->postmeta}"
                 . ' WHERE meta_key = %s'
@@ -184,26 +181,69 @@ final class PeepSoGroupPrivacy
      */
     public static function notSecretSql(string $idColumn): string
     {
-        if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/', $idColumn) !== 1) {
-            throw new \InvalidArgumentException('notSecretSql() takes a column reference such as p.ID.');
-        }
+        self::assertColumnReference($idColumn, 'notSecretSql');
 
-        return 'NOT EXISTS (' . self::secretRowSql($idColumn) . ')';
+        return 'NOT EXISTS (' . self::privacyRowSql($idColumn, '= ' . self::SECRET) . ')';
     }
 
     /**
-     * The secret-row predicate: a privacy row for the group whose value reads
-     * as 2. `CAST … AS UNSIGNED` matches the comparison the bcc-core and
-     * bcc-search copies used before this class, so a row stored as `'2'`,
-     * `'2 '` or `2` is caught identically either way.
+     * A WHERE condition that is TRUE when the group whose id is `$idColumn`
+     * is closed OR secret: the deny-list question.
+     *
+     *     $where[] = PeepSoGroupPrivacy::nonOpenSql('p.ID');
+     *
+     * TRUE when ANY privacy row reads 1 or 2, which is exactly when
+     * `privacyForGroup()` answers 1 or 2: a two-row group with `'0'` and
+     * `'2'` is non-open, and a group with no row is not. It needs no JOIN,
+     * so each group comes back once however many rows it carries. The old
+     * `INNER JOIN` returned a group once PER matching row, and the duplicate
+     * took a `LIMIT` slot.
+     *
+     * Same contract as `notSecretSql()`: no `%`, no placeholders.
+     *
+     * @param string $idColumn a column reference such as `p.ID`, never input
+     * @throws \InvalidArgumentException when `$idColumn` is not a column reference
      */
-    private static function secretRowSql(string $idSql): string
+    public static function nonOpenSql(string $idColumn): string
+    {
+        self::assertColumnReference($idColumn, 'nonOpenSql');
+
+        return 'EXISTS (' . self::privacyRowSql($idColumn, 'IN (' . self::CLOSED . ', ' . self::SECRET . ')') . ')';
+    }
+
+    /**
+     * @throws \InvalidArgumentException when `$idColumn` is not a column reference
+     */
+    private static function assertColumnReference(string $idColumn, string $method): void
+    {
+        if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/', $idColumn) !== 1) {
+            throw new \InvalidArgumentException($method . '() takes a column reference such as p.ID.');
+        }
+    }
+
+    /**
+     * A privacy row for the group whose value, read by `valueSql()`, passes
+     * `$valueTest` (`= 2`, `IN (1, 2)`).
+     */
+    private static function privacyRowSql(string $idSql, string $valueTest): string
     {
         global $wpdb;
 
         return "SELECT 1 FROM {$wpdb->postmeta} bcc_group_priv"
             . " WHERE bcc_group_priv.post_id = {$idSql}"
             . " AND bcc_group_priv.meta_key = '" . self::META_KEY . "'"
-            . ' AND CAST(bcc_group_priv.meta_value AS UNSIGNED) = ' . self::SECRET;
+            . ' AND ' . self::valueSql('bcc_group_priv.') . ' ' . $valueTest;
+    }
+
+    /**
+     * The ONE reading of a privacy value, shared by every reader in this
+     * class. `CAST … AS UNSIGNED` matches the comparison the bcc-core and
+     * bcc-search copies used before this class, so a row stored as `'2'`,
+     * `'2 '`, `' 2'` or `2` reads the same everywhere. Never compare
+     * `meta_value` as a string: see the class docblock.
+     */
+    private static function valueSql(string $qualifier = ''): string
+    {
+        return 'CAST(' . $qualifier . 'meta_value AS UNSIGNED)';
     }
 }
