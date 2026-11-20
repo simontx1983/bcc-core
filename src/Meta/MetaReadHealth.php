@@ -8,13 +8,12 @@
  * turn one transient fault into a sticky refusal.
  *
  * ⚠ NOTHING READS THIS YET, and that is intentional. {@see MetaCacheGuard}
- * stops a failed meta read from being CACHED, which is the containment half
- * and carries no behaviour change while the database is healthy. It does not
- * make `get_post_meta()` fail closed — a failed read still answers `''` for
- * that one request, because `get_metadata_raw()` turns a short-circuited
- * `update_meta_cache()` into `null` and then into `''`. Closing that
- * residual means teaching individual gates to refuse, which is F-460 /
- * F-461's job and a user-visible change that deserves its own review.
+ * verifies a meta read before its result is cached, which is the containment
+ * half and carries no behaviour change while the database is healthy. It does
+ * not make `get_post_meta()` fail closed: the request a failure happened in
+ * still reads the meta as absent. Closing that residual means teaching
+ * individual gates to refuse, which is F-460 / F-461's job and a user-visible
+ * change that deserves its own review.
  *
  * This class exists so those tickets have a signal to consume instead of
  * re-deriving one, and so the failure is observable now

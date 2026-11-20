@@ -30,6 +30,16 @@ if (!defined('ABSPATH')) {
  */
 final class PeepSoGroupRepository
 {
+    // The ONE implementation of "run a SELECT and know whether its rows can
+    // be trusted" (F-472). This file previously hand-rolled those checks
+    // inline in three places; new reads that gate anything use the trait.
+    //
+    // ⚠ Loading this file BY PATH now also requires ProbesReads.php first —
+    // bcc-trust's FeedItemReportVisibilityTest does exactly that, and the
+    // trait is not autoloaded there. trust #793 added that line ahead of
+    // this change. It is the only by-path loader of this file.
+    use ProbesReads;
+
     private const TABLE_MEMBERS_SUFFIX = 'peepso_group_members';
     private const POST_TYPE            = 'peepso-group';
     private const POST_STATUS          = 'publish';
@@ -846,10 +856,73 @@ final class PeepSoGroupRepository
         }
 
         global $wpdb;
+
+        return (int) $wpdb->get_var(self::ownedUserGroupsCountSql($userId));
+    }
+
+    /**
+     * The same count, but it tells you when it DOES NOT KNOW.
+     *
+     * `?int` — null means the read could not be trusted. A real answer is
+     * an int, and 0 is a real answer ("owns none").
+     *
+     * ⚠⚠ WHY THIS EXISTS. {@see countOwnedUserGroups} returns `int`, and
+     * `get_var()` answers null for a failed read, which `(int)` turns into
+     * **0** — indistinguishable from "owns none". A caller comparing the
+     * count against a cap therefore reads a failed read as the most
+     * permissive possible answer, and the §21.2 custody cap is a WRITE
+     * authorization: whatever it lets through stays granted after the fault
+     * clears. {@see \BCC\Trust\Core\Services\Capability\CapabilityResolver}
+     * consumes this one and refuses when it is null.
+     *
+     * Read through {@see ProbesReads::trustedRows()}, which checks
+     * `query()`'s own return as well as `last_error` — `get_var()` discards
+     * that return, and `wpdb::query()` has failure paths that set no
+     * `last_error`.
+     *
+     * ⚠ A COUNT always returns exactly one row, so zero rows is not an
+     * empty result — it means the read cannot be relied on, and that is
+     * null too rather than 0.
+     *
+     * Same lenient/strict pairing as
+     * {@see getMembershipStatusOrFail} and {@see getNonOpenGroupIdsStrict}.
+     * INTENTIONALLY UNCACHED, for the reason on the lenient twin.
+     */
+    public static function countOwnedUserGroupsOrFail(int $userId): ?int
+    {
+        // Not a read failure: no read is needed to know the answer.
+        if ($userId <= 0) {
+            return 0;
+        }
+
+        $rows = self::trustedRows(self::ownedUserGroupsCountSql($userId));
+        if ($rows === null) {
+            return null;
+        }
+
+        $row = $rows[0] ?? null;
+        if (!is_object($row) || !isset($row->owned_count)) {
+            return null;
+        }
+
+        return (int) $row->owned_count;
+    }
+
+    /**
+     * The one COUNT both twins run, so they cannot drift.
+     *
+     * ⚠ Aliased `owned_count` because the strict twin reads rows as
+     * objects; an unaliased `COUNT(*)` arrives as a property named
+     * `COUNT(*)`. The alias changes nothing for `get_var()`, which takes
+     * the first column whatever it is called.
+     */
+    private static function ownedUserGroupsCountSql(int $userId): string
+    {
+        global $wpdb;
         $members = self::membersTable();
 
-        $sql = $wpdb->prepare(
-            "SELECT COUNT(*)
+        return (string) $wpdb->prepare(
+            "SELECT COUNT(*) AS owned_count
                FROM {$members} gm
          INNER JOIN {$wpdb->posts} p ON p.ID = gm.gm_group_id
           LEFT JOIN {$wpdb->postmeta} pm_kind ON pm_kind.post_id = p.ID
@@ -865,8 +938,6 @@ final class PeepSoGroupRepository
             self::POST_TYPE,
             self::POST_STATUS
         );
-
-        return (int) $wpdb->get_var($sql);
     }
 
     /**
