@@ -1013,6 +1013,22 @@ final class PeepSoActivityRepository
      *   comment post carries no `peepso_group_id`, so letting a comment row
      *   resolve on a feed-shaped path makes it readable by link no matter
      *   which group it lives in. Pass `true`/`false` to decide explicitly.
+     * @param bool $withGroupVisibility F-461, OPT-IN. Also return the
+     *   post's group visibility AS COLUMNS OF THIS ROW, read by this same
+     *   statement: `bcc_group_ids` (every `peepso_group_id` value,
+     *   comma-separated, or NULL), `bcc_group_ids_len` (the byte length
+     *   that list has when it is complete: every value's LENGTH plus one
+     *   separator between each; NULL with no values), `bcc_post_visibility`
+     *   (`_bcc_post_visibility`) and `bcc_privacy_at_post`
+     *   ({@see \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST}).
+     *   ⚠⚠ Read in the same statement as the row, through ProbesReads,
+     *   never get_post_meta(): a read that cannot be trusted refuses the
+     *   row.
+     *   ⚠ Always read through {@see trustedRows()} (never `get_row()`): a
+     *   wpdb bail before `flush()` leaves the PREVIOUS query's row in
+     *   `last_result` with no `last_error`, and that would be someone else's
+     *   row deciding visibility. A failed read throws when
+     *   `$throwOnReadFailure`, and is null (refused) otherwise.
      * @phpstan-return ActivityRow|null
      * @throws ActivityReadFailedException only when `$throwOnReadFailure` is true
      */
@@ -1023,12 +1039,42 @@ final class PeepSoActivityRepository
         bool $enforcePostVisibility = false,
         int $viewerId = 0,
         bool $throwOnReadFailure = false,
-        ?bool $topLevelOnly = null
+        ?bool $topLevelOnly = null,
+        bool $withGroupVisibility = false
     ): ?object {
         global $wpdb;
 
         $where  = ['a.act_id = %d'];
         $params = [$actId];
+
+        // F-461: the group-visibility meta, as columns of the SAME statement.
+        // Their placeholders sit in the SELECT list, before the WHERE, so
+        // their values go first.
+        $groupColumns = '';
+        $selectParams = [];
+        if ($withGroupVisibility) {
+            $groupColumns = ",
+                (SELECT GROUP_CONCAT(gm.meta_value ORDER BY gm.meta_id SEPARATOR ',')
+                   FROM {$wpdb->postmeta} gm
+                  WHERE gm.post_id = p.ID AND gm.meta_key = %s) AS bcc_group_ids,
+                (SELECT SUM(LENGTH(gl.meta_value) + 1) - 1
+                   FROM {$wpdb->postmeta} gl
+                  WHERE gl.post_id = p.ID AND gl.meta_key = %s) AS bcc_group_ids_len,
+                (SELECT vm.meta_value
+                   FROM {$wpdb->postmeta} vm
+                  WHERE vm.post_id = p.ID AND vm.meta_key = %s
+                  ORDER BY vm.meta_id LIMIT 1) AS bcc_post_visibility,
+                (SELECT sm.meta_value
+                   FROM {$wpdb->postmeta} sm
+                  WHERE sm.post_id = p.ID AND sm.meta_key = %s
+                  ORDER BY sm.meta_id LIMIT 1) AS bcc_privacy_at_post";
+            $selectParams = [
+                'peepso_group_id',
+                'peepso_group_id',
+                '_bcc_post_visibility',
+                \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST,
+            ];
+        }
         if ($allowedModuleIds !== null) {
             if ($allowedModuleIds === []) {
                 return null;
@@ -1078,19 +1124,29 @@ final class PeepSoActivityRepository
         }
 
         $prepared = $wpdb->prepare(
-            'SELECT ' . self::COLUMNS . '
+            'SELECT ' . self::COLUMNS . $groupColumns . '
                FROM ' . self::table() . ' a
                INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                ' . $authorAccJoin . '
               WHERE ' . implode(' AND ', $where) . '
               LIMIT 1',
-            ...$params
+            ...array_merge($selectParams, $params)
         );
 
         // F-275: see getActivities(). Same statement, read so that a
         // failure throws; a genuine miss is still null.
         if ($throwOnReadFailure) {
             return self::trustedActivityRows($prepared, 'getById')[0] ?? null;
+        }
+
+        // F-461: the row decides visibility, so it must be THIS query's row.
+        // A failed (or pre-flush) read is a refusal, never a stale row.
+        if ($withGroupVisibility) {
+            $rows = self::trustedRows((string) $prepared);
+
+            /** @phpstan-var ActivityRow|null $row */
+            $row = $rows === null ? null : ($rows[0] ?? null);
+            return $row;
         }
 
         /** @phpstan-var ActivityRow|null $row */

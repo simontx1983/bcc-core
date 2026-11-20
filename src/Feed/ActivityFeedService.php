@@ -480,13 +480,17 @@ final class ActivityFeedService
         // unknown-module activity is filtered out in SQL so it can never
         // be resolved by id (same allowlist the global feed query uses).
         $allowedModuleIds = FeedItemNormalizer::publicFeedModuleIds();
+        // F-461: the group visibility comes back IN this row. Read in the
+        // same statement as the row, through ProbesReads, never
+        // get_post_meta(): a read that cannot be trusted refuses the row.
         $row = PeepSoActivityRepository::getById(
             $actId,
             $allowedModuleIds,
             viewerFriendIds: $viewerFriendIds,
             enforcePostVisibility: $enforcePostVisibility,
             viewerId: $viewerId,
-            throwOnReadFailure: $this->throwOnReadFailure
+            throwOnReadFailure: $this->throwOnReadFailure,
+            withGroupVisibility: true
         );
         if ($row === null || (string) $row->act_status !== 'publish') {
             return null;
@@ -505,7 +509,7 @@ final class ActivityFeedService
             return null;
         }
 
-        if (!self::isVisibleGlobally((int) $row->act_external_id, $deferGroupVisibilityToCaller)) {
+        if (!self::isVisibleGlobally($row, $deferGroupVisibilityToCaller)) {
             return null;
         }
 
@@ -540,14 +544,40 @@ final class ActivityFeedService
      * What it does NOT touch: the `$postId <= 0` guard (a row with no
      * backing post is still refused) and the non-group `true` (those
      * were always visible).
+     *
+     * ⚠⚠ F-461: THE GROUP FACTS COME FROM THE ROW, NEVER FROM
+     * get_post_meta(). `$row` is a getById(withGroupVisibility: true) row,
+     * so `bcc_group_ids`, `bcc_post_visibility` and `bcc_privacy_at_post`
+     * were read in the same statement as the row, through ProbesReads,
+     * never get_post_meta(): a read that cannot be trusted refuses the row.
      */
-    private static function isVisibleGlobally(int $postId, bool $deferGroupsToCaller = false): bool
+    private static function isVisibleGlobally(object $row, bool $deferGroupsToCaller = false): bool
     {
+        $postId = (int) ($row->act_external_id ?? 0);
         if ($postId <= 0) {
             return false;
         }
+        // ⚠ A row read WITHOUT the group facts is refused, never read as
+        // "not a group post". property_exists() is true for a NULL column,
+        // so a post that genuinely has no group still passes; only a row
+        // from a getById() call that did not ask for the columns fails.
+        if (!property_exists($row, 'bcc_group_ids')) {
+            return false;
+        }
+        $rawGroupIds = $row->bcc_group_ids;
+        // ⚠ GROUP_CONCAT() TRUNCATES SILENTLY at `group_concat_max_len`
+        // (1024 bytes by default), dropping trailing ids or cutting one in
+        // half. A cut list is refused: its byte length must be exactly the
+        // complete list's, `bcc_group_ids_len`, read by the same statement.
+        // Exact under any server setting, and a COUNT comparison would miss
+        // a half-cut last id ("7,12,1" counts 3, like "7,12,13").
+        if ($rawGroupIds !== null
+            && strlen((string) $rawGroupIds) !== (int) ($row->bcc_group_ids_len ?? -1)
+        ) {
+            return false;
+        }
         $groupIds = array_values(array_filter(
-            array_map('intval', (array) get_post_meta($postId, 'peepso_group_id', false)),
+            array_map('intval', explode(',', (string) ($rawGroupIds ?? ''))),
             static fn(int $id): bool => $id > 0
         ));
         if ($groupIds === []) {
@@ -563,10 +593,10 @@ final class ActivityFeedService
             return true;
         }
 
-        if (get_post_meta($postId, '_bcc_post_visibility', true) !== 'public_all') {
+        if ((string) ($row->bcc_post_visibility ?? '') !== 'public_all') {
             return false;
         }
-        $privacyAtPost = get_post_meta($postId, GroupSyndicationGate::META_PRIVACY_AT_POST, true);
+        $privacyAtPost = $row->bcc_privacy_at_post ?? '';
         if (GroupSyndicationGate::madeWhileNonOpen($privacyAtPost)) {
             // A deliberate non-open syndication passes whatever the
             // group's state is now: no need to read the non-open set.
