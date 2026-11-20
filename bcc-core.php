@@ -41,6 +41,33 @@ define('BCC_CORE_VERSION', '1.2.18');
 define('BCC_CORE_PATH', plugin_dir_path(__FILE__));
 define('BCC_CORE_URL', plugin_dir_url(__FILE__));
 
+// ── Meta-cache read guard (F-459) ───────────────────────────────
+// ⚠ REGISTERED HERE, at file scope immediately after the autoloader,
+// deliberately: WordPress primes post and user meta very early (a
+// `_prime_post_caches()` during a query, an autoloaded option read), and a
+// guard that only attaches on `init` would miss exactly the batch priming
+// this protects.
+//
+// WHAT IT FIXES. `update_meta_cache()` cannot tell a failed SELECT from
+// "these objects have no meta" — after a driver error `flush()` has already
+// reset `last_result`, so the row list is `array()` either way — and it then
+// caches `array()` for EVERY requested id. On a persistent object cache
+// (production runs one) `post_meta` has no expiry, so ONE fault makes every
+// absent-means-allowed gate fail open until that object's meta is written.
+//
+// ⚠ Containment, not closure: a failed read still answers '' for the request
+// it happened in. What this removes is the PERSISTENCE. Gates that must
+// refuse on it consume \BCC\Core\Meta\MetaReadHealth — F-460 / F-461.
+//
+// GUARDED, because the autoloader above is itself conditional
+// (`file_exists`). An unguarded static call here would turn a missing
+// vendor/ from a degraded plugin into a FATAL that takes the site down
+// -- which is why the registrations further down pass `::class` into
+// add_action rather than calling anything immediately.
+if (class_exists(\BCC\Core\Meta\MetaCacheGuard::class)) {
+    \BCC\Core\Meta\MetaCacheGuard::register();
+}
+
 // ── Rate-limiter readiness enforcement ──────────────────────────
 // BCC requires a safe rate-limiter backend — either the trust-engine's
 // atomic RateLimiter OR a persistent object cache (Redis / Memcached).
@@ -852,6 +879,20 @@ add_filter('bcc_system_health', function (array $health): array {
         //                   zero; sustained counts mean breached passwords
         //                   are getting through.
         'password_breach_check' => ['unavailable'],
+        // meta_cache — bcc-core MetaCacheGuard (F-459): the post/user meta
+        // cache guard. WordPress's update_meta_cache() cannot tell a failed
+        // SELECT from "no meta" and caches array() for every requested id,
+        // so one fault makes absent-means-allowed gates fail open until the
+        // object's meta is written. The guard caches NOTHING on a failed
+        // read; these counters are how often that happened.
+        //   `post_meta_read` — a post-meta cache read could not be trusted
+        //                      (driver error, or a pre-flush bail where
+        //                      last_result still held another query's rows).
+        //   `user_meta_read` — the same for user meta, which carries the JWT
+        //                      revocation version and the logout denylist.
+        //   Steady state zero. Any sustained count means gates are reading
+        //   empty meta for the duration of each fault — see F-460 / F-461.
+        'meta_cache' => ['post_meta_read', 'user_meta_read'],
     ]);
 
     return $health;
