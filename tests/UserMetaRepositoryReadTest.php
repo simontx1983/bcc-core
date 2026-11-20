@@ -223,6 +223,86 @@ namespace BCC\Core\Repositories\Tests\UserMetaRead {
             );
         }
 
+        /**
+         * Fire a recorded hook the way WordPress's do_action() does: every
+         * callback gets the first `accepted_args` of the real argument list.
+         *
+         * @param list<mixed> $wpArgs
+         */
+        private static function fire(string $hook, array $wpArgs): int
+        {
+            $fired = 0;
+            foreach ((array) ($GLOBALS['__bcc_core_test_hooks'][$hook] ?? []) as $entry) {
+                call_user_func_array($entry['callback'], array_slice($wpArgs, 0, (int) $entry['args']));
+                $fired++;
+            }
+
+            return $fired;
+        }
+
+        /** Make the next memo write register the hooks again, on an empty registry. */
+        private static function rewire(): void
+        {
+            (new \ReflectionProperty(UserMetaRepository::class, 'listening'))->setValue(null, false);
+            unset($GLOBALS['__bcc_core_test_hooks']['added_user_meta'], $GLOBALS['__bcc_core_test_hooks']['updated_user_meta'], $GLOBALS['__bcc_core_test_hooks']['deleted_user_meta']);
+        }
+
+        /**
+         * The memo is wired to WordPress's three user-meta write hooks, under
+         * their exact names and with the arguments it needs. Each is fired
+         * with the signature core uses: ($meta_id, $object_id, $meta_key,
+         * $meta_value), with an id list for deleted_user_meta.
+         */
+        public function testEveryUserMetaWriteHookDropsThatUsersMemo(): void
+        {
+            self::rewire();
+            $db = $this->db();
+            UserMetaRepository::valuesOrUnknown([1, 3], ['a']);
+            self::assertSame(1, $db->metaQueries);
+
+            foreach ([
+                'added_user_meta'   => [11, 1, 'a', 'v1'],
+                'updated_user_meta' => [12, 1, 'a', 'v2'],
+                'deleted_user_meta' => [[13], 1, 'a', ''],
+            ] as $hook => $wpArgs) {
+                $GLOBALS['__um_meta'][1]['a'] = $hook;
+                self::assertSame(1, self::fire($hook, $wpArgs), "{$hook} is registered once");
+                self::assertSame(
+                    [1 => ['a' => [$hook]], 3 => ['a' => ['z']]],
+                    UserMetaRepository::valuesOrUnknown([1, 3], ['a']),
+                    "{$hook}: user 1 is read again"
+                );
+            }
+            self::assertSame(4, $db->metaQueries, 'each write cost one re-read of user 1 only');
+        }
+
+        /**
+         * delete_metadata(…, $delete_all = true) fires deleted_user_meta with
+         * object id 0: the key changed for every user, so the memo is dropped.
+         */
+        public function testADeleteAllDropsEveryUsersMemo(): void
+        {
+            self::rewire();
+            $db = $this->db();
+            UserMetaRepository::valuesOrUnknown([1, 3], ['a']);
+
+            unset($GLOBALS['__um_meta'][1]['a'], $GLOBALS['__um_meta'][3]['a']);
+            self::fire('deleted_user_meta', [[21, 22], 0, 'a', '']);
+
+            self::assertSame([], UserMetaRepository::valuesOrUnknown([1, 3], ['a']));
+            self::assertSame(2, $db->metaQueries);
+        }
+
+        /** A numeric meta key keeps its key when a user's memo is merged. */
+        public function testANumericKeySurvivesTheMemoMerge(): void
+        {
+            $GLOBALS['__um_meta'] = [1 => ['a' => 'x', '123' => 'n']];
+            $this->db();
+
+            UserMetaRepository::valuesOrUnknown([1], ['a']);
+            self::assertSame([1 => ['123' => ['n']]], UserMetaRepository::valuesOrUnknown([1], ['123']));
+        }
+
         public function testForgetDropsOneUsersMemo(): void
         {
             $db = $this->db();
