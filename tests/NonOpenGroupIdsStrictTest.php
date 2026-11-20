@@ -118,19 +118,11 @@ final class ColWpdb
  * The non-open group list is the deny list a group-visibility gate is
  * built on, so its FAILURE MODES are security behaviour, not ergonomics.
  *
- * Two pins here:
- *
- *   1. getNonOpenGroupIds must not CACHE a failed query. It flattens a
- *      null get_col into [] for the caller (its historical behaviour),
- *      but caching that [] would hold "no group is non-open" for the
- *      10-minute TTL — and for a caller using the list as an exclusion,
- *      an empty list means "exclude nothing". One transient DB error
- *      would read as permission for ten minutes.
- *   2. getNonOpenGroupIdsStrict must return NULL rather than a partial
- *      or empty-looking answer, for both failure and truncation, so a
- *      caller that uses the list as its ONLY gate can fail closed.
+ * getNonOpenGroupIdsStrict must return NULL rather than a partial or
+ * empty-looking answer, for both failure and truncation, and cache neither,
+ * so a caller that uses the list as its gate can fail closed. A genuinely
+ * empty answer is real and is cached.
  */
-#[CoversMethod(PeepSoGroupRepository::class, 'getNonOpenGroupIds')]
 #[CoversMethod(PeepSoGroupRepository::class, 'getNonOpenGroupIdsStrict')]
 #[RunTestsInSeparateProcesses]
 #[PreserveGlobalState(false)]
@@ -154,48 +146,24 @@ final class NonOpenGroupIdsStrictTest extends TestCase
         return $wpdb;
     }
 
-    // ── 1. a failed query is not cached ──────────────────────────────
-
     /**
-     * THE REGRESSION PIN. A failed lookup followed by a GOOD one must
-     * return the good answer. If the failure were cached, the second
-     * call would be served [] from cache and never reach the database —
-     * which is exactly what made a transient error look like
-     * "nothing is restricted" for ten minutes.
-     */
-    public function testAFailedLookupIsNotCachedAndTheNextCallReQueries(): void
-    {
-        $wpdb = $this->installWpdb([], true); // query ERRORS like WPDB does
-
-        self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIds(500));
-        self::assertSame(1, $wpdb->queryCount);
-
-        // Same process, same cache: the recovered query must be consulted.
-        $wpdb->fail = false;
-        $wpdb->next = ['7', '9'];
-
-        self::assertSame([7, 9], PeepSoGroupRepository::getNonOpenGroupIds(500));
-        self::assertSame(2, $wpdb->queryCount, 'a cached failure would have skipped this query');
-    }
-
-    /**
-     * A genuinely EMPTY result is still cached — that is a real answer
-     * and the caching behaviour must not regress for it.
+     * A genuinely EMPTY result is cached — that is a real answer ("the
+     * query ran and no group is non-open"), and the caching behaviour must
+     * not regress for it.
      */
     public function testAGenuinelyEmptyResultIsStillCached(): void
     {
         $wpdb = $this->installWpdb([]);
 
-        self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIds(500));
+        self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIdsStrict(500));
         self::assertSame(1, $wpdb->queryCount);
 
         $wpdb->next = ['7'];
 
-        self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIds(500), 'served from cache');
+        self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIdsStrict(500), 'served from cache');
         self::assertSame(1, $wpdb->queryCount, 'an empty answer is cacheable');
     }
 
-    // ── 2. the strict variant ────────────────────────────────────────
 
     public function testStrictReturnsNullOnAFailedQuery(): void
     {
@@ -268,7 +236,7 @@ final class NonOpenGroupIdsStrictTest extends TestCase
     }
 
 
-    // ── post_status: the strict set ignores it, the lenient one does not ──
+    // ── post_status: the deny list ignores it ──────────────────────────
 
     /**
      * THE FIX. A deny list must be OVER-inclusive. Filtering to `publish`
@@ -289,14 +257,13 @@ final class NonOpenGroupIdsStrictTest extends TestCase
     }
 
     /**
-     * ONE PREDICATE. Both deny lists ask PeepSoGroupPrivacy::nonOpenSql(),
+     * ONE PREDICATE. The deny list asks PeepSoGroupPrivacy::nonOpenSql(),
      * which reads the value with the same `CAST … AS UNSIGNED` as
-     * notSecretSql() and privacyForGroup(), so all four readers agree on
-     * every stored value. PeepSoGroupPrivacyReadTest executes both lists on
-     * SQLite and MySQL; this pins that neither keeps a string compare or a
-     * JOIN of its own.
+     * notSecretSql() and privacyForGroup(), so every reader agrees on every
+     * stored value. PeepSoGroupPrivacyReadTest executes it on SQLite and
+     * MySQL; this pins that it keeps no string compare or JOIN of its own.
      */
-    public function testBothDenyListsUseTheSharedCastPredicateAndNoStringCompare(): void
+    public function testTheDenyListUsesTheSharedCastPredicateAndNoStringCompare(): void
     {
         $wpdb = $this->installWpdb([]);
 
@@ -304,26 +271,6 @@ final class NonOpenGroupIdsStrictTest extends TestCase
         self::assertStringContainsString(PeepSoGroupPrivacy::nonOpenSql('p.ID'), $wpdb->lastSql);
         self::assertStringNotContainsString("meta_value IN ('", $wpdb->lastSql);
         self::assertStringNotContainsString('JOIN', $wpdb->lastSql, 'a JOIN returns a group once per matching row');
-
-        PeepSoGroupRepository::getNonOpenGroupIds(500);
-        self::assertStringContainsString(PeepSoGroupPrivacy::nonOpenSql('p.ID'), $wpdb->lastSql);
-        self::assertStringNotContainsString("meta_value IN ('", $wpdb->lastSql);
-        self::assertStringNotContainsString('JOIN', $wpdb->lastSql, 'a JOIN returns a group once per matching row');
-    }
-
-    /**
-     * ADDITIVE, NOT A REWRITE: the LENIENT lookup keeps its `publish`
-     * filter. The feed uses it as one filter among several and its callers
-     * are unchanged, so widening it there would alter feed behaviour for no
-     * safety gain. If this ever fails, the change leaked across the seam.
-     */
-    public function testTheLenientQueryStillFiltersOnPostStatus(): void
-    {
-        $wpdb = $this->installWpdb([]);
-
-        PeepSoGroupRepository::getNonOpenGroupIds(500);
-
-        self::assertStringContainsString("p.post_status = 'publish'", $wpdb->lastSql);
     }
 
     /**
@@ -361,23 +308,5 @@ final class NonOpenGroupIdsStrictTest extends TestCase
 
         self::assertNull(PeepSoGroupRepository::getNonOpenGroupIdsStrict(0));
         self::assertSame(0, $wpdb->queryCount);
-    }
-
-    /**
-     * The strict and lenient answers live under DIFFERENT cache keys. A
-     * lenient [] (which may be a flattened failure) must never be served
-     * to a strict caller as a proven-empty answer.
-     */
-    public function testStrictAndLenientDoNotShareACacheEntry(): void
-    {
-        $wpdb = $this->installWpdb([]);
-
-        self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIds(500));
-        self::assertSame(1, $wpdb->queryCount);
-
-        // Strict must run its OWN query rather than reading the lenient
-        // entry — it needs the limit+1 probe to know about truncation.
-        self::assertSame([], PeepSoGroupRepository::getNonOpenGroupIdsStrict(500));
-        self::assertSame(2, $wpdb->queryCount);
     }
 }
