@@ -1,10 +1,11 @@
 <?php
 /**
- * `$wpdb` double for UserMetaRepository's read.
+ * `$wpdb` double for UserMetaRepository's read, and for PostMetaRepository's
+ * with `$metaType = 'post'` (the same shared read on wp_postmeta / post_id).
  *
- * - The usermeta SELECT is answered from a fixture in `$GLOBALS[$metaGlobal]`
- *   (user => key => value or list of values, in umeta_id order), honouring
- *   the query's user ids, keys and LIMIT. Keys match exactly.
+ * - The meta SELECT is answered from a fixture in `$GLOBALS[$metaGlobal]`
+ *   (object => key => value or list of values, in meta id order), honouring
+ *   the query's object ids, keys and LIMIT. Keys match exactly.
  * - `$modes` scripts each usermeta query in turn: 'ok' (the default),
  *   'error' (flush, then last_error, query() false) or 'preflush' (query()
  *   false BEFORE flush: no last_error, and last_result still holds the
@@ -43,8 +44,19 @@ final class UserMetaWpdb
 
     public int $metaQueries = 0;
 
-    public function __construct(public string $metaGlobal = '__um_meta')
+    /** @param 'user'|'post' $metaType */
+    public function __construct(public string $metaGlobal = '__um_meta', public string $metaType = 'user')
     {
+    }
+
+    private function metaTable(): string
+    {
+        return $this->metaType === 'post' ? $this->postmeta : $this->usermeta;
+    }
+
+    private function idColumn(): string
+    {
+        return $this->metaType === 'post' ? 'post_id' : 'user_id';
     }
 
     /** @param mixed ...$args */
@@ -66,7 +78,7 @@ final class UserMetaWpdb
     /** @return int|false */
     public function query(string $sql)
     {
-        if (!str_contains($sql, 'FROM ' . $this->usermeta)) {
+        if (!str_contains($sql, 'FROM ' . $this->metaTable())) {
             $this->last_error  = '';
             $this->last_result = [];
 
@@ -93,7 +105,7 @@ final class UserMetaWpdb
         }
 
         $ids = [];
-        if (preg_match('/user_id IN \(([^)]*)\)/', $sql, $m) === 1) {
+        if (preg_match('/' . $this->idColumn() . ' IN \(([^)]*)\)/', $sql, $m) === 1) {
             foreach (explode(',', $m[1]) as $id) {
                 $ids[(int) trim($id)] = true;
             }
@@ -107,8 +119,8 @@ final class UserMetaWpdb
         $limit = preg_match('/LIMIT (\d+)/', $sql, $m) === 1 ? (int) $m[1] : PHP_INT_MAX;
 
         $rows = [];
-        foreach ((array) ($GLOBALS[$this->metaGlobal] ?? []) as $userId => $byKey) {
-            if (!isset($ids[(int) $userId])) {
+        foreach ((array) ($GLOBALS[$this->metaGlobal] ?? []) as $objectId => $byKey) {
+            if (!isset($ids[(int) $objectId])) {
                 continue;
             }
             foreach ((array) $byKey as $key => $values) {
@@ -116,7 +128,7 @@ final class UserMetaWpdb
                     continue;
                 }
                 foreach ((array) $values as $value) {
-                    $rows[] = (object) ['user_id' => (string) $userId, 'meta_key' => (string) $key, 'meta_value' => (string) $value];
+                    $rows[] = (object) [$this->idColumn() => (string) $objectId, 'meta_key' => (string) $key, 'meta_value' => (string) $value];
                 }
             }
         }

@@ -5,12 +5,12 @@
  *
  * The one guarded user-meta reader for BCC (§11). Use it for any value
  * that DECIDES something (a privacy flag, a messaging preference, an
- * opt-out) when its absence means a default. get_user_meta() reads
- * through WordPress's meta cache, and the cache layer does not tell the
- * caller when its own load failed, so the answer cannot be trusted for
- * such a decision.
+ * opt-out) when its absence means a default: read through ProbesReads,
+ * never get_user_meta(); a read that cannot be trusted answers null, and
+ * callers fail closed.
  *
- * Here the values come from bounded queries through ProbesReads:
+ * Here the values come from bounded queries through ProbesReads (the read
+ * itself is {@see ReadsMetaRows}, shared with {@see PostMetaRepository}):
  *   - clearLastError(), then query() compared `=== false`;
  *   - then last_error, then the rows (trustedRows());
  *   - never get_results()/get_col() plus last_error, which can hand back
@@ -52,6 +52,7 @@ if (!defined('ABSPATH')) {
 final class UserMetaRepository
 {
     use ProbesReads;
+    use ReadsMetaRows;
 
     /** Users per query. A larger call is read in chunks. */
     public const CHUNK_USERS = 100;
@@ -183,103 +184,7 @@ final class UserMetaRepository
     {
         global $wpdb;
 
-        $out = [];
-        foreach (array_chunk($ids, self::CHUNK_USERS) as $chunk) {
-            $limit = count($chunk) * count($keys) * self::MAX_ROWS_PER_PAIR;
-            $sql   = $wpdb->prepare(
-                "SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta}
-                  WHERE user_id IN (" . implode(', ', array_fill(0, count($chunk), '%d')) . ")
-                    AND meta_key IN (" . implode(', ', array_fill(0, count($keys), '%s')) . ")
-                  ORDER BY umeta_id ASC
-                  LIMIT %d",
-                ...[...$chunk, ...$keys, $limit]
-            );
-            if (!is_string($sql) || $sql === '') {
-                return null;
-            }
-
-            $rows = self::trustedRows($sql);
-            if ($rows === null || count($rows) >= $limit) {
-                return null;
-            }
-
-            $asked = [];
-            foreach ($chunk as $id) {
-                $asked[$id]  = true;
-                $out[$id]    = array_fill_keys($keys, []);
-            }
-            foreach ($rows as $row) {
-                $id  = isset($row->user_id) && is_numeric($row->user_id) ? (int) $row->user_id : 0;
-                $key = isset($row->meta_key) ? (string) $row->meta_key : '';
-                if (!isset($asked[$id])) {
-                    // A user this query did not ask for: the rows are not ours.
-                    return null;
-                }
-                if (!array_key_exists($key, $out[$id])) {
-                    // A case variant matched by a _ci collation. WordPress reads
-                    // meta keys exactly, so this skips it as get_user_meta() does.
-                    continue;
-                }
-                $out[$id][$key][] = isset($row->meta_value) ? (string) $row->meta_value : '';
-            }
-        }
-
-        return $out;
-    }
-
-    /**
-     * The public shape from a full map: only pairs with rows.
-     *
-     * @param array<int, array<string, list<string>>> $source
-     * @param list<int>    $ids
-     * @param list<string> $keys
-     * @return array<int, array<string, list<string>>>
-     */
-    private static function present(array $source, array $ids, array $keys): array
-    {
-        $out = [];
-        foreach ($ids as $id) {
-            foreach ($keys as $key) {
-                $values = $source[$id][$key] ?? [];
-                if ($values !== []) {
-                    $out[$id][$key] = $values;
-                }
-            }
-        }
-
-        return $out;
-    }
-
-    /**
-     * @param list<int> $userIds
-     * @return list<int>
-     */
-    private static function cleanIds(array $userIds): array
-    {
-        $ids = [];
-        foreach ($userIds as $id) {
-            if ($id > 0) {
-                $ids[$id] = $id;
-            }
-        }
-
-        return array_values($ids);
-    }
-
-    /**
-     * @param list<string> $keys
-     * @return list<string>
-     */
-    private static function cleanKeys(array $keys): array
-    {
-        $out = [];
-        foreach ($keys as $key) {
-            if ($key !== '') {
-                $out[$key] = $key;
-            }
-        }
-
-        return array_values($out);
+        return self::readMetaRows($wpdb->usermeta, 'user_id', 'umeta_id', $ids, $keys, self::CHUNK_USERS, self::MAX_ROWS_PER_PAIR);
     }
 
     /**
