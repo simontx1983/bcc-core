@@ -33,6 +33,9 @@
  * front. Any write to a member's meta drops that member's memo. Pass
  * `$fresh = true` to neither read nor write the memo: a compare-and-swap
  * retry loop, or a value that must never be memoised.
+ * ⚠ Cron and other long-running consumers, and every compare-and-swap,
+ * pass `$fresh = true`: the memo cannot see writes made by other
+ * processes.
  *
  * @package BCC\Core\Repositories
  */
@@ -102,6 +105,13 @@ final class UserMetaRepository
             return $read === null ? null : self::present($read, $ids, $keys);
         }
 
+        // Make room BEFORE deciding what to read. A reset after that point
+        // would drop users this call meant to serve from the memo, and
+        // present() would answer "no row" for them.
+        if (count(self::$memo) + count($ids) > self::MEMO_MAX) {
+            self::$memo = [];
+        }
+
         $toRead = [];
         foreach ($ids as $id) {
             foreach ($keys as $key) {
@@ -118,9 +128,6 @@ final class UserMetaRepository
                 return null;
             }
             self::listen();
-            if (count(self::$memo) + count($read) > self::MEMO_MAX) {
-                self::$memo = [];
-            }
             foreach ($read as $id => $values) {
                 self::$memo[$id] = array_merge(self::$memo[$id] ?? [], $values);
             }

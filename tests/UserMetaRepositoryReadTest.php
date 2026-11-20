@@ -198,6 +198,31 @@ namespace BCC\Core\Repositories\Tests\UserMetaRead {
             self::assertSame(4, $db->metaQueries, 'a fresh read leaves nothing to serve later');
         }
 
+        /**
+         * The memo is dropped wholesale when full. It must never drop a user
+         * THIS call serves from the memo: that user's flag would come back
+         * as "no row". The memo is filled to its cap, with user 1 memoised
+         * as hidden, then one call asks for user 1 and a new user.
+         */
+        public function testAFullMemoNeverDropsAUserThisCallServes(): void
+        {
+            $max  = (int) (new \ReflectionClassConstant(UserMetaRepository::class, 'MEMO_MAX'))->getValue();
+            $memo = [1 => ['hide' => ['1']]];
+            for ($id = 100000; count($memo) < $max; $id++) {
+                $memo[$id] = ['hide' => []];
+            }
+            (new \ReflectionProperty(UserMetaRepository::class, 'memo'))->setValue(null, $memo);
+
+            $GLOBALS['__um_meta'] = [1 => ['hide' => '1'], 2 => ['hide' => '0']];
+            $this->db();
+
+            self::assertSame(
+                [1 => ['hide' => ['1']], 2 => ['hide' => ['0']]],
+                UserMetaRepository::valuesOrUnknown([1, 2], ['hide']),
+                'the memoised hidden flag survives the reset'
+            );
+        }
+
         public function testForgetDropsOneUsersMemo(): void
         {
             $db = $this->db();
