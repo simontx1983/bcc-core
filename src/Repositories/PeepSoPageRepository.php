@@ -95,6 +95,40 @@ final class PeepSoPageRepository
     }
 
     /**
+     * A WHERE condition that is TRUE when the page whose id is `$idColumn`
+     * may be counted or listed: a published `peepso-page` that is not
+     * secret.
+     *
+     * Every page-ownership count and owner list puts this in its WHERE, so
+     * a count never includes a page that the page lists would not show.
+     * Rationale: F-427 (private tracker).
+     *
+     * The secret half is {@see PeepSoPagePrivacy::notSecretSql()}, the one
+     * rule every page list uses, so an owner's count and the pages a viewer
+     * can find always agree. That includes the owner themselves: lists never
+     * show a secret page, to anyone.
+     *
+     * The fragment contains no `%` and no placeholders, so it can go into a
+     * string that is later passed to `$wpdb->prepare()`.
+     *
+     * @param string $idColumn a column reference such as `pm.pm_page_id`, never input
+     * @throws \InvalidArgumentException when `$idColumn` is not a column reference
+     */
+    public static function listablePageSql(string $idColumn): string
+    {
+        // Validates $idColumn (throws) before it is used below.
+        $notSecret = PeepSoPagePrivacy::notSecretSql($idColumn);
+
+        global $wpdb;
+
+        return "EXISTS (SELECT 1 FROM {$wpdb->posts} bcc_listable_pg"
+            . " WHERE bcc_listable_pg.ID = {$idColumn}"
+            . " AND bcc_listable_pg.post_type = 'peepso-page'"
+            . " AND bcc_listable_pg.post_status = 'publish')"
+            . " AND {$notSecret}";
+    }
+
+    /**
      * Batched typed-count lookup: for a set of user_ids, returns the
      * count of `member_owner` pages per canonical type. Pages without
      * a recognized category slug don't contribute to any bucket (they
@@ -134,7 +168,9 @@ final class PeepSoPageRepository
         // rows joined to the category post (for slug → type mapping).
         // Rows where a page has no category fall out via the inner
         // join — that's the documented "untagged pages don't count
-        // per-type" semantics.
+        // per-type" semantics. Only published, non-secret pages count
+        // (listablePageSql, F-427).
+        $listable = self::listablePageSql('pm.pm_page_id');
         /** @var list<array{user_id: string, type_slug: string, c: string}> $rows */
         $rows = $wpdb->get_results(
             $wpdb->prepare(
@@ -150,6 +186,7 @@ final class PeepSoPageRepository
                           AND cat.post_status = 'publish'
                   WHERE pm.pm_user_id IN ({$placeholders})
                     AND pm.pm_user_status = 'member_owner'
+                    AND {$listable}
                   GROUP BY pm.pm_user_id, cat.post_name",
                 ...$idList
             ),
@@ -215,6 +252,8 @@ final class PeepSoPageRepository
      * the user_id is implicit because of the GROUP BY; the result is
      * the set of users with ≥1 owned page of the requested type.
      *
+     * Only published, non-secret pages count (listablePageSql, F-427).
+     *
      * @param string $type Canonical type slug (validate via `isValidType`).
      * @return list<int>
      */
@@ -227,6 +266,7 @@ final class PeepSoPageRepository
 
         global $wpdb;
         $catPlaceholders = implode(',', array_fill(0, count($catSlugs), '%s'));
+        $listable        = self::listablePageSql('pm.pm_page_id');
 
         /** @var list<array{user_id: string}> $rows */
         $rows = $wpdb->get_results(
@@ -241,6 +281,7 @@ final class PeepSoPageRepository
                           AND cat.post_status = 'publish'
                   WHERE pm.pm_user_status = 'member_owner'
                     AND cat.post_name IN ({$catPlaceholders})
+                    AND {$listable}
                   GROUP BY pm.pm_user_id",
                 ...$catSlugs
             ),
@@ -269,11 +310,18 @@ final class PeepSoPageRepository
      * (`vaildators`) and the corrected slug (`validators`) collapses
      * into a single user under `validator` rather than double-counting.
      *
+     * Only published, non-secret pages count (listablePageSql, F-427).
+     *
+     * ⚠ Being retired: the directory now counts its chips per viewer in
+     * bcc-trust. This stays until no deployed bcc-trust calls it.
+     *
      * @return array{validator: int, project: int, nft: int, dao: int}
      */
     public static function getGlobalOwnedPageUserCountsByType(): array
     {
         global $wpdb;
+
+        $listable = self::listablePageSql('pm.pm_page_id');
 
         // For each (user_id, slug) pair where the user owns ≥1 page
         // tagged with that PeepSo category, surface one row. The
@@ -291,6 +339,7 @@ final class PeepSoPageRepository
                       AND cat.post_type = 'peepso-page-cat'
                       AND cat.post_status = 'publish'
               WHERE pm.pm_user_status = 'member_owner'
+                AND {$listable}
               GROUP BY pm.pm_user_id, cat.post_name",
             ARRAY_A
         );
