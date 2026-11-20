@@ -1,77 +1,51 @@
 <?php
 /**
- * MetaCacheGuard — a failed meta read must not be CACHED (F-459).
+ * MetaCacheGuard — a meta read is verified before its result is cached (F-459).
  *
- * ── The defect in WordPress ───────────────────────────────────────────
+ * ── What it guarantees ─────────────────────────────────────────
  *
- * `update_meta_cache()` (wp-includes/meta.php, WP 7.0.2) runs one SELECT for
- * every uncached object id and then caches the result. When that SELECT
- * FAILS it does not notice: `$meta_list` comes back as `array()` — `flush()`
- * has already reset `last_result` — which is indistinguishable from "these
- * objects have no meta". It then stores `array()` for EVERY requested id via
- * `wp_cache_add_multiple()`.
+ * A post- or user-meta read is run through {@see ProbesReads} and its result
+ * is cached ONLY when the rows can be trusted. A read that cannot be trusted
+ * caches nothing, so the next request reads again instead of being served a
+ * remembered answer.
  *
- * So one failed query makes `get_post_meta()` answer "" for every id in that
- * batch, AND caches that answer. With a persistent object cache (production
- * runs one) `post_meta` has no expiry, so the poison survives until that
- * object's meta is written or the cache is flushed. Every gate that treats
- * absent meta as "allowed" then fails OPEN, for everyone, indefinitely.
+ * On a healthy database there is NO behaviour change: one query, the same
+ * cache contents, the same return value.
  *
- * ⚠ This is a containment fix, not a closure. A failed read still answers
- * "" for the request it happened in, because `get_metadata_raw()` turns a
- * short-circuited `update_meta_cache()` into `null` and then into "". What
- * this removes is the PERSISTENCE. Closing the residual means teaching
- * individual gates to refuse — F-460 / F-461, consuming
+ * ⚠ Containment, not closure. The request the failure happened in still
+ * reads the meta as absent. What this removes is the PERSISTENCE. Teaching
+ * individual gates to refuse is F-460 / F-461, consuming
  * {@see MetaReadHealth}.
  *
- * ── Why the filter is shaped the way it is ────────────────────────────
+ * ── Why the filter is shaped the way it is ───────────────────────
  *
- * ⛔ The obvious implementation is a trap. `update_meta_cache()` coerces any
- * short-circuit to a bool:
+ * ⛔ On SUCCESS it returns **null**, and that is load-bearing.
+ * `update_meta_cache()` coerces any non-null short-circuit with
+ * `return (bool) $check;`, and `get_metadata_raw()` then reads
+ * `$meta_cache[ $object_id ] ?? null`. Returning the cache array — or
+ * `true` — would make every object's FIRST meta read in a request answer
+ * '' ON A HEALTHY DATABASE. Returning null after priming lets core's own
+ * `wp_cache_get_multiple()` find everything and return its real array
+ * without a second query. There is a test pinning this.
  *
- *     $check = apply_filters( "update_{$meta_type}_metadata_cache", null, $object_ids );
- *     if ( null !== $check ) { return (bool) $check; }
+ * On an untrusted read it caches nothing and returns **false** — the one
+ * thing the filter's bool coercion is good for.
  *
- * and `get_metadata_raw()` then does `$meta_cache[ $object_id ] ?? null`. So
- * a filter that caches the rows and returns the array — or `true` — makes
- * `null` arrive there, and `get_post_meta()` answers "" ON A HEALTHY
- * DATABASE, for every object's first read in a request. That would make
- * every absent-means-allowed gate fail open ALL the time: far worse than the
- * bug being fixed.
+ * ── Why ProbesReads rather than get_results() ───────────────────
  *
- * So on SUCCESS this returns **null**. It has already populated the cache,
- * so core's own `wp_cache_get_multiple()` finds everything, `$non_cached_ids`
- * is empty, and core returns its real array early WITHOUT running a second
- * query. One query, correct return value, no behaviour change when healthy.
+ * {@see \BCC\Core\Repositories\ProbesReads} checks `query()`'s OWN return
+ * value (`=== false`, because a SELECT returns the row count) as well as
+ * `last_error`, having cleared it first. `get_results()` discards that
+ * return value, and `last_error` alone is not an exhaustive failure signal.
+ * Three signals rather than one, and it is reused rather than
+ * reimplemented (§11).
  *
- * On FAILURE it caches nothing and returns **false** — the one thing the
- * filter's bool coercion is actually good for.
+ * ── Equivalence ───────────────────────────────────────────────
  *
- * ── Why not get_results() ─────────────────────────────────────────────
- *
- * ⚠⚠ Because `get_results()` cannot see one of the failure modes, and that
- * mode is fail-WRONG rather than fail-open. `wpdb::query()` returns false on
- * `! $this->ready` (a failed reconnect) and on an emptied `query` filter —
- * both BEFORE it calls `flush()`. `last_result` therefore still holds the
- * PREVIOUS query's rows, and `get_results()` discards `query()`'s return
- * value, so it hands those rows back with no `last_error` set. Caching them
- * would store one query's rows as another object's meta, persistently, for
- * every reader. Verified in class-wpdb.php, not assumed.
- *
- * {@see \BCC\Core\Repositories\ProbesReads} already solves exactly this and
- * is reused rather than reimplemented: it checks `query()`'s own return
- * (`=== false`, because a SELECT returns the ROW COUNT and `!0` is true)
- * AND `last_error`, having cleared it first so an earlier failure elsewhere
- * in the request cannot be mistaken for this one's.
- *
- * ── Equivalence ───────────────────────────────────────────────────────
- *
- * The cache contents written here are byte-for-byte what core writes for the
- * same rows, including `array()` for an id with no rows, several values under
- * one key preserved in `meta_id` order, and an empty-string value stored as
- * an empty string rather than dropped. There is a test comparing against
- * core's own `update_meta_cache()` output, because "looks right" is not
- * equivalence when this filter sits in front of every meta read on the site.
+ * What this writes is what core writes for the same rows: an empty entry for
+ * an id with no rows (that entry is what stops a second read re-querying, so
+ * it is part of the equivalence), several values under one key in `meta_id`
+ * order, and an empty-string value stored rather than dropped.
  *
  * @package BCC\Core\Meta
  */
@@ -179,9 +153,9 @@ final class MetaCacheGuard
         if ($rows === null) {
             self::recordFailure($metaType, $nonCached);
 
-            // Cache NOTHING and short-circuit. This request reads empty —
-            // see the class docblock — but the next one retries instead of
-            // reading poison.
+            // Cache NOTHING and short-circuit. This request reads the meta
+            // as absent — see the class docblock — but the next one reads
+            // again rather than being served a remembered answer.
             return false;
         }
 

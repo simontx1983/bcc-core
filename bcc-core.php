@@ -48,16 +48,16 @@ define('BCC_CORE_URL', plugin_dir_url(__FILE__));
 // guard that only attaches on `init` would miss exactly the batch priming
 // this protects.
 //
-// WHAT IT FIXES. `update_meta_cache()` cannot tell a failed SELECT from
-// "these objects have no meta" — after a driver error `flush()` has already
-// reset `last_result`, so the row list is `array()` either way — and it then
-// caches `array()` for EVERY requested id. On a persistent object cache
-// (production runs one) `post_meta` has no expiry, so ONE fault makes every
-// absent-means-allowed gate fail open until that object's meta is written.
+// WHAT IT GUARANTEES. A post- or user-meta read is VERIFIED before its
+// result is cached: the read goes through ProbesReads, and a read that
+// cannot be trusted caches NOTHING, so the next request reads again rather
+// than being served a remembered answer. On a healthy database there is no
+// behaviour change — one query, the same cache contents, the same return
+// value.
 //
-// ⚠ Containment, not closure: a failed read still answers '' for the request
-// it happened in. What this removes is the PERSISTENCE. Gates that must
-// refuse on it consume \BCC\Core\Meta\MetaReadHealth — F-460 / F-461.
+// ⚠ Containment, not closure: the request the failure happened in still
+// reads the meta as absent. What this removes is the PERSISTENCE. Gates that
+// must refuse consume \BCC\Core\Meta\MetaReadHealth — F-460 / F-461.
 //
 // GUARDED, because the autoloader above is itself conditional
 // (`file_exists`). An unguarded static call here would turn a missing
@@ -908,18 +908,13 @@ add_filter('bcc_system_health', function (array $health): array {
         //                   are getting through.
         'password_breach_check' => ['unavailable'],
         // meta_cache — bcc-core MetaCacheGuard (F-459): the post/user meta
-        // cache guard. WordPress's update_meta_cache() cannot tell a failed
-        // SELECT from "no meta" and caches array() for every requested id,
-        // so one fault makes absent-means-allowed gates fail open until the
-        // object's meta is written. The guard caches NOTHING on a failed
-        // read; these counters are how often that happened.
-        //   `post_meta_read` — a post-meta cache read could not be trusted
-        //                      (driver error, or a pre-flush bail where
-        //                      last_result still held another query's rows).
-        //   `user_meta_read` — the same for user meta, which carries the JWT
-        //                      revocation version and the logout denylist.
-        //   Steady state zero. Any sustained count means gates are reading
-        //   empty meta for the duration of each fault — see F-460 / F-461.
+        // cache guard. A meta read is verified through ProbesReads before
+        // its result is cached, and a read it cannot trust caches NOTHING.
+        // These counters are how often that happened.
+        //   `post_meta_read` — a post-meta cache read could not be trusted.
+        //   `user_meta_read` — the same for user meta.
+        //   Steady state zero. Gates that must refuse on an untrusted read
+        //   consume MetaReadHealth — see F-460 / F-461.
         'meta_cache' => ['post_meta_read', 'user_meta_read'],
     ]);
 
