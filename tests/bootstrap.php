@@ -70,6 +70,10 @@ if (!function_exists('add_action')) {
      */
     function add_action(string $hook, $callback, int $priority = 10, int $args = 1): bool
     {
+        // Recorded, so a test can check a production hook's wiring (name,
+        // accepted args) by firing it the way WordPress would.
+        $GLOBALS['__bcc_core_test_hooks'][$hook][] = ['callback' => $callback, 'priority' => $priority, 'args' => $args];
+
         return true;
     }
 }

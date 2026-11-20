@@ -36,6 +36,9 @@
  * ⚠ Cron and other long-running consumers, and every compare-and-swap,
  * pass `$fresh = true`: the memo cannot see writes made by other
  * processes.
+ * ⚠ Pass single-valued keys. The LIMIT is an average over the whole chunk
+ * (MAX_ROWS_PER_PAIR rows per pair), so a key that legitimately holds many
+ * rows per user would push a chunk over it and read as null.
  *
  * @package BCC\Core\Repositories
  */
@@ -129,7 +132,8 @@ final class UserMetaRepository
             }
             self::listen();
             foreach ($read as $id => $values) {
-                self::$memo[$id] = array_merge(self::$memo[$id] ?? [], $values);
+                // array_replace, not array_merge: a numeric meta key must keep its key.
+                self::$memo[$id] = array_replace(self::$memo[$id] ?? [], $values);
             }
         }
 
@@ -292,9 +296,15 @@ final class UserMetaRepository
 
         $forget = static function ($metaId, $userId): void {
             unset($metaId);
-            if (is_numeric($userId)) {
-                self::forget((int) $userId);
+            $id = is_numeric($userId) ? (int) $userId : 0;
+            if ($id > 0) {
+                self::forget($id);
+
+                return;
             }
+            // delete_metadata(..., $delete_all = true) fires with object id 0:
+            // that key changed for every user, so no memoised answer stands.
+            self::$memo = [];
         };
         foreach (['added_user_meta', 'updated_user_meta', 'deleted_user_meta'] as $hook) {
             add_action($hook, $forget, 10, 2);
