@@ -53,6 +53,8 @@ return array(
     'BCC\\Core\\Http\\SafeHttpClient' => $baseDir . '/src/Http/SafeHttpClient.php',
     'BCC\\Core\\Log\\Logger' => $baseDir . '/src/Log/Logger.php',
     'BCC\\Core\\Mail\\BccMailer' => $baseDir . '/src/Mail/BccMailer.php',
+    'BCC\\Core\\Meta\\MetaCacheGuard' => $baseDir . '/src/Meta/MetaCacheGuard.php',
+    'BCC\\Core\\Meta\\MetaReadHealth' => $baseDir . '/src/Meta/MetaReadHealth.php',
     'BCC\\Core\\NullServices\\NullChainRead' => $baseDir . '/src/NullServices/NullChainRead.php',
     'BCC\\Core\\NullServices\\NullDisputeAdjudication' => $baseDir . '/src/NullServices/NullDisputeAdjudication.php',
     'BCC\\Core\\NullServices\\NullOnchainDataRead' => $baseDir . '/src/NullServices/NullOnchainDataRead.php',
