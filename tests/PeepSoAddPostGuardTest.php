@@ -617,6 +617,61 @@ final class PeepSoAddPostGuardTest extends TestCase
     }
 
     /**
+     * ⛔⛔ A NON-NUMERIC STAMP IS STILL A STAMP.
+     *
+     * `valuesOrUnknown()` hands back RAW STRINGS. The first version of this
+     * check skipped a value whose `(int)` cast was zero, which is true of
+     * EVERY non-numeric string — so a serialized stamp read as "no stamp"
+     * and the post came back clean. One value-shape away from the fail-open
+     * the guarded read was added to remove.
+     *
+     * ⚠ PeepSo's own listeners write scalar ids, so this shape is not one
+     * anything is known to produce. That is the point of a backstop: its
+     * worth is in catching what nobody enumerated, so it must not be the
+     * thing deciding which shapes count.
+     *
+     * @param string $stamp
+     */
+    #[DataProvider('nonNumericStamps')]
+    public function testANonNumericStampIsStillAHijack(string $stamp): void
+    {
+        $this->seedStamp(self::POST_ID, 'peepso_group_id', $stamp);
+
+        self::assertSame(
+            'hijacked',
+            PeepSoAddPostGuard::failClosedIfHijacked(self::POST_ID, 0),
+            'a stamp that is not a number must still be refused'
+        );
+        self::assertSame([self::POST_ID], $GLOBALS['__bcc_apg']['deleted']);
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function nonNumericStamps(): iterable
+    {
+        yield 'a serialized array' => ['a:1:{s:8:"group_id";i:9001;}'];
+        yield 'a non-numeric id'   => ['secret-hall'];
+        yield 'a leading-zero id'  => ['09001'];
+        yield 'whitespace'         => [' '];
+    }
+
+    /**
+     * ⚠ THE OTHER SIDE OF THE SAME RULE, so "treat everything as a stamp"
+     * cannot be what makes the test above pass. `'0'` is what
+     * {@see PeepSoAddPostGuard::PINNED_KEYS} pins a numeric key to — the
+     * neutral value — so it is the one non-empty string that must NOT count.
+     */
+    public function testTheNeutralZeroValueIsNotAStamp(): void
+    {
+        $this->seedStamp(self::POST_ID, 'peepso_group_id', '0');
+
+        self::assertNull(
+            PeepSoAddPostGuard::failClosedIfHijacked(self::POST_ID, 0),
+            "'0' is the pinned neutral value, not a stamp"
+        );
+        self::assertSame([], $GLOBALS['__bcc_apg']['deleted']);
+    }
+
+    /**
      * ⛔⛔ F-498 — A READ THAT CANNOT BE TRUSTED IS A HIJACK.
      *
      * The old check called `get_post_meta()` and skipped an empty value. That
