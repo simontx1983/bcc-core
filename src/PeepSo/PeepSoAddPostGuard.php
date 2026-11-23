@@ -463,7 +463,17 @@ final class PeepSoAddPostGuard
             $found = [];
             foreach (self::AUTHORIZATION_STAMPS as $key) {
                 foreach ($read[$postId][$key] ?? [] as $value) {
-                    if ($value === '' || (int) $value === 0) {
+                    // ⛔⛔ NO `(int)` CAST. `valuesOrUnknown()` hands back RAW
+                    // STRINGS, and a cast makes any non-numeric stamp read as
+                    // zero and get SKIPPED — a serialized value casts to 0
+                    // ('a:1:{...}' is not a number), so the post would come
+                    // back clean. A backstop exists to catch what nobody
+                    // enumerated, which is exactly what a loose cast undoes.
+                    //
+                    // So: ANY value other than '' and '0' is a stamp. '0' is
+                    // excluded because it is what `PINNED_KEYS` pins a numeric
+                    // key to, i.e. the neutral value, not a stamp.
+                    if ($value === '' || $value === '0') {
                         continue;
                     }
                     // BCC stamps the group itself, AFTER this check
@@ -546,11 +556,15 @@ final class PeepSoAddPostGuard
         // keys — so there is nothing to preserve and no verdict to get
         // wrong. Deleting a key that was never set is a no-op.
         //
-        // ⚠ WHAT THIS DOES NOT CLOSE, stated rather than implied: a delete
-        // whose WRITE fails leaves the stamp. `delete_post_meta()` returns
-        // false both for "nothing to delete" and for "the delete failed",
-        // and telling those apart needs the read this change removes. So
-        // the read-side fail-open is gone; a write-side failure is not.
+        // ⚠ WHAT THIS DOES NOT CLOSE, stated rather than implied: a FAILED
+        // LOOKUP OR WRITE INSIDE THE DELETE can leave a stamp. It is wider
+        // than "the write failed": `delete_metadata()` finds the rows with
+        // its own `get_col` first, so a failed SELECT there returns an empty
+        // set, nothing is deleted, and `delete_post_meta()` reports false —
+        // the same false it returns for "there was nothing to delete".
+        // Telling those apart needs a read, which is what this change
+        // removes. So the read-side fail-open on the DECISION is gone; a
+        // failure inside the delete itself is not.
         $stripped = [];
         foreach (self::AUTHORIZATION_STAMPS as $key) {
             if (delete_post_meta($postId, $key)) {
