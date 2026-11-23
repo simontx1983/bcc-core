@@ -70,6 +70,39 @@ class DodgesTheNameMatch
         $this->locator->service()->update(['owner_id' => 7]);
     }
 
+    /**
+     * 3e. A STATIC property receiver. Flagged by the variable rule, but
+     * nothing pinned it until the review agent asked for this line.
+     */
+    public function updateThroughAStaticProperty(): void
+    {
+        self::$group->update(['owner_id' => 7]);
+    }
+
+    /** 3f. An INDEX over a property. Resolved to its base, so: flagged. */
+    public function updateThroughAnIndexedProperty(int $id): void
+    {
+        $this->groups[$id]->update(['owner_id' => 7]);
+    }
+
+    /** 3g. An INDEX over a variable. Same, via the variable rule. */
+    public function updateThroughAnIndexedVariable(array $groups): void
+    {
+        $groups[0]->update(['owner_id' => 7]);
+    }
+
+    /** 3h. An inline `new`, a common idiom. Treated as the write it is. */
+    public function updateThroughAnInlineNew(int $id): void
+    {
+        (new \PeepSoGroup($id))->update(['owner_id' => 7]);
+    }
+
+    /** 3i. An index over $wpdb is still excluded, by the same base rule. */
+    public function indexedWpdbIsNotAModelWrite(array $wpdb): void
+    {
+        $wpdb[0]->update('wp_posts', ['post_title' => 'x'], ['ID' => 1]);
+    }
+
     /** 4. A DYNAMIC new: the class name is in a variable. */
     public function dynamicNew(string $cls, array $data): void
     {

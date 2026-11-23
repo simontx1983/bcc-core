@@ -817,16 +817,32 @@ final class PostWritePinInventoryTest extends TestCase
         // T_STRING after `->`, not a T_VARIABLE. That property form is the
         // likeliest real dodge of the three, so the first narrowing quietly
         // gave up the case it mattered most to keep. A fixture caught it.
-        // Anything that is not a NAME token — the `)` of a call, the `]` of
-        // an index — is out of scope, and the gap is NAMED: a model update
-        // reached through a chained expression is not caught. Ordinary
-        // refactoring produces `$group->update(` or `$this->group->update(`,
-        // both of which ARE caught below.
+        // ⭐ AN INDEX AND AN INLINE `new` ARE RESOLVED, so only a TRUE call
+        // result stays out of scope. Both sat in the named gap until the
+        // review agent pointed out how ordinary they are:
         //
-        // ⚠ There is deliberately no separate `=== ')'` branch: it would be
-        // unreachable past this check, and a mutation control proved it —
-        // removing that branch changed no verdict. A rule that cannot change
-        // an outcome is documentation pretending to be code.
+        //   $this->groups[$id]->update(…)     an index over a property
+        //   $groups[0]->update(…)             an index over a variable
+        //   (new PeepSoGroup($id))->update(…)  a common idiom
+        //
+        // An index is unwrapped to its BASE and the base judged by the same
+        // variable/property rule; a parenthesised `new` is treated as the
+        // model write it is. ⭐ PARITY: bcc-trust's twin landed these first
+        // (trust #840); this keeps the two guards identical, which is the
+        // whole point of F-457.
+        if ($tokens[$recv] === ']') {
+            $base = self::indexBase($tokens, $recv);
+            if ($base === null) {
+                return false;
+            }
+            $recv = $base;
+        } elseif ($tokens[$recv] === ')') {
+            // `(new Foo(…))->update(` — the receiver is the constructed
+            // object. Any OTHER `)` is a call result: out of scope, and that
+            // is the one gap left, named rather than hidden.
+            return self::parenWrapsNew($tokens, $recv);
+        }
+
         if (!is_array($tokens[$recv])) {
             return false;
         }
@@ -843,6 +859,79 @@ final class PostWritePinInventoryTest extends TestCase
         }
 
         return false;
+    }
+
+    /**
+     * Given the `]` of an index, the token index of the expression it indexes.
+     *
+     * `$this->groups[$id]` → the `groups` T_STRING; `$groups[0]` → the
+     * `$groups` T_VARIABLE. Nested indexes unwrap repeatedly, so
+     * `$a[$i][$j]->update(` resolves to `$a`.
+     *
+     * ⚠ Returns null when the base is not a name token — an index over a call
+     * result, say — which leaves it in the out-of-scope gap rather than
+     * guessing.
+     *
+     * @param  array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     * @return int|null token index of the base, or null
+     */
+    private static function indexBase(array $tokens, int $close): ?int
+    {
+        while ($close >= 0 && $tokens[$close] === ']') {
+            $open = null;
+            for ($j = $close - 1, $depth = 0; $j >= 0; $j--) {
+                if ($tokens[$j] === ']') {
+                    $depth++;
+                    continue;
+                }
+                if ($tokens[$j] === '[') {
+                    if ($depth === 0) {
+                        $open = $j;
+                        break;
+                    }
+                    $depth--;
+                }
+            }
+            if ($open === null) {
+                return null;
+            }
+            $close = self::prevSignificant($tokens, $open - 1) ?? -1;
+        }
+
+        return $close >= 0 && is_array($tokens[$close]) ? $close : null;
+    }
+
+    /**
+     * Given the `)` before `->`, does it close a parenthesised `new`?
+     *
+     * `(new PeepSoGroup($id))->update(…)` is a model write spelled as one
+     * expression. Any other `)` is a call result and stays out of scope.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function parenWrapsNew(array $tokens, int $close): bool
+    {
+        $open = null;
+        for ($j = $close - 1, $depth = 0; $j >= 0; $j--) {
+            if ($tokens[$j] === ')') {
+                $depth++;
+                continue;
+            }
+            if ($tokens[$j] === '(') {
+                if ($depth === 0) {
+                    $open = $j;
+                    break;
+                }
+                $depth--;
+            }
+        }
+        if ($open === null) {
+            return false;
+        }
+
+        $first = self::nextSignificant($tokens, $open + 1, count($tokens));
+
+        return $first !== null && is_array($tokens[$first]) && $tokens[$first][0] === T_NEW;
     }
 
     /**
@@ -1332,8 +1421,14 @@ final class PostWritePinInventoryTest extends TestCase
             }
         }
 
-        self::assertCount(
-            3,
+                // SEVEN in-scope receiver shapes, each a fixture LINE rather than a
+        // claim: a plain variable, a property, a nullsafe property, a STATIC
+        // property, an indexed property, an indexed variable, and an inline
+        // new. Excluded, also fixture lines: the two wpdb spellings, an
+        // INDEXED wpdb (same base rule), and a true call result -- the one
+        // gap left, named in updateIsNotOnWpdb().
+self::assertCount(
+            7,
             $updates,
             'the property receiver, the method-return receiver and the NULLSAFE'
             . ' receiver must all be reported, and neither $wpdb form may be'
