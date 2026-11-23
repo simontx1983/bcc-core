@@ -871,6 +871,20 @@ add_filter('bcc_system_health', function (array $health): array {
             'no_last_good',
             'ceiling_reached',
         ],
+        // caution_list_risky_ceiling — the escalation of caution_list's
+        // ceiling_reached (F-454, security's review). bcc-trust reads the
+        // caution/risky list most severe first, risky before caution, up to a
+        // ceiling. ceiling_reached (P2) means the cut fell among caution-tier
+        // members. This subsystem's one event means the RISKY members alone
+        // fill the ceiling, so the cut reaches the risky tier. It is its own
+        // subsystem because severity is
+        // per subsystem: bcc-trust adds it to the P1 set through the
+        // `bcc_degradation_p1_subsystems` filter (DegradationAlerter).
+        //   - risky_fills_ceiling: the kept list is risky members only.
+        // Expected steady state is zero.
+        'caution_list_risky_ceiling' => [
+            'risky_fills_ceiling',
+        ],
         // auth_throttle — the route-wide ceilings (300/min) on the two
         // sign-in routes the frontend calls server-side, bcc-trust
         // AuthSupport::allowIdentityAttempt() (F-123 / F-131). Their
