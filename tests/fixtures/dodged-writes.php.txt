@@ -59,6 +59,17 @@ class DodgesTheNameMatch
         $wpdb?->update('wp_posts', ['post_title' => 'x'], ['ID' => 1]);
     }
 
+    /**
+     * 3d. A CHAINED receiver. Out of scope by design — see
+     * `updateIsNotOnWpdb()`. This is an ordinary service call, and the
+     * shape that made denying chained receivers unworkable: bcc-trust has
+     * exactly this in `ReviewRepliesEndpoint`.
+     */
+    public function updateThroughAChainedReceiver(): void
+    {
+        $this->locator->service()->update(['owner_id' => 7]);
+    }
+
     /** 4. A DYNAMIC new: the class name is in a variable. */
     public function dynamicNew(string $cls, array $data): void
     {
