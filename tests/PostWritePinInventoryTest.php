@@ -802,14 +802,47 @@ final class PostWritePinInventoryTest extends TestCase
         }
 
         $recv = self::prevSignificant($tokens, $arrow - 1);
-        if ($recv === null || !is_array($tokens[$recv]) || $tokens[$recv][0] !== T_VARIABLE) {
-            // Not a plain `$var->update(` — a chained or dynamic receiver.
-            // DENIED: it cannot be shown to be `$wpdb`.
-            return true;
+        if ($recv === null) {
+            return false;
         }
 
-        return self::WPDB_RECEIVERS !== []
-            && !in_array($tokens[$recv][1], self::WPDB_RECEIVERS, true);
+        // ⚠⚠ A CALL RESULT IS OUT OF SCOPE, A PROPERTY IS NOT, and keeping
+        // those apart is the whole subtlety here.
+        //
+        // Denying every receiver that is not a plain `$var` was the first
+        // attempt, and it was WRONG IN BOTH DIRECTIONS. It flagged
+        // `Plugin::instance()->reviewReplyService()->update(...)` in bcc-trust
+        // — an ordinary service call — and, worse, it stopped flagging
+        // `$this->group->update(...)`, because a PROPERTY receiver is a
+        // T_STRING after `->`, not a T_VARIABLE. That property form is the
+        // likeliest real dodge of the three, so the first narrowing quietly
+        // gave up the case it mattered most to keep. A fixture caught it.
+        // Anything that is not a NAME token — the `)` of a call, the `]` of
+        // an index — is out of scope, and the gap is NAMED: a model update
+        // reached through a chained expression is not caught. Ordinary
+        // refactoring produces `$group->update(` or `$this->group->update(`,
+        // both of which ARE caught below.
+        //
+        // ⚠ There is deliberately no separate `=== ')'` branch: it would be
+        // unreachable past this check, and a mutation control proved it —
+        // removing that branch changed no verdict. A rule that cannot change
+        // an outcome is documentation pretending to be code.
+        if (!is_array($tokens[$recv])) {
+            return false;
+        }
+
+        // `$group->update(` — a plain variable.
+        if ($tokens[$recv][0] === T_VARIABLE) {
+            return !in_array($tokens[$recv][1], self::WPDB_RECEIVERS, true);
+        }
+
+        // `$this->group->update(` — a property. `$this->wpdb->update(` is
+        // excluded on the same name, so the exclusion covers both spellings.
+        if ($tokens[$recv][0] === T_STRING) {
+            return !in_array('$' . $tokens[$recv][1], self::WPDB_RECEIVERS, true);
+        }
+
+        return false;
     }
 
     /**
