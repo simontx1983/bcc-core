@@ -31,11 +31,10 @@
  *   no-row case is a theoretical edge, and treating it as secret would hide
  *   every group on an install whose meta had not been written yet.
  *
- * ⚠ The deny-list reads use `nonOpenSql()`, NEVER `notSecretSql()`.
- *   {@see PeepSoGroupRepository::getNonOpenGroupIds()} and
- *   `getNonOpenGroupIdsStrict()` ask the opposite question — "which groups
- *   are closed OR secret" — to build an exclusion set, and an allow-list
- *   predicate would invert their safety. `nonOpenSql()` is
+ * ⚠ The deny-list read uses `nonOpenSql()`, NEVER `notSecretSql()`.
+ *   {@see PeepSoGroupRepository::getNonOpenGroupIdsStrict()} asks the
+ *   opposite question — "which groups are closed OR secret" — to build an
+ *   exclusion set, and an allow-list predicate would invert its safety. `nonOpenSql()` is
  *   `EXISTS (a row that reads 1 or 2)`: it matches a two-row group (the
  *   fail-closed direction) and returns each group once.
  *

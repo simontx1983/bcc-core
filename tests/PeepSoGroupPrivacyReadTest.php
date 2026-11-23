@@ -104,7 +104,7 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
      *     groups, stray values, no row. It is also checked against
      *     `notSecretSql()` on the same data, so the single-group answer
      *     cannot disagree with the list predicate, and against BOTH deny
-     *     lists (`getNonOpenGroupIds` / `…Strict`, through `nonOpenSql()`),
+     *     list (`getNonOpenGroupIdsStrict`, through `nonOpenSql()`),
      *     so a group is denied exactly when the single read says 1 or 2.
      */
     #[CoversClass(PeepSoGroupPrivacy::class)]
@@ -335,7 +335,7 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
 
         /**
          * Rows outside the grid, for the deny lists only: a TRASHED secret
-         * group (the strict list keeps it, the lenient one does not) and a
+         * group (the deny list keeps it) and a
          * non-group post carrying a privacy row (neither list).
          */
         private const TRASHED_SECRET_GROUP = 60;
@@ -567,8 +567,6 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
             foreach ($nonOpen as $groupId) {
                 self::assertSame($expected[$groupId], PeepSoGroupPrivacy::privacyForGroup($groupId), "group {$groupId} reads non-open");
             }
-
-            self::assertSame($nonOpen, PeepSoGroupRepository::getNonOpenGroupIds(500), 'the lenient deny list');
 
             $strict = array_merge([self::TRASHED_SECRET_GROUP], $nonOpen);
             self::assertSame($strict, PeepSoGroupRepository::getNonOpenGroupIdsStrict(500), 'the strict deny list');

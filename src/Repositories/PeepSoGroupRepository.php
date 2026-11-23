@@ -63,7 +63,7 @@ final class PeepSoGroupRepository
     //   subset of "non-open." The deny lists below read it through
     //   PeepSoGroupPrivacy::nonOpenSql(), never a string compare.
 
-    // Cache for getNonOpenGroupIds — generation-counter pattern per §5.
+    // Cache for getNonOpenGroupIdsStrict — generation-counter pattern per §5.
     // Read paths key on `:gen`, write paths bump the generation. Hooks
     // wired in bcc-core.php fire on add/update/delete of the
     // `peepso_group_privacy` post-meta.
@@ -884,8 +884,7 @@ final class PeepSoGroupRepository
      * empty result — it means the read cannot be relied on, and that is
      * null too rather than 0.
      *
-     * Same lenient/strict pairing as
-     * {@see getMembershipStatusOrFail} and {@see getNonOpenGroupIdsStrict}.
+     * Same lenient/strict pairing as {@see getMembershipStatusOrFail}.
      * INTENTIONALLY UNCACHED, for the reason on the lenient twin.
      */
     public static function countOwnedUserGroupsOrFail(int $userId): ?int
@@ -1066,7 +1065,8 @@ final class PeepSoGroupRepository
      * `member%` filter the rest of this repository uses.
      *
      * INTENTIONALLY UNCACHED — do not add a wp_cache/transient layer.
-     * This feeds FeedRankingService::resolveRestrictedGroupIds(), which
+     * This feeds bcc-trust's RestrictedGroups (the profile Blog tab's group
+     * gate), which
      * SUBTRACTS the viewer's memberships from the hidden-group set
      * (closed/secret/NFT-gated). A stale "still a member" entry would
      * therefore *unhide* gated posts from a user who was removed, banned,
@@ -1288,133 +1288,15 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * IDs of all published peepso-groups whose privacy is NOT open — a
+     * IDs of every peepso-group whose privacy is NOT open — a
      * `peepso_group_privacy` row that reads 1 or 2, i.e. closed OR secret
-     * (NFT-gated groups are a closed-privacy subset). The predicate is
-     * {@see PeepSoGroupPrivacy::nonOpenSql()}, the same reading of the
-     * value as every other BCC privacy read.
+     * (NFT-gated groups are a closed-privacy subset) — through
+     * {@see PeepSoGroupPrivacy::nonOpenSql()}, or NULL when the answer
+     * cannot be proven complete. Its callers use it as a deny list (the
+     * F-23 syndication gate, bcc-trust's report and blog gates), so a short
+     * list is never served as a complete one.
      *
-     * Bounded list (V1 scale: ~hundreds of groups). Used as the
-     * candidate pool the bcc-trust feed layer subtracts the viewer's
-     * memberships from to build the §4.7.x main-feed exclusion list,
-     * mirroring the {@see PeepSoActivityRepository::getActivities()
-     * `$excludedAuthorIds`} pattern (caller decides WHY to drop, repo
-     * stays a single-purpose seam).
-     *
-     * Cached via the §5 generation-counter pattern (key
-     * `non_open_group_ids:<gen>`). Generation is bumped by the
-     * `updated_post_meta` / `added_post_meta` / `deleted_post_meta`
-     * hooks in bcc-core.php whenever `peepso_group_privacy` is written.
-     * 10-minute TTL bounds the worst-case staleness window if a write
-     * arrives via a code path that bypasses the action hooks (e.g.
-     * direct SQL).
-     *
-     * Defensive posture: when no groups match (fresh install, or every
-     * group is open), the cached value is `[]` and feed callers
-     * short-circuit the exclusion path entirely — no JOIN cost.
-     *
-     * @return list<int>
-     */
-    public static function getNonOpenGroupIds(int $limit = self::NONOPEN_DEFAULT_LIMIT): array
-    {
-        if ($limit <= 0) {
-            return [];
-        }
-        if ($limit > self::NONOPEN_DEFAULT_LIMIT) {
-            $limit = self::NONOPEN_DEFAULT_LIMIT;
-        }
-
-        $genKey = self::nonOpenCacheKey($limit);
-        $cached = wp_cache_get($genKey, self::NONOPEN_CACHE_GROUP);
-        if (is_array($cached)) {
-            /** @var list<int> $cached */
-            return $cached;
-        }
-
-        global $wpdb;
-
-        // ⚠ PeepSoGroupPrivacy::nonOpenSql(), never a JOIN or a string
-        // compare of meta_value: it reads the value with the same CAST as
-        // every other privacy read, and returns each group ONCE however many
-        // privacy rows it carries, so every LIMIT slot is a distinct group.
-        // The EXISTS probe uses the postmeta (post_id, meta_key) index per
-        // group; restricting the post side to peepso-group + publish keeps
-        // the candidate set tiny on a real install. Explicit column list.
-        $params = [
-            self::POST_TYPE,
-            self::POST_STATUS,
-            $limit,
-        ];
-
-        $sql = "SELECT p.ID
-                  FROM {$wpdb->posts} p
-                 WHERE p.post_type   = %s
-                   AND p.post_status = %s
-                   AND " . PeepSoGroupPrivacy::nonOpenSql('p.ID') . "
-                 ORDER BY p.ID DESC
-                 LIMIT %d";
-
-        // ⚠ A FAILED QUERY MUST NOT BE CACHED, and a failed query does NOT
-        // look like null.
-        //
-        // `get_col()` ALWAYS returns an array — wp-includes/class-wpdb.php
-        // builds `$new_array = array()`, fills it only `if
-        // ($this->last_result)`, and returns it unconditionally. On an
-        // error `query()` returns false and `flush()` has already emptied
-        // `last_result`, so get_col hands back `[]`. A `=== null` check for
-        // failure is DEAD CODE, and the `@var ...|null` annotation that
-        // used to sit here was simply wrong.
-        //
-        // That matters because caching the `[]` would hold "no group is
-        // non-open" for NONOPEN_CACHE_TTL (10 min), and for a caller using
-        // this list as an exclusion an empty list means "exclude nothing" —
-        // one transient DB error would read as permission for ten minutes.
-        //
-        // `query()` is the documented signal: `int|bool`, "false on error".
-        // It is checked instead of `last_error` alone because query() can
-        // return false from `!$this->ready` or an empty query BEFORE it
-        // calls flush(), leaving a stale (or empty) last_error behind.
-        // last_error is still consulted as a second signal.
-        $prepared = $wpdb->prepare($sql, ...$params);
-        $queryOk  = $wpdb->query($prepared);
-        if ($queryOk === false || (string) $wpdb->last_error !== '') {
-            // Return the empty list for THIS request — callers already
-            // treat [] as "no exclusions", the pre-existing failure-path
-            // behaviour — but leave the cache cold so the next request
-            // re-asks. Nothing changes on the success path.
-            return [];
-        }
-
-        // Reads the already-fetched last_result without re-querying.
-        /** @var list<numeric-string> $rows */
-        $rows = $wpdb->get_col(null);
-
-        $ids = [];
-        foreach ($rows as $raw) {
-            $id = (int) $raw;
-            if ($id > 0) {
-                $ids[] = $id;
-            }
-        }
-
-        wp_cache_set($genKey, $ids, self::NONOPEN_CACHE_GROUP, self::NONOPEN_CACHE_TTL);
-        return $ids;
-    }
-
-    /**
-     * Same set as {@see getNonOpenGroupIds}, but it tells you when it
-     * does not know.
-     *
-     * {@see getNonOpenGroupIds} is lossy by design — it answers with a
-     * list and nothing else, so "no group is non-open", "the query
-     * failed" and "there are more than the limit, here are the newest"
-     * all arrive as a plain array. That is fine for the feed, which uses
-     * the list as one filter among several, and NOT fine for a caller
-     * that uses it as its ONLY group gate: for that caller a short list
-     * is not a degraded answer, it is a disclosure. Each missing id is a
-     * group whose posts get shown.
-     *
-     * So this variant returns NULL for both failure modes:
+     * It returns NULL for both failure modes:
      *
      *   - the query errored (`query()` false or `last_error` set; `get_col`
      *     alone cannot tell, it returns `[]`). Distinct from empty, and
@@ -1430,9 +1312,8 @@ final class PeepSoGroupRepository
      * An empty return is therefore trustworthy: it means the query ran
      * and no group is non-open.
      *
-     * ⚠ It also IGNORES `post_status`, unlike the lenient lookup: a
-     * trashed or draft secret group is still secret, and omitting it made
-     * the deny list under-inclusive, which is the leaking direction.
+     * ⚠ It IGNORES `post_status`: a trashed or draft secret group is
+     * still secret, so it stays on the deny list.
      *
      * ⚠⚠ CONSEQUENCE FOR THE CAP: trashed and draft non-open groups now
      * count toward `$limit`. A site that has accumulated many trashed
@@ -1463,8 +1344,8 @@ final class PeepSoGroupRepository
             $limit = self::NONOPEN_DEFAULT_LIMIT;
         }
 
-        // Own cache key — a strict answer and a lenient one are not
-        // interchangeable, and only a PROVEN-complete list is ever stored.
+        // Only a PROVEN-complete list is ever stored. (The `:strict` suffix
+        // keeps the key the deployed cache already uses.)
         $genKey = self::nonOpenCacheKey($limit) . ':strict';
         $cached = wp_cache_get($genKey, self::NONOPEN_CACHE_GROUP);
         if (is_array($cached)) {
@@ -1474,7 +1355,7 @@ final class PeepSoGroupRepository
 
         global $wpdb;
 
-        // ⚠ NO post_status FILTER HERE, unlike the lenient lookup.
+        // ⚠ NO post_status FILTER HERE.
         //
         // A deny list must be OVER-inclusive to be safe, and filtering to
         // `publish` made it under-inclusive: a TRASHED or draft secret
@@ -1486,14 +1367,12 @@ final class PeepSoGroupRepository
         // direction, so this query asks only "is this group non-open",
         // whatever state the group row is in.
         //
-        // The lenient `getNonOpenGroupIds()` keeps its `publish` filter:
-        // the feed uses it as one filter among several, its callers are
-        // unchanged, and widening it there would alter feed behaviour for
-        // no safety gain.
-        //
-        // ⚠ PeepSoGroupPrivacy::nonOpenSql(), for the reasons in
-        // getNonOpenGroupIds. One row per group also keeps the `$limit + 1`
-        // truncation detector counting groups, not privacy rows.
+        // ⚠ PeepSoGroupPrivacy::nonOpenSql(), never a JOIN or a string
+        // compare of meta_value: it reads the value with the same CAST as
+        // every other privacy read, and returns each group ONCE however many
+        // privacy rows it carries, so the `$limit + 1` truncation detector
+        // counts groups, not privacy rows. The EXISTS probe uses the
+        // postmeta (post_id, meta_key) index per group.
         $params = [
             self::POST_TYPE,
             // limit + 1: the extra row is the truncation detector.
@@ -1507,12 +1386,14 @@ final class PeepSoGroupRepository
                  ORDER BY p.ID DESC
                  LIMIT %d";
 
-        // Failure detection, and the reason it is NOT a null check: see the
-        // note in getNonOpenGroupIds. `get_col()` always returns an array,
-        // so an errored query arrives here as `[]` — which this method
-        // documents as "the query ran and nothing is non-open". Trusting
-        // that would be the worst case of all: an empty deny list that a
-        // caller has been told to believe, relaxing its gate.
+        // Failure detection, and why it is NOT a null check. `get_col()`
+        // ALWAYS returns an array (wpdb builds `[]` and fills it only from
+        // `last_result`), so an errored query would arrive as `[]`, which
+        // this method documents as "the query ran and nothing is non-open".
+        // `query()` is the documented signal (`false` on error), checked
+        // rather than `last_error` alone because it can return false BEFORE
+        // `flush()` (`! $this->ready`, an emptied query); `last_error` is
+        // still consulted as a second signal.
         $prepared = $wpdb->prepare($sql, ...$params);
         $queryOk  = $wpdb->query($prepared);
         if ($queryOk === false || (string) $wpdb->last_error !== '') {
@@ -1542,7 +1423,7 @@ final class PeepSoGroupRepository
     }
 
     /**
-     * Bust the {@see getNonOpenGroupIds} cache. Wired in bcc-core.php
+     * Bust the {@see getNonOpenGroupIdsStrict} cache. Wired in bcc-core.php
      * to the post-meta write hooks for `peepso_group_privacy`. Public
      * because the hook callbacks register against this class
      * statically — no service-locator wiring needed for cache busts.

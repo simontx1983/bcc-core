@@ -23,7 +23,7 @@ use ReflectionMethod;
  * every cross-process nonOpenCacheKey() read and (b) re-initialized
  * the counter to 0 inside bustNonOpenGroupIdsCache() before the
  * increment — so privacy-change busts never invalidated
- * getNonOpenGroupIds() caches.
+ * getNonOpenGroupIdsStrict() caches.
  *
  * The wp_cache_* shims below simulate the cross-process view (ints
  * stringify on read; Redis INCR semantics). Each test runs in its own

@@ -225,9 +225,9 @@ add_filter('bcc_api_keys_inventory', function (array $inventory): array {
 \BCC\Core\Permissions\Permissions::registerHooks();
 
 // ── Non-open group cache invalidation ──────────────────────────
-// PeepSoGroupRepository::getNonOpenGroupIds() backs the §4.7.x main-
-// feed leak gate (closed/secret/NFT-gated group posts hidden from
-// non-members in /bcc/v1/feed and /bcc/v1/feed/hot). The list is
+// PeepSoGroupRepository::getNonOpenGroupIdsStrict() is the group deny
+// list (the F-23 syndication gate on the global, hot and tag feeds, and
+// bcc-trust's report and blog gates). The list is
 // cached via the §5 generation-counter pattern; any write to a
 // group's `peepso_group_privacy` post-meta must bump the generation
 // so the next read recomputes. Bound to all three meta-write hooks
