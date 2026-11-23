@@ -978,6 +978,85 @@ final class PeepSoGroupRepository
         return array_values(array_map('intval', $rows ?: []));
     }
 
+    /** Largest page {@see openGroupsAfter()} answers. */
+    public const OPEN_GROUPS_PAGE_MAX = 1000;
+
+    /**
+     * F-518: one keyset page of OPEN groups for a public listing (the
+     * sitemap): published peepso-groups with a slug whose privacy is
+     * explicitly open ({@see PeepSoGroupPrivacy::openSql()}), ascending by
+     * id, strictly after `$afterId`.
+     *
+     * Not {@see listBrowsableGroupIds()}: that one is the discovery list,
+     * which shows CLOSED groups too (a product decision for browsing), reads
+     * newest-first with a fixed cap, and cannot tell a failed read from an
+     * empty one. A public listing needs open groups only, every one of them
+     * reachable page by page, and a failure it can refuse on.
+     *
+     * `is_hall` is the `_bcc_group_kind = 'hall'` discriminator, the one
+     * bcc-trust's GroupContextResolver maps to GroupType::Hall, so a caller
+     * can pick `/halls/` or `/communities/` without a second read.
+     *
+     * ⚠ Read through ProbesReads: null means the read could not be
+     * trusted, and the caller must fail closed (list nothing), never treat
+     * it as "no open groups". An out-of-range `$limit` (1..1000) or a
+     * negative `$afterId` is refused with null rather than clamped.
+     *
+     * @return list<array{id: int, slug: string, is_hall: bool}>|null
+     */
+    public static function openGroupsAfter(int $afterId, int $limit): ?array
+    {
+        if ($afterId < 0 || $limit < 1 || $limit > self::OPEN_GROUPS_PAGE_MAX) {
+            return null;
+        }
+
+        global $wpdb;
+
+        $open = PeepSoGroupPrivacy::openSql('p.ID');
+
+        $rows = self::trustedRowsAssoc((string) $wpdb->prepare(
+            "SELECT p.ID AS id,
+                    p.post_name AS slug,
+                    EXISTS (SELECT 1 FROM {$wpdb->postmeta} kind
+                             WHERE kind.post_id    = p.ID
+                               AND kind.meta_key   = %s
+                               AND kind.meta_value = %s) AS is_hall
+               FROM {$wpdb->posts} p
+              WHERE p.post_type   = %s
+                AND p.post_status = %s
+                AND p.post_name  <> ''
+                AND p.ID > %d
+                AND {$open}
+              ORDER BY p.ID ASC
+              LIMIT %d",
+            self::META_KIND,
+            self::KIND_HALL,
+            self::POST_TYPE,
+            self::POST_STATUS,
+            $afterId,
+            $limit
+        ));
+        if ($rows === null) {
+            return null;
+        }
+
+        $out = [];
+        foreach ($rows as $row) {
+            $id   = (int) ($row['id'] ?? 0);
+            $slug = (string) ($row['slug'] ?? '');
+            if ($id <= 0 || $slug === '') {
+                continue;
+            }
+            $out[] = [
+                'id'      => $id,
+                'slug'    => $slug,
+                'is_hall' => (int) ($row['is_hall'] ?? 0) === 1,
+            ];
+        }
+
+        return $out;
+    }
+
     /**
      * All groups the user is an active member of, IDs only. Used by
      * the profile Groups tab to populate the cross-kind list before

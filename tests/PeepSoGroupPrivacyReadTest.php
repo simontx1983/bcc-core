@@ -31,6 +31,7 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
     final class ScriptedWpdb
     {
         public string $postmeta = 'wp_postmeta';
+        public string $posts    = 'wp_posts';
         public string $last_error = '';
         /** @var list<object> */
         public array $last_result = [];
@@ -241,6 +242,69 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
             self::assertSame([40 => 0], PeepSoGroupPrivacy::privacyForGroups([40]));
         }
 
+        // ── F-518: the open-groups listing, probe contract ─────────────
+
+        public function testTheOpenListingMapsEachRowAndTheHallFlag(): void
+        {
+            $wpdb = $this->scripted('ok', [
+                (object) ['id' => '41', 'slug' => 'g41', 'is_hall' => '0'],
+                (object) ['id' => '70', 'slug' => 'h70', 'is_hall' => '1'],
+            ]);
+
+            self::assertSame(
+                [
+                    ['id' => 41, 'slug' => 'g41', 'is_hall' => false],
+                    ['id' => 70, 'slug' => 'h70', 'is_hall' => true],
+                ],
+                PeepSoGroupRepository::openGroupsAfter(5, 2)
+            );
+            self::assertCount(1, $wpdb->queries);
+            $sql = (string) preg_replace('/\s+/', ' ', $wpdb->queries[0]);
+            self::assertStringContainsString('p.ID > 5', $sql, 'keyset on the id');
+            self::assertStringContainsString('ORDER BY p.ID ASC LIMIT 2', $sql);
+            self::assertStringContainsString(PeepSoGroupPrivacy::openSql('p.ID'), $sql, 'the shared open rule');
+            self::assertStringContainsString("kind.meta_key = '_bcc_group_kind' AND kind.meta_value = 'hall'", $sql);
+            self::assertStringContainsString("p.post_type = 'peepso-group'", $sql);
+            self::assertStringContainsString("p.post_status = 'publish'", $sql);
+            self::assertStringContainsString("p.post_name <> ''", $sql);
+        }
+
+        public function testAnEmptyOpenListingIsEmptyNotUnknown(): void
+        {
+            $this->scripted('ok', []);
+
+            self::assertSame([], PeepSoGroupRepository::openGroupsAfter(0, 10));
+        }
+
+        public function testAFailedOpenListingIsUnknown(): void
+        {
+            $this->scripted('error');
+
+            self::assertNull(PeepSoGroupRepository::openGroupsAfter(0, 10));
+        }
+
+        /** ⚠ The pre-flush bail: stale rows must never be served as the open list. */
+        public function testAPreFlushBailOnTheOpenListingIsUnknownNotTheStaleRows(): void
+        {
+            $wpdb = $this->scripted('preflush');
+            $wpdb->last_result = [(object) ['id' => '43', 'slug' => 'secret-group', 'is_hall' => '0']];
+
+            self::assertNull(PeepSoGroupRepository::openGroupsAfter(0, 10));
+        }
+
+        public function testOutOfRangeArgumentsAreRefusedAndAskNothing(): void
+        {
+            $wpdb = $this->scripted('ok', []);
+
+            self::assertNull(PeepSoGroupRepository::openGroupsAfter(-1, 10));
+            self::assertNull(PeepSoGroupRepository::openGroupsAfter(0, 0));
+            self::assertNull(PeepSoGroupRepository::openGroupsAfter(0, PeepSoGroupRepository::OPEN_GROUPS_PAGE_MAX + 1));
+            self::assertSame([], $wpdb->queries, 'refused, not clamped');
+
+            self::assertSame([], PeepSoGroupRepository::openGroupsAfter(0, PeepSoGroupRepository::OPEN_GROUPS_PAGE_MAX));
+            self::assertCount(1, $wpdb->queries, 'the maximum page is allowed');
+        }
+
         // ── the SQL, executed ──────────────────────────────────────────
 
         /**
@@ -312,6 +376,94 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
             $this->assertDenyListsOnEngine(self::mysql());
         }
 
+        public function testTheOpenListingExecutesOnSqlite(): void
+        {
+            $this->assertOpenListingOnEngine(self::sqlite());
+        }
+
+        public function testTheOpenListingExecutesOnMysql(): void
+        {
+            $this->assertOpenListingOnEngine(self::mysql());
+        }
+
+        /**
+         * F-518: the open listing, executed on the seeded engine. A group is
+         * listed only when a privacy row reads 0 and none reads 1 or 2, it is
+         * a published peepso-group, and it has a slug. Pages walk in id order.
+         *
+         * Two edges read OPEN for gates but are deliberately NOT listed: no
+         * privacy row (40) and a stray value (49, reads 7). A public listing
+         * claims a group is open only when its row says so.
+         */
+        private function assertOpenListingOnEngine(PDO $pdo): void
+        {
+            // Plain tables: the listing reads postmeta in three subqueries.
+            $expected = $this->seedEngine($pdo, false);
+            try {
+                $this->assertOpenListingOnSeededEngine($pdo, $expected);
+            } finally {
+                $this->dropEngineTables($pdo);
+            }
+        }
+
+        private function dropEngineTables(PDO $pdo): void
+        {
+            $pdo->exec('DROP TABLE IF EXISTS ' . self::PREFIX . 'posts');
+            $pdo->exec('DROP TABLE IF EXISTS ' . self::PREFIX . 'postmeta');
+        }
+
+        /** @param array<int, int> $expected */
+        private function assertOpenListingOnSeededEngine(PDO $pdo, array $expected): void
+        {
+
+            $setName = $pdo->prepare('UPDATE ' . self::PREFIX . 'posts SET post_name = ? WHERE ID = ?');
+            foreach (array_keys($expected) as $groupId) {
+                $setName->execute(['g' . $groupId, $groupId]);
+            }
+
+            $metaId     = 1000;
+            $insertPost = $pdo->prepare('INSERT INTO ' . self::PREFIX . 'posts (ID, post_type, post_status, post_name) VALUES (?, ?, ?, ?)');
+            $insertMeta = $pdo->prepare('INSERT INTO ' . self::PREFIX . 'postmeta (meta_id, post_id, meta_key, meta_value) VALUES (?, ?, ?, ?)');
+            $openPost   = static function (int $id, string $type, string $status, string $name, ?string $kind) use ($insertPost, $insertMeta, &$metaId): void {
+                $insertPost->execute([$id, $type, $status, $name]);
+                $insertMeta->execute([$metaId++, $id, PeepSoGroupPrivacy::META_KEY, '0']);
+                if ($kind !== null) {
+                    $insertMeta->execute([$metaId++, $id, '_bcc_group_kind', $kind]);
+                }
+            };
+            $openPost(70, 'peepso-group', 'publish', 'h70', 'hall');    // an open Hall
+            $openPost(71, 'peepso-group', 'publish', '', null);         // no slug: no URL to list
+            $openPost(72, 'peepso-group', 'draft', 'd72', null);        // not published
+            $openPost(73, 'post', 'publish', 'p73', null);              // not a group
+            $openPost(74, 'peepso-group', 'publish', 'c74', 'holders'); // open, not a Hall
+
+            $all = PeepSoGroupRepository::openGroupsAfter(0, PeepSoGroupRepository::OPEN_GROUPS_PAGE_MAX);
+            self::assertSame(
+                [
+                    // 50 is 'abc': the class's one reading CASTs it to 0.
+                    ['id' => 41, 'slug' => 'g41', 'is_hall' => false],
+                    ['id' => 50, 'slug' => 'g50', 'is_hall' => false],
+                    ['id' => 70, 'slug' => 'h70', 'is_hall' => true],
+                    ['id' => 74, 'slug' => 'c74', 'is_hall' => false],
+                ],
+                $all,
+                'open, published, slugged groups only, ascending'
+            );
+
+            $ids = static fn (?array $page): array => array_column($page ?? [], 'id');
+            self::assertSame([41, 50], $ids(PeepSoGroupRepository::openGroupsAfter(0, 2)), 'first page');
+            self::assertSame([70, 74], $ids(PeepSoGroupRepository::openGroupsAfter(50, 2)), 'next page starts after the cursor');
+            self::assertSame([], PeepSoGroupRepository::openGroupsAfter(74, 2), 'past the end');
+
+            // Never wider than the gate: everything listed reads open on the
+            // single read. The two gate-open edges are left out on purpose.
+            foreach ([41, 50, 70, 74] as $groupId) {
+                self::assertSame(PeepSoGroupPrivacy::OPEN, PeepSoGroupPrivacy::privacyForGroup($groupId), "group {$groupId} reads open");
+            }
+            self::assertSame(PeepSoGroupPrivacy::OPEN, $expected[40], 'no row: open for gates, not listed');
+            self::assertSame(PeepSoGroupPrivacy::OPEN, $expected[49], 'stray value: open for gates, not listed');
+        }
+
         private static function sqlite(): PDO
         {
             if (!extension_loaded('pdo_sqlite')) {
@@ -353,11 +505,20 @@ namespace BCC\Core\Repositories\Tests\GroupPrivacyRead {
          *
          * @return array<int, int>
          */
-        private function seedEngine(PDO $pdo): array
+        private function seedEngine(PDO $pdo, bool $temporary = true): array
         {
-            $pdo->exec('CREATE TEMPORARY TABLE ' . self::PREFIX . 'posts ('
-                . "ID INT NOT NULL, post_type VARCHAR(20) NOT NULL DEFAULT 'peepso-group', post_status VARCHAR(20) NOT NULL DEFAULT 'publish')");
-            $pdo->exec('CREATE TEMPORARY TABLE ' . self::PREFIX . 'postmeta ('
+            // ⚠ MySQL cannot open a TEMPORARY table twice in one statement
+            // (error 1137), and a query that reads postmeta in more than one
+            // subquery does exactly that. Such a test passes `false`: plain
+            // tables, dropped first and by dropEngineTables() after.
+            $kind = $temporary ? 'TEMPORARY TABLE' : 'TABLE';
+            if (!$temporary) {
+                $this->dropEngineTables($pdo);
+            }
+            $pdo->exec("CREATE {$kind} " . self::PREFIX . 'posts ('
+                . "ID INT NOT NULL, post_type VARCHAR(20) NOT NULL DEFAULT 'peepso-group', post_status VARCHAR(20) NOT NULL DEFAULT 'publish',"
+                . " post_name VARCHAR(200) NOT NULL DEFAULT '')");
+            $pdo->exec("CREATE {$kind} " . self::PREFIX . 'postmeta ('
                 . 'meta_id INT NOT NULL, post_id INT NOT NULL, meta_key VARCHAR(255) NOT NULL, meta_value TEXT NULL)');
 
             $metaId = 1;
