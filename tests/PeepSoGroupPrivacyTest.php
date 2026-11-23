@@ -175,6 +175,38 @@ final class PeepSoGroupPrivacyTest extends TestCase
         self::assertStringNotContainsString('%', PeepSoGroupPrivacy::nonOpenSql('p.ID'));
     }
 
+    // ── the public-listing predicate (openSql, F-518) ──────────────────
+
+    /**
+     * Explicitly open: a row reads 0 AND the deny predicate is false. Same
+     * value reading (CAST) as the other two, and built on nonOpenSql() so a
+     * two-row group the deny list catches can never also be listed.
+     */
+    public function testTheOpenPredicateIsAnOpenRowAndNotNonOpen(): void
+    {
+        $row = 'SELECT 1 FROM wp_postmeta bcc_group_priv WHERE bcc_group_priv.post_id = p.ID'
+            . " AND bcc_group_priv.meta_key = 'peepso_group_privacy'"
+            . ' AND CAST(bcc_group_priv.meta_value AS UNSIGNED) ';
+
+        self::assertSame(
+            'EXISTS (' . $row . '= 0) AND NOT ' . PeepSoGroupPrivacy::nonOpenSql('p.ID'),
+            PeepSoGroupPrivacy::openSql('p.ID')
+        );
+    }
+
+    public function testTheOpenPredicateCarriesNoPlaceholderForPrepare(): void
+    {
+        self::assertStringNotContainsString('%', PeepSoGroupPrivacy::openSql('p.ID'));
+    }
+
+    #[DataProvider('refusedArguments')]
+    public function testTheOpenPredicateRefusesAnythingThatIsNotAColumnReference(string $argument): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('openSql() takes a column reference');
+        PeepSoGroupPrivacy::openSql($argument);
+    }
+
     #[DataProvider('refusedArguments')]
     public function testTheDenyPredicateRefusesAnythingThatIsNotAColumnReference(string $argument): void
     {

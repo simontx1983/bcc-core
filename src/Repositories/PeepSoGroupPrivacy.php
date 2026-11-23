@@ -212,6 +212,35 @@ final class PeepSoGroupPrivacy
     }
 
     /**
+     * A WHERE condition that is TRUE only when the group whose id is
+     * `$idColumn` is EXPLICITLY open: at least one privacy row reads 0 and
+     * none reads 1 or 2. The allow-list question for a PUBLIC listing
+     * (F-518, the sitemap), which tells search engines a page is public.
+     *
+     *     $where[] = PeepSoGroupPrivacy::openSql('p.ID');
+     *
+     * ⚠ STRICTER than "not non-open" on purpose. A group with NO privacy
+     * row reads as open everywhere else in this class (see the class
+     * docblock), and that stays true for gates. A public listing makes a
+     * claim to the outside world, so it makes it only when the row says
+     * so: the no-row edge is left out rather than advertised.
+     *
+     * Same reading of the value as every other predicate here (valueSql()),
+     * so a two-row group with '0' and '2' is not open. Same contract as
+     * `notSecretSql()`: no `%`, no placeholders, no JOIN.
+     *
+     * @param string $idColumn a column reference such as `p.ID`, never input
+     * @throws \InvalidArgumentException when `$idColumn` is not a column reference
+     */
+    public static function openSql(string $idColumn): string
+    {
+        self::assertColumnReference($idColumn, 'openSql');
+
+        return 'EXISTS (' . self::privacyRowSql($idColumn, '= ' . self::OPEN) . ')'
+            . ' AND NOT ' . self::nonOpenSql($idColumn);
+    }
+
+    /**
      * @throws \InvalidArgumentException when `$idColumn` is not a column reference
      */
     private static function assertColumnReference(string $idColumn, string $method): void
