@@ -1,0 +1,43 @@
+<?php
+
+/**
+ * FIXTURE — not loaded, not scanned, read only by
+ * PostWritePinInventoryTest::testADecoyClosureDoesNotPinAWriteBesideIt().
+ *
+ * EVERY write below is an evaluated ARGUMENT, so each one runs BEFORE
+ * pinOnly's body. None is inside a closure body. The guard must report
+ * all of them as UNPINNED.
+ */
+
+declare(strict_types=1);
+
+namespace BCC\Trust\Tests\Fixtures\Decoy;
+
+use BCC\Core\PeepSo\PeepSoAddPostGuard;
+
+final class DecoyClosureFixture
+{
+    /** A decoy closure in the FIRST argument; the write is the second. */
+    public function decoyInFirstArg(): void
+    {
+        PeepSoAddPostGuard::pinOnly([static fn () => null], wp_insert_post(['post_title' => 'x']));
+    }
+
+    /** A decoy in an array element, write still an argument. */
+    public function decoyInsideTheIntendedArray(): void
+    {
+        PeepSoAddPostGuard::pinOnly(['cb' => static function () { return 1; }], wp_update_post(['ID' => 1], true));
+    }
+
+    /** A model write as an evaluated argument, decoy alongside. */
+    public function decoyWithAModelWrite(): void
+    {
+        PeepSoAddPostGuard::pinOnly([static fn () => null], new \PeepSoGroup(null, ['name' => 'x']));
+    }
+
+    /** A revision write as an evaluated argument. */
+    public function decoyWithARevision(): void
+    {
+        PeepSoAddPostGuard::pinOnly([static fn () => null], wp_save_post_revision(7));
+    }
+}

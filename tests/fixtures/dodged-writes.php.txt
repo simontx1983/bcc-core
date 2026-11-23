@@ -1,0 +1,88 @@
+<?php
+
+/**
+ * F-457 FIXTURE — the ways a PeepSo model write used to walk past the guard.
+ *
+ * NOT loadable code and never scanned as part of the tree: it lives under
+ * tests/fixtures/ with a .txt suffix so neither the guard's own roots nor
+ * PHP's autoloader can see it. The guard is pointed at this file explicitly.
+ *
+ * ⛔ None of these constructs exists in bcc-core or bcc-trust today. That is
+ * precisely why a fixture is the only way to test the rules that forbid
+ * them — there is nothing in either tree for them to catch, so without this
+ * file the deny rules would be green and unexercised.
+ *
+ * Every write below MUST be reported, and reported UNPINNED.
+ */
+
+namespace Fixture\Dodged;
+
+use PeepSoGroup as Community;          // an ALIASED import
+use PeepSoGroup as GroupAlias;
+
+class DodgesTheNameMatch
+{
+    /** 1. An `->update(` on a receiver no pre-pass could tie to a literal new. */
+    public function updateThroughAProperty(): void
+    {
+        $this->group->update(['owner_id' => 7]);
+    }
+
+    /** 2. An `->update(` on a receiver returned by a method. */
+    public function updateThroughAMethodReturn(): void
+    {
+        $group = $this->resolveGroup();
+        $group->update(['owner_id' => 7]);
+    }
+
+    /** 3. The same spelling on $wpdb, which is NOT a model write. */
+    public function updateOnWpdbIsNotAModelWrite(): void
+    {
+        global $wpdb;
+        $wpdb->update('wp_posts', ['post_title' => 'x'], ['ID' => 1]);
+    }
+
+    /** 4. A DYNAMIC new: the class name is in a variable. */
+    public function dynamicNew(string $cls, array $data): void
+    {
+        $group = new $cls(null, $data);
+    }
+
+    /** 5. An ALIASED import of the model class. */
+    public function aliasedNew(array $data): void
+    {
+        $group = new Community(null, $data);
+    }
+
+    /** 6. A SUBCLASS of the model class. */
+    public function subclassNew(array $data): void
+    {
+        $group = new GatedCommunity(null, $data);
+    }
+
+    /** 7. A `[$obj, 'update']` callable, so the name never appears as a call. */
+    public function callableUpdate(): void
+    {
+        $fn = [$this->group, 'update'];
+        $fn(['owner_id' => 7]);
+    }
+}
+
+/**
+ * 8. A subclass declaration, which is how #6 becomes possible.
+ *
+ * ⚠ TWO forms on purpose. The ALIASED parent is caught by the
+ * aliased-import rule, not by the subclass rule — the alias name carries
+ * no trace of the model. Only the DIRECT form exercises `extends`, so
+ * both are here and the layering is visible.
+ */
+class GatedCommunity extends GroupAlias
+{
+}
+
+class DirectlyGatedCommunity extends \PeepSoGroup
+{
+}
+
+/** 9. class_alias, the runtime version of an aliased import. */
+class_alias('PeepSoGroup', 'FixtureGroupAlias');
