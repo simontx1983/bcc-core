@@ -428,12 +428,10 @@ final class PeepSoAddPostGuard
         // TREATED AS A HIJACK.
         //
         // This used to call `get_post_meta()` and `continue` on an empty
-        // value. That returns `''` for a key that is NOT THERE and for a
-        // read that DID NOT RUN, so an unreadable meta table made this
-        // backstop report the post clean — the one state where it most
-        // needed to refuse. The root cause is one layer down: a failed meta
-        // read is cached as an empty array, so every later read in the same
-        // request agrees with it.
+        // value. `get_post_meta()` cannot tell "absent" from "unread", so
+        // an unreadable meta table made this backstop report the post clean
+        // — the one state where it most needed to refuse. Re-reading does
+        // not help: the same answer comes back for the rest of the request.
         //
         // `valuesOrUnknown()` reads `wp_postmeta` directly through
         // ProbesReads, so it never consults that cache, and answers `null`
@@ -535,11 +533,10 @@ final class PeepSoAddPostGuard
         // ABSENCE OF THE READ IS THE FIX.
         //
         // This used to call `get_post_meta()` first and `continue` on an
-        // empty value. `get_post_meta()` returns `''` for a key that is NOT
-        // THERE and for a read that DID NOT RUN, so an unreadable meta table
-        // took the `continue` and this backstop reported the comment clean.
-        // The root cause is one layer down: a failed meta read is cached as
-        // an empty array, so every later read in the request agrees.
+        // empty value. `get_post_meta()` cannot tell "absent" from
+        // "unread", so an unreadable meta table took the `continue` and
+        // this backstop reported the comment clean. So this backstop takes
+        // NO read at all.
         //
         // A guarded tri-state read would fix that, and is what the POST
         // backstop needs, because deleting a post is destructive and has to
