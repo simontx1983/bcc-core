@@ -930,6 +930,24 @@ add_filter('bcc_system_health', function (array $health): array {
         //   Steady state zero. Gates that must refuse on an untrusted read
         //   consume MetaReadHealth — see F-460 / F-461.
         'meta_cache' => ['post_meta_read', 'user_meta_read'],
+        // auth_token — bcc-trust's token revocation writes (JwtToken).
+        //   `revoke_write_failed` — a revocation write did not land: the
+        //                           revoke-all version bump (a password or
+        //                           email change, sign out everywhere, a
+        //                           suspension), a sign-out's denylist
+        //                           entry, or a refresh's retired-list
+        //                           entry. The caller answers 503 or logs it
+        //                           and claims nothing. Steady state zero;
+        //                           any activation is worth a look.
+        'auth_token' => ['revoke_write_failed'],
+        // validator_index — bcc-trust's validator index run (F-550).
+        //   `solana_shared_identity` — a Solana identity named more than one
+        //                              vote account in getVoteAccounts, so
+        //                              its row keeps no vote_account and it
+        //                              can't be self-claimed until that
+        //                              resolves. Counted once per identity
+        //                              per run. Expected rare.
+        'validator_index' => ['solana_shared_identity'],
     ]);
 
     return $health;
