@@ -1,0 +1,63 @@
+<?php
+
+/**
+ * F-457 FIXTURE — a class that merely SHARES THE GUARD'S SHORT NAME must not
+ * arm a pin.
+ *
+ * The old rule matched the bare short name anywhere, so this file's
+ * `PeepSoAddPostGuard::pinOnly(` armed a pin that the real guard knows
+ * nothing about. This namespace is not the guard's, and nothing here imports
+ * the real FQN, so the write below MUST be reported UNPINNED.
+ *
+ * ⛔ Not loadable and never scanned as part of the tree: .txt under
+ * tests/fixtures/, pointed at explicitly.
+ */
+
+namespace Fixture\Impostor;
+
+/** Same short name, different namespace, no relation to the real guard. */
+final class PeepSoAddPostGuard
+{
+    /** @param array<int, mixed> $keep */
+    public static function pinOnly(array $keep, callable $write): mixed
+    {
+        unset($keep);
+
+        return $write();
+    }
+}
+
+/*
+ * ⚠⚠ A COMMENT NAMING THE REAL IMPORT. The first version of the
+ * fully-qualified rule tested the file TEXT for this line, so this
+ * comment alone armed every pin in the file — the comment-names-the-
+ * mechanism trap, inside the rule written to close a name-matching hole.
+ * The rule reads TOKENS now, so this must still arm nothing.
+ *
+ * use BCC\Core\PeepSo\PeepSoAddPostGuard;
+ */
+
+final class LooksProtectedButIsNot
+{
+    public function write(int $author): int
+    {
+        // Spelled exactly like a real pin, and it neutralises nothing.
+        return PeepSoAddPostGuard::pinOnly([], static fn () => wp_insert_post([
+            'post_type'   => 'peepso-post',
+            'post_author' => $author,
+        ], true));
+    }
+
+    /**
+     * ⚠ A METHOD that merely shares a writer's NAME, reached through the
+     * nullsafe operator. The skip-list has to know `?->` as well as `->`,
+     * or this is reported as a call to the global `wp_insert_post` — a
+     * FALSE POSITIVE, and the opposite failure from the one the nullsafe
+     * fix in `updateIsNotOnWpdb()` addresses.
+     */
+    public function aMethodNamedLikeAWriter(): void
+    {
+        $this->helper?->wp_insert_post(['post_type' => 'x']);
+        $this->helper->wp_update_post(['ID' => 1]);
+    }
+}
