@@ -42,6 +42,23 @@ class DodgesTheNameMatch
         $wpdb->update('wp_posts', ['post_title' => 'x'], ['ID' => 1]);
     }
 
+    /**
+     * 3b. The PHP 8 NULLSAFE operator. `?->` is its OWN token
+     * (T_NULLSAFE_OBJECT_OPERATOR), so a rule that only knew
+     * T_OBJECT_OPERATOR let this past entirely.
+     */
+    public function updateThroughANullsafeOperator(): void
+    {
+        $this->group?->update(['owner_id' => 7]);
+    }
+
+    /** 3c. And the same spelling on $wpdb is still not a model write. */
+    public function nullsafeUpdateOnWpdbIsNotAModelWrite(): void
+    {
+        global $wpdb;
+        $wpdb?->update('wp_posts', ['post_title' => 'x'], ['ID' => 1]);
+    }
+
     /** 4. A DYNAMIC new: the class name is in a variable. */
     public function dynamicNew(string $cls, array $data): void
     {

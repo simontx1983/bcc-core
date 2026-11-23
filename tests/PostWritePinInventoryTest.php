@@ -426,7 +426,7 @@ final class PostWritePinInventoryTest extends TestCase
                 $prev = self::prevSignificant($tokens, $i - 1);
                 if ($prev !== null && is_array($tokens[$prev]) && in_array(
                     $tokens[$prev][0],
-                    [T_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION],
+                    [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR, T_DOUBLE_COLON, T_FUNCTION],
                     true
                 )) {
                     continue;
@@ -605,13 +605,98 @@ final class PostWritePinInventoryTest extends TestCase
         if (self::bare($written) === 'PeepSoAddPostGuard') {
             // The short name is the real guard when the file declares the
             // guard's own namespace, or imports exactly that FQN.
-            return str_contains($src, 'namespace ' . self::GUARD_NAMESPACE)
-                || str_contains($src, 'use ' . self::GUARD_FQN . ';');
+            // ⚠⚠ TOKENS, NOT `str_contains`. A COMMENT naming the import —
+            // `// use BCC\\Core\\PeepSo\\PeepSoAddPostGuard;` — satisfied the
+            // text check and armed every pin in the file. That is the same
+            // trap this guard documents elsewhere (a comment naming a
+            // mechanism making the mechanism react), and it had reappeared
+            // here, in the rule written to CLOSE a name-matching hole.
+            return self::declaresGuardNamespace($tokens) || self::importsGuardFqn($tokens);
         }
 
         // self:: / static:: only inside the guard class itself.
         return in_array(strtolower($written), ['self', 'static'], true)
-            && str_contains($src, 'class PeepSoAddPostGuard');
+            && self::declaresGuardClass($tokens);
+    }
+
+    /**
+     * Does this file DECLARE the guard's own namespace?
+     *
+     * ⚠ Token-based for the reason given at the call site: a comment naming
+     * the namespace must not count.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function declaresGuardNamespace(array $tokens): bool
+    {
+        $count = count($tokens);
+
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_NAMESPACE) {
+                continue;
+            }
+            $j = self::nextSignificant($tokens, $i + 1, $count);
+            if ($j !== null && is_array($tokens[$j])
+                && ltrim($tokens[$j][1], '\\') === self::GUARD_NAMESPACE) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Does this file IMPORT the guard by its fully qualified name?
+     *
+     * ⚠ A `use … as Something;` alias is deliberately NOT accepted: the
+     * alias would then arm pins under a name this walk cannot follow, which
+     * is the hole the forbid rules exist for.
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function importsGuardFqn(array $tokens): bool
+    {
+        $count = count($tokens);
+
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_USE) {
+                continue;
+            }
+            $j = self::nextSignificant($tokens, $i + 1, $count);
+            if ($j === null || !is_array($tokens[$j])
+                || ltrim($tokens[$j][1], '\\') !== self::GUARD_FQN) {
+                continue;
+            }
+            // A plain import ends at `;`. `use X as Y;` does not count.
+            $k = self::nextSignificant($tokens, $j + 1, $count);
+            if ($k !== null && $tokens[$k] === ';') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Is the guard class DECLARED in this file? (Gates `self::` / `static::`.)
+     *
+     * @param array<int, array{0: int, 1: string, 2: int}|string> $tokens
+     */
+    private static function declaresGuardClass(array $tokens): bool
+    {
+        $count = count($tokens);
+
+        for ($i = 0; $i < $count; $i++) {
+            if (!is_array($tokens[$i]) || $tokens[$i][0] !== T_CLASS) {
+                continue;
+            }
+            $j = self::nextSignificant($tokens, $i + 1, $count);
+            if ($j !== null && is_array($tokens[$j]) && $tokens[$j][1] === 'PeepSoAddPostGuard') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -706,8 +791,13 @@ final class PostWritePinInventoryTest extends TestCase
      */
     private static function updateIsNotOnWpdb(array $tokens, int $i): bool
     {
+        // ⚠⚠ BOTH OBJECT OPERATORS. PHP 8's nullsafe `?->` is its own token,
+        // T_NULLSAFE_OBJECT_OPERATOR, so treating only T_OBJECT_OPERATOR let
+        // `$group?->update([...])` past the rule entirely — the same shape of
+        // miss as PHP 8 lexing `\wp_trash_post(` as ONE name token.
         $arrow = self::prevSignificant($tokens, $i - 1);
-        if ($arrow === null || !is_array($tokens[$arrow]) || $tokens[$arrow][0] !== T_OBJECT_OPERATOR) {
+        if ($arrow === null || !is_array($tokens[$arrow])
+            || !in_array($tokens[$arrow][0], [T_OBJECT_OPERATOR, T_NULLSAFE_OBJECT_OPERATOR], true)) {
             return false;
         }
 
@@ -1210,9 +1300,10 @@ final class PostWritePinInventoryTest extends TestCase
         }
 
         self::assertCount(
-            2,
+            3,
             $updates,
-            'both the property receiver and the method-return receiver must be'
+            'the property receiver, the method-return receiver and the NULLSAFE'
+            . ' receiver must all be reported, and neither $wpdb form may be'
             . " reported, and \$wpdb->update( must NOT be. Got:\n  "
             . implode("\n  ", $updates)
         );
@@ -1246,9 +1337,23 @@ final class PostWritePinInventoryTest extends TestCase
             self::assertFalse(
                 $row['pinned'],
                 $row['site'] . ': a pin spelled by a class that merely shares the'
-                . " guard's short name must not count as protection"
+                . " guard's short name must not count as protection. The fixture"
+                . ' also carries a COMMENT naming the real import, which a'
+                . ' text-matching rule accepted as evidence.'
             );
         }
+
+        // ⚠ EXACTLY ONE. The fixture also calls two METHODS named like
+        // writers, one of them through `?->`. Those are method calls, not the
+        // global functions, so a skip-list that does not know the nullsafe
+        // operator reports them — a false positive, and the opposite failure
+        // from the nullsafe miss in {@see updateIsNotOnWpdb()}.
+        self::assertCount(
+            1,
+            $rows,
+            'only the real write may be reported; a method that merely shares a'
+            . " writer's name is not a call to that writer, through `->` or `?->`"
+        );
     }
 
     /** The allowlist is empty, and a test says so out loud. */

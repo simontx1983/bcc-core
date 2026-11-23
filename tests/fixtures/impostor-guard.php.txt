@@ -27,6 +27,16 @@ final class PeepSoAddPostGuard
     }
 }
 
+/*
+ * ⚠⚠ A COMMENT NAMING THE REAL IMPORT. The first version of the
+ * fully-qualified rule tested the file TEXT for this line, so this
+ * comment alone armed every pin in the file — the comment-names-the-
+ * mechanism trap, inside the rule written to close a name-matching hole.
+ * The rule reads TOKENS now, so this must still arm nothing.
+ *
+ * use BCC\Core\PeepSo\PeepSoAddPostGuard;
+ */
+
 final class LooksProtectedButIsNot
 {
     public function write(int $author): int
@@ -36,5 +46,18 @@ final class LooksProtectedButIsNot
             'post_type'   => 'peepso-post',
             'post_author' => $author,
         ], true));
+    }
+
+    /**
+     * ⚠ A METHOD that merely shares a writer's NAME, reached through the
+     * nullsafe operator. The skip-list has to know `?->` as well as `->`,
+     * or this is reported as a call to the global `wp_insert_post` — a
+     * FALSE POSITIVE, and the opposite failure from the one the nullsafe
+     * fix in `updateIsNotOnWpdb()` addresses.
+     */
+    public function aMethodNamedLikeAWriter(): void
+    {
+        $this->helper?->wp_insert_post(['post_type' => 'x']);
+        $this->helper->wp_update_post(['ID' => 1]);
     }
 }
