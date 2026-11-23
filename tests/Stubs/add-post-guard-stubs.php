@@ -662,7 +662,22 @@ namespace BCC\Core\PeepSo {
         function delete_post_meta($postId, $key, $value = ''): bool
         {
             unset($value);
-            unset($GLOBALS['__bcc_apg']['meta'][(int) $postId][$key]);
+
+            // ⚠⚠ FAITHFUL ABOUT THE RETURN, which this stub was NOT. It used
+            // to `return true` unconditionally, while WordPress returns FALSE
+            // when no matching meta row existed. F-498 reads that return —
+            // `stripForgedStamps()` deletes the stamps unconditionally and uses
+            // the return to decide whether a forgery was actually found — so an
+            // always-true stub would make a CLEAN comment report a forgery, log
+            // an error and return a reason, on every single call. Nothing else
+            // in `src/` reads this return, so modelling it correctly changes no
+            // other suite.
+            $postId = (int) $postId;
+            if (!isset($GLOBALS['__bcc_apg']['meta'][$postId][$key])) {
+                return false;
+            }
+
+            unset($GLOBALS['__bcc_apg']['meta'][$postId][$key]);
 
             return true;
         }

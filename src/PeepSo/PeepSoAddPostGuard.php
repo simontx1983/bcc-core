@@ -424,29 +424,72 @@ final class PeepSoAddPostGuard
             return null;
         }
 
-        $found = [];
-        foreach (self::AUTHORIZATION_STAMPS as $key) {
-            $value = get_post_meta($postId, $key, true);
-            if ($value === '' || $value === false || $value === null || (int) $value === 0) {
-                continue;
+        // ⛔⛔ F-498 — A GUARDED TRI-STATE READ, AND "COULD NOT TELL" IS
+        // TREATED AS A HIJACK.
+        //
+        // This used to call `get_post_meta()` and `continue` on an empty
+        // value. `get_post_meta()` cannot tell "absent" from "unread", so
+        // an unreadable meta table made this backstop report the post clean
+        // — the one state where it most needed to refuse. Re-reading does
+        // not help: the same answer comes back for the rest of the request.
+        //
+        // `valuesOrUnknown()` reads `wp_postmeta` directly through
+        // ProbesReads, so it never consults that cache, and answers `null`
+        // for a read it cannot vouch for. Here `null` takes the SAME branch
+        // as a stamp that is actually present.
+        //
+        // ⚠ THE COMMENT BACKSTOP DOES NOT NEED THIS, and the asymmetry is
+        // deliberate. {@see stripForgedStamps()} deletes unconditionally
+        // because deleting a key that was never set is a no-op. Deleting a
+        // POST is not: it has to be a decision, so this one reads.
+        //
+        // ⚠ SINGLE-VALUED KEYS ONLY — the repository's own caveat, and it
+        // is satisfied with room to spare rather than by assumption. The
+        // chunk LIMIT is `ids × keys × MAX_ROWS_PER_PAIR`, so for one post
+        // and three keys it is 1 × 3 × 5 = 15 rows, and the read answers
+        // `null` at 15 or more. BCC writes at most ONE row here
+        // (`update_post_meta()` cannot duplicate a key) and a listener that
+        // got there first adds one or two, so the ceiling is unreachable on
+        // a just-created post. If it ever were reached the answer is `null`,
+        // which fails closed.
+        $read = \BCC\Core\Repositories\PostMetaRepository::valuesOrUnknown(
+            [$postId],
+            self::AUTHORIZATION_STAMPS
+        );
+
+        if ($read === null) {
+            $stamps = 'UNKNOWN — the stamp read could not be trusted';
+        } else {
+            $found = [];
+            foreach (self::AUTHORIZATION_STAMPS as $key) {
+                foreach ($read[$postId][$key] ?? [] as $value) {
+                    if ($value === '' || (int) $value === 0) {
+                        continue;
+                    }
+                    // BCC stamps the group itself, AFTER this check
+                    // ({@see PeepSoStatusWriter::attachToGroup()}), so a
+                    // matching group stamp here means a listener got there
+                    // first — with the right id, but without BCC's gate
+                    // having run. Still a hijack.
+                    $found[] = $key . '=' . $value;
+                }
             }
-            // BCC stamps the group itself, AFTER this check
-            // ({@see PeepSoStatusWriter::attachToGroup()}), so a matching
-            // group stamp here means a listener got there first — with the
-            // right id, but without BCC's gate having run. Still a hijack.
-            $found[] = $key . '=' . (string) $value;
+
+            if ($found === []) {
+                return null;
+            }
+
+            $stamps = implode(',', $found);
         }
 
-        if ($found === []) {
-            return null;
-        }
-
+        // ⭐ ONE log-and-destroy path for both branches, so a future change
+        // cannot fix one and forget the other.
         \BCC\Core\Log\Logger::error(
             '[bcc-core] PeepSo listener stamped a post BCC did not route — detach failed',
             [
                 'post_id'           => $postId,
                 'intended_group_id' => $intendedGroupId,
-                'stamps'            => implode(',', $found),
+                'stamps'            => $stamps,
             ]
         );
 
@@ -486,20 +529,41 @@ final class PeepSoAddPostGuard
             return null;
         }
 
+        // ⛔⛔ F-498 — DELETED UNCONDITIONALLY, WITH NO READ, AND THE
+        // ABSENCE OF THE READ IS THE FIX.
+        //
+        // This used to call `get_post_meta()` first and `continue` on an
+        // empty value. `get_post_meta()` cannot tell "absent" from
+        // "unread", so an unreadable meta table took the `continue` and
+        // this backstop reported the comment clean. So this backstop takes
+        // NO read at all.
+        //
+        // A guarded tri-state read would fix that, and is what the POST
+        // backstop needs, because deleting a post is destructive and has to
+        // be deliberate. Here it is unnecessary: BCC never writes ANY of
+        // these keys on a comment — measured across bcc-core, bcc-trust and
+        // bcc-search, including a check for dynamic `update_post_meta()`
+        // keys — so there is nothing to preserve and no verdict to get
+        // wrong. Deleting a key that was never set is a no-op.
+        //
+        // ⚠ WHAT THIS DOES NOT CLOSE, stated rather than implied: a delete
+        // whose WRITE fails leaves the stamp. `delete_post_meta()` returns
+        // false both for "nothing to delete" and for "the delete failed",
+        // and telling those apart needs the read this change removes. So
+        // the read-side fail-open is gone; a write-side failure is not.
         $stripped = [];
         foreach (self::AUTHORIZATION_STAMPS as $key) {
-            $value = get_post_meta($postId, $key, true);
-            if ($value === '' || $value === false || $value === null || (int) $value === 0) {
-                continue;
+            if (delete_post_meta($postId, $key)) {
+                $stripped[] = $key;
             }
-            delete_post_meta($postId, $key);
-            $stripped[] = $key . '=' . (string) $value;
         }
 
         if ($stripped === []) {
             return null;
         }
 
+        // ⚠ The key NAMES only. The old log carried `key=value`, which cost
+        // a read; the decision no longer takes one, so neither does this.
         \BCC\Core\Log\Logger::error(
             '[bcc-core] PeepSo listener stamped a comment BCC did not route — detach failed',
             ['post_id' => $postId, 'stamps' => implode(',', $stripped)]

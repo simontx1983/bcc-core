@@ -7,6 +7,7 @@ namespace BCC\Core\PeepSo\Tests;
 use BCC\Core\PeepSo\PeepSoAddPostGuard;
 use BCC\Core\PeepSo\PeepSoStatusWriter;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
@@ -46,6 +47,119 @@ final class PeepSoAddPostGuardTest extends TestCase
     {
         parent::setUp();
         require_once __DIR__ . '/Stubs/add-post-guard-stubs.php';
+        require_once __DIR__ . '/Stubs/usermeta-wpdb.php';
+
+        // ⛔⛔ F-498 — the stamps are now read through
+        // `PostMetaRepository::valuesOrUnknown()`, which goes to `$wpdb`, so
+        // seeding the `get_post_meta()` stub no longer reaches the guard.
+        //
+        // ⚠ This REPLACES the stubs' own `$wpdb`, so it has to keep that
+        // one's `get_var()` answer: the writer path resolves the activity id
+        // through it, and dropping it made two legitimate-write tests fail
+        // for a reason that had nothing to do with stamps.
+        //
+        // ⚠ Not the shared Stubs UserMetaWpdb that #164 drives this same
+        // read with: that class is final and models no `get_var()`. The two
+        // failure modes below are written against ProbesReads' real
+        // contract — trusted iff `query() !== false` AND `last_error` is
+        // empty afterwards.
+        $GLOBALS['__apg_modes'] = [];
+        $GLOBALS['wpdb']        = new class {
+            public string $prefix     = 'wp_';
+            public string $postmeta   = 'wp_postmeta';
+            public string $last_error = '';
+            /** @var list<object> */
+            public array $last_result = [];
+            public int $metaQueries   = 0;
+
+            /**
+             * ⚠ THE PLACEHOLDERS MUST BE SUBSTITUTED, not passed through.
+             * `valuesOrUnknown()` builds its SQL with `%d`/`%s` and the keys
+             * arrive as ARGS, so a passthrough `prepare()` leaves the query
+             * with no key names in it — `query()` below then matches nothing,
+             * answers a TRUSTED EMPTY result, and every stamped-post test
+             * reports clean. Same substitution as the shared Stubs double.
+             *
+             * @param mixed ...$args
+             */
+            public function prepare(string $sql, ...$args): string
+            {
+                $next = 0;
+
+                return (string) preg_replace_callback(
+                    '/%[ds]/',
+                    static function (array $m) use (&$next, $args): string {
+                        $value = $args[$next++] ?? '';
+
+                        return $m[0] === '%d'
+                            ? (string) (int) $value
+                            : "'" . addslashes((string) $value) . "'";
+                    },
+                    $sql
+                );
+            }
+
+            /** @param string $sql */
+            public function get_var($sql): string
+            {
+                unset($sql);
+
+                return '777';
+            }
+
+            /**
+             * @param  string $sql
+             * @return int|false
+             */
+            public function query($sql)
+            {
+                $this->last_error  = '';
+                $this->last_result = [];
+
+                if (stripos($sql, 'wp_postmeta') === false) {
+                    return 0;
+                }
+
+                $this->metaQueries++;
+                $mode = array_shift($GLOBALS['__apg_modes']) ?: 'ok';
+
+                // A DRIVER FAILURE sets both signals ProbesReads reads.
+                if ($mode === 'error') {
+                    $this->last_error = 'meta read failed';
+
+                    return false;
+                }
+
+                // THE PRE-FLUSH BAIL is the subtle one: a row count and NO
+                // `last_error`, so BOTH of ProbesReads' checks pass, while
+                // `last_result` still holds the PREVIOUS query's rows. Those
+                // rows name an id this query never asked about, which is
+                // what makes them recognisably not ours.
+                if ($mode === 'preflush') {
+                    $this->last_result = [
+                        (object) ['post_id' => '999999', 'meta_key' => 'peepso_group_id', 'meta_value' => '1'],
+                    ];
+
+                    return 1;
+                }
+
+                $rows = [];
+                foreach ((array) ($GLOBALS['__bcc_apg']['meta'] ?? []) as $postId => $byKey) {
+                    foreach ((array) $byKey as $key => $value) {
+                        if (!is_array($value) && strpos($sql, (string) $key) !== false) {
+                            $rows[] = (object) [
+                                'post_id'    => (string) $postId,
+                                'meta_key'   => (string) $key,
+                                'meta_value' => (string) $value,
+                            ];
+                        }
+                    }
+                }
+                $this->last_result = $rows;
+
+                return count($rows);
+            }
+        };
 
         $GLOBALS['__bcc_apg'] = [
             'meta' => [], 'ran' => [], 'fetched' => [], 'anon' => [],
@@ -71,8 +185,26 @@ final class PeepSoAddPostGuardTest extends TestCase
 
     protected function tearDown(): void
     {
-        unset($GLOBALS['__bcc_apg'], $GLOBALS['wp_filter']);
+        unset($GLOBALS['__bcc_apg'], $GLOBALS['wp_filter'], $GLOBALS['__apg_modes'], $GLOBALS['wpdb']);
         parent::tearDown();
+    }
+
+    /**
+     * Seed a stamp into BOTH stores — the one the guarded READ queries and
+     * the one the write stubs manipulate — so a test cannot pass because it
+     * seeded the store the code under test no longer looks at.
+     *
+     * @param int|string $value
+     */
+    private function seedStamp(int $postId, string $key, $value): void
+    {
+        $GLOBALS['__bcc_apg']['meta'][$postId][$key] = $value;
+    }
+
+    /** Script the meta queries in turn: 'ok', 'error' or 'preflush'. */
+    private function metaReadModes(string ...$modes): void
+    {
+        $GLOBALS['__apg_modes'] = array_values($modes);
     }
 
     /** @return array<string, mixed> */
@@ -447,7 +579,7 @@ final class PeepSoAddPostGuardTest extends TestCase
      */
     public function testAStampedPostIsDeletedThroughPeepSosOwnPath(): void
     {
-        $GLOBALS['__bcc_apg']['meta'][self::POST_ID]['peepso_group_id'] = self::SECRET_HALL;
+        $this->seedStamp(self::POST_ID, 'peepso_group_id', self::SECRET_HALL);
 
         $reason = PeepSoAddPostGuard::failClosedIfHijacked(self::POST_ID, 0);
 
@@ -475,13 +607,106 @@ final class PeepSoAddPostGuardTest extends TestCase
      */
     public function testTheStatusWriterRefusesAHijackedPost(): void
     {
-        $GLOBALS['__bcc_apg']['meta'][self::POST_ID]['peepso_group_id'] = self::SECRET_HALL;
+        $this->seedStamp(self::POST_ID, 'peepso_group_id', self::SECRET_HALL);
 
         $result = PeepSoStatusWriter::createSelfStatus(self::AUTHOR, 'hello');
 
         self::assertSame(false, $result['ok'] ?? null);
         self::assertSame('hijacked', $result['reason'] ?? null);
         self::assertSame([self::POST_ID], $GLOBALS['__bcc_apg']['deleted']);
+    }
+
+    /**
+     * ⛔⛔ F-498 — A READ THAT CANNOT BE TRUSTED IS A HIJACK.
+     *
+     * The old check called `get_post_meta()` and skipped an empty value. That
+     * returns `''` for a key that is NOT THERE and for a read that DID NOT
+     * RUN, so an unreadable meta table made this backstop report the post
+     * clean — the one state where it most needed to refuse.
+     *
+     * Both modes come from the shared double: `error` is a driver failure
+     * (`query()` false with `last_error` set), `preflush` is the bail that
+     * leaves the PREVIOUS query's rows in `last_result` with NO `last_error`,
+     * which is the one a reader trusting `get_results()` plus `last_error`
+     * would serve as a real answer.
+     *
+     * ⚠ NOTHING IS SEEDED HERE, deliberately. The post is clean, so the only
+     * thing that can produce a refusal is the read being untrustworthy. If the
+     * guard ever fell back to trusting an empty answer, these two fail.
+     */
+    #[DataProvider('untrustedReads')]
+    public function testAnUntrustedStampReadIsTreatedAsAHijack(string $mode): void
+    {
+        $this->metaReadModes($mode);
+
+        $reason = PeepSoAddPostGuard::failClosedIfHijacked(self::POST_ID, 0);
+
+        self::assertSame('hijacked', $reason, 'an untrusted read must not pass as clean');
+        self::assertSame([self::POST_ID], $GLOBALS['__bcc_apg']['deleted'], 'the post must be destroyed');
+        self::assertNotSame([], $GLOBALS['__bcc_apg']['logged'], 'and it must leave a log trail');
+    }
+
+    /** @return iterable<string, array{string}> */
+    public static function untrustedReads(): iterable
+    {
+        yield 'a driver failure'   => ['error'];
+        yield 'the pre-flush bail' => ['preflush'];
+    }
+
+    /**
+     * ⚠ ANTI-VACUITY for the two cases above, and the reason they are worth
+     * having. A clean post with a read that DID run must come back null — so
+     * neither "always hijacked" nor "the fixture never reaches the code" can
+     * explain a pass. It also proves the query really happened.
+     */
+    public function testACleanPostWithATrustedReadIsLeftAlone(): void
+    {
+        $this->metaReadModes('ok');
+
+        $reason = PeepSoAddPostGuard::failClosedIfHijacked(self::POST_ID, 0);
+
+        self::assertNull($reason);
+        self::assertSame([], $GLOBALS['__bcc_apg']['deleted']);
+
+        self::assertGreaterThan(0, $GLOBALS['wpdb']->metaQueries, 'the guarded read must actually query');
+    }
+
+    /**
+     * ⛔⛔ F-498 — THE COMMENT BACKSTOP TAKES NO READ AT ALL, and that is the
+     * fix rather than a shortcut.
+     *
+     * BCC never writes any of these keys on a comment, so there is nothing to
+     * preserve and no verdict to get wrong: deleting a key that was never set
+     * is a no-op. Scripting EVERY meta query to fail proves the absence — a
+     * version that still read would strip nothing here.
+     *
+     * ⚠ It also pins the asymmetry with the post backstop above, which does
+     * read, because deleting a POST has to be a decision.
+     */
+    public function testTheCommentBackstopStripsEvenWhenEveryReadFails(): void
+    {
+        $this->seedStamp(self::POST_ID, 'peepso_post_as_page', '1');
+        $this->seedStamp(self::POST_ID, 'peepso_page_id', '77');
+        $this->metaReadModes('error', 'error', 'error', 'error');
+
+        $reason = PeepSoAddPostGuard::stripForgedStamps(self::POST_ID);
+
+        self::assertSame('forged_stamp_stripped', $reason);
+        self::assertArrayNotHasKey('peepso_post_as_page', $this->meta(), 'the forged stamp must be gone');
+        self::assertArrayNotHasKey('peepso_page_id', $this->meta(), 'and the id it rides on');
+        self::assertSame([], $GLOBALS['__bcc_apg']['deleted'], 'a comment is never destroyed');
+    }
+
+    /**
+     * ⚠ THE OTHER HALF, and the one an always-true delete stub would hide. A
+     * clean comment must report NOTHING stripped, or every ordinary comment
+     * logs a forgery. `delete_post_meta()` returns false when no row matched,
+     * which is what distinguishes the two — see the stub's note.
+     */
+    public function testACleanCommentReportsNothingStripped(): void
+    {
+        self::assertNull(PeepSoAddPostGuard::stripForgedStamps(self::POST_ID));
+        self::assertSame([], $GLOBALS['__bcc_apg']['logged'], 'a clean comment must not log a forgery');
     }
 
     // ── the keep-list itself ────────────────────────────────────────────
