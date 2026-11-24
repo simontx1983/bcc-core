@@ -654,18 +654,18 @@ add_filter('bcc_system_health', function (array $health): array {
         // means the worker never fires. Most post-mutation paths have a
         // reconciliation sweep that re-enqueues (DisputeScheduler::doReconcile
         // for panelist notify, the recurring graph/recalc/stats sweeps for
-        // routine work) — the two events below are the surfaces where loss
-        // is unrecoverable without manual replay:
-        //   - endorsement_fraud_analyzer: per-endorsement fraud rescoring.
-        //     No reconciliation; a missed enqueue means the endorser keeps
-        //     a trust bonus they should not.
+        // routine work) — the event below is the surface where loss is
+        // unrecoverable without manual replay:
         //   - vote_job_dispatcher: the composite `bcc_trust_async_post_vote`
         //     job that fans out to fraud analysis + trust graph + recalc +
         //     stats refresh. A miss strands all four sub-tasks for that vote.
         // Sustained nonzero activation = wp_options is unhealthy on the
         // hot mutation path — read like an incident, not a warning.
+        // endorsement_fraud_analyzer — RETIRED 2026-11-24. Its only writer
+        // (the endorsement fraud-analysis enqueue) was removed with the
+        // Endorse→Attestation cutover (bcc-trust b4a8c6ae), so the counter
+        // could never move; bcc-trust's DegradationMetricsCoreMapTest found it.
         'cron_dispatch'        => [
-            'endorsement_fraud_analyzer',
             'vote_job_dispatcher',
         ],
         // post_commit_task — a post-commit trust-processing STEP threw during
