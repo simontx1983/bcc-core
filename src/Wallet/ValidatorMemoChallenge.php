@@ -6,10 +6,14 @@
  * wallet. The server issues a challenge carrying the exact memo the
  * operator must send, from the operator account to itself:
  *
- *   BCC: claim validator page <valoper> for @<handle> on <host>. Code <code>
+ *   BCC: claim validator page <valoper> on <host>. Code <code>
  *
+ * - NO member is named on chain (Phillip's ruling, 2026-11-24): the memo
+ *   carries the purpose, the valoper, the host and the code only. Which
+ *   member it is for lives server-side, on the challenge (its user id).
  * - The code is 8 symbols from a CSPRNG over an alphabet without the
- *   look-alikes 0 O 1 I (and no lowercase, so no l): 40 bits, used once.
+ *   look-alikes 0 O 1 I (and no lowercase, so no l): 40 bits, used once,
+ *   and UNIQUE among live challenges (a collision draws again).
  * - The memo is printable ASCII, at most 256 bytes (the Cosmos SDK's
  *   default memo limit), and compared byte for byte (memoMatches()).
  * - A challenge is LIVE for 30 minutes, which bounds INCLUSION: the
@@ -19,8 +23,11 @@
  *   per challenge.
  * - The claim consumes it, inside the claim's own transaction
  *   (consumeInTransaction()).
- * - A changed handle, a withdrawal, a newer challenge on the same valoper
- *   or another member each make it unusable.
+ * - Only its own member may reserve or consume it. A withdrawal or a newer
+ *   challenge on the same valoper makes it unusable.
+ * - findLiveByCode(): which challenge a (valoper, code) pair names, while it
+ *   is live and unreserved. For the operator-facing lookup (design A5) that
+ *   shows who a code links the validator to.
  *
  * Limits, security's ruling of 2026-11-24, all named constants below:
  *   - per member: 3 live, 5 issued per hour, and ONE live challenge per
@@ -91,6 +98,10 @@ final class ValidatorMemoChallenge
     private const KEY_PREFIX    = 'bcc_vmc_';
     private const MEMBER_INDEX  = 'bcc_vmc_iu_';
     private const VALOPER_INDEX = 'bcc_vmc_iv_';
+    /** code => the challenge holding it, while that challenge is kept. */
+    private const CODE_INDEX    = 'bcc_vmc_code_';
+    /** Draws of a code before issue() gives up on a free one. */
+    private const CODE_DRAWS    = 5;
     private const ISSUE_LOCK    = 'bcc_vmc_issue';
     private const LOCK_WAIT     = 2;
     private const HOUR          = 3600;
@@ -112,12 +123,6 @@ final class ValidatorMemoChallenge
         return strlen($code) === self::CODE_LENGTH && strspn($code, self::CODE_ALPHABET) === self::CODE_LENGTH;
     }
 
-    /** A member handle as HandleService allows it: 3–20 of [a-z0-9-]. */
-    public static function isHandle(string $handle): bool
-    {
-        return preg_match('/\A[a-z0-9-]{3,20}\z/', $handle) === 1;
-    }
-
     /** The valoper in canonical form (strict bech32, lowercase, 20 bytes), or null. */
     public static function canonicalValoper(string $valoper): ?string
     {
@@ -132,17 +137,16 @@ final class ValidatorMemoChallenge
      * The memo for these parts, or null when any part is not of its form
      * or the memo would be over MEMO_MAX_BYTES.
      */
-    public static function memo(string $valoper, string $handle, string $host, string $code): ?string
+    public static function memo(string $valoper, string $host, string $code): ?string
     {
         $valoper = self::canonicalValoper($valoper);
         if ($valoper === null
-            || !self::isHandle($handle)
             || preg_match('/\A[a-z0-9.-]+(:[0-9]{1,5})?\z/', $host) !== 1
             || !self::isCode($code)
         ) {
             return null;
         }
-        $memo = 'BCC: claim validator page ' . $valoper . ' for @' . $handle . ' on ' . $host . '. Code ' . $code;
+        $memo = 'BCC: claim validator page ' . $valoper . ' on ' . $host . '. Code ' . $code;
         return strlen($memo) <= self::MEMO_MAX_BYTES ? $memo : null;
     }
 
@@ -173,23 +177,20 @@ final class ValidatorMemoChallenge
     // ── the challenge ───────────────────────────────────────────────────
 
     /**
-     * Issue a challenge to $userId (whose handle is $handle) for the
-     * validator $valoper.
+     * Issue a challenge to member $userId for the validator $valoper.
      *
      * @return array{ok: bool, reason: string, challenge: array<string, mixed>|null, existing_id: string}
      *         `existing_id`: on REFUSED_IN_VERIFICATION, the member's challenge
      *         for this valoper whose hash is being verified.
      */
-    public static function issue(int $userId, string $handle, string $valoper): array
+    public static function issue(int $userId, string $valoper): array
     {
         $valoper = self::canonicalValoper($valoper);
-        if ($userId <= 0 || $valoper === null || !self::isHandle($handle)) {
+        if ($userId <= 0 || $valoper === null) {
             return self::refused(self::REFUSED_BAD_INPUT);
         }
         $host = FrontendOriginConfig::publicHost();
-        $code = self::code();
-        $memo = self::memo($valoper, $handle, $host, $code);
-        if ($memo === null) {
+        if (self::memo($valoper, $host, str_repeat(self::CODE_ALPHABET[0], self::CODE_LENGTH)) === null) {
             return self::refused($host === '' ? self::REFUSED_NO_HOST : self::REFUSED_BAD_INPUT);
         }
 
@@ -239,6 +240,21 @@ final class ValidatorMemoChallenge
                 return self::refused(self::REFUSED_VALOPER_BACKSTOP);
             }
 
+            // A code no live challenge holds, drawn BEFORE anything changes.
+            // 40 bits make a collision vanishingly rare: a few draws, then
+            // refuse rather than reuse one.
+            $code = null;
+            for ($draw = 0; $draw < self::CODE_DRAWS && $code === null; $draw++) {
+                $candidate = self::code();
+                if (ChallengeRepository::peek(self::CODE_INDEX . $candidate) === null) {
+                    $code = $candidate;
+                }
+            }
+            if ($code === null) {
+                return self::refused(self::REFUSED_BUSY);
+            }
+            $memo = (string) self::memo($valoper, $host, $code);
+
             if ($own !== null) {
                 // Closed under its lock, or not replaced. A hash reserved
                 // since the look above keeps it (in_verification); a write
@@ -265,7 +281,6 @@ final class ValidatorMemoChallenge
                 'purpose'        => self::PURPOSE,
                 'id'             => $id,
                 'user_id'        => $userId,
-                'handle'         => $handle,
                 'valoper'        => $valoper,
                 'code'           => $code,
                 'memo'           => $memo,
@@ -277,6 +292,8 @@ final class ValidatorMemoChallenge
                 'withdrawn_at'   => 0,
             ];
             ChallengeRepository::store(self::KEY_PREFIX . $id, $challenge, $expires - $now);
+            // The code stays taken for as long as the challenge is kept.
+            ChallengeRepository::store(self::CODE_INDEX . $code, ['id' => $id, 'expires_at' => $expires], $expires - $now);
 
             $member[$id]    = ['valoper' => $valoper, 'issued_at' => $now, 'window_ends_at' => $windowEnd, 'expires_at' => $expires];
             $onValoper[$id] = ['user_id' => $userId, 'issued_at' => $now, 'window_ends_at' => $windowEnd, 'expires_at' => $expires];
@@ -319,12 +336,12 @@ final class ValidatorMemoChallenge
      * submitted. One hash per challenge: the same hash again is accepted,
      * any other is refused. Allowed until the challenge expires (the
      * window bounds the BLOCK time, which the caller checks, not when the
-     * hash is pasted). Refused when the challenge is another member's, was
-     * withdrawn or replaced, or names a handle the member no longer has.
+     * hash is pasted). Refused when the challenge is another member's, or
+     * was withdrawn or replaced.
      *
      * @return array<string, mixed>|null the reserved challenge
      */
-    public static function reserve(string $id, int $userId, string $currentHandle, string $txHash): ?array
+    public static function reserve(string $id, int $userId, string $txHash): ?array
     {
         $hash = self::normalizeHash($txHash);
         if (!self::isId($id) || $userId <= 0 || $hash === null) {
@@ -332,8 +349,8 @@ final class ValidatorMemoChallenge
         }
         return ChallengeRepository::update(
             self::KEY_PREFIX . $id,
-            static function (array $challenge) use ($userId, $currentHandle, $hash): ?array {
-                if (!self::usableBy($challenge, $userId, $currentHandle)) {
+            static function (array $challenge) use ($userId, $hash): ?array {
+                if (!self::usableBy($challenge, $userId)) {
                     return null;
                 }
                 $reserved = (string) ($challenge['reserved_hash'] ?? '');
@@ -399,9 +416,9 @@ final class ValidatorMemoChallenge
     /**
      * Take the member's challenge INSIDE the claim's own transaction
      * (ChallengeRepository::consumeInTransaction(): refused outside one).
-     * Returns the challenge only when it is the member's, names their
-     * current handle, was neither withdrawn nor replaced, and carries
-     * exactly $txHash as its reserved hash.
+     * Returns the challenge only when it is the member's, was neither
+     * withdrawn nor replaced, and carries exactly $txHash as its reserved
+     * hash.
      *
      * Those checks run on the LOCKED row before it is deleted, so a null
      * has deleted nothing: trying another member's challenge, or with the
@@ -410,7 +427,7 @@ final class ValidatorMemoChallenge
      *
      * @return array<string, mixed>|null
      */
-    public static function consumeInTransaction(string $id, int $userId, string $currentHandle, string $txHash): ?array
+    public static function consumeInTransaction(string $id, int $userId, string $txHash): ?array
     {
         $hash = self::normalizeHash($txHash);
         if (!self::isId($id) || $userId <= 0 || $hash === null) {
@@ -418,20 +435,59 @@ final class ValidatorMemoChallenge
         }
         return ChallengeRepository::consumeInTransaction(
             self::KEY_PREFIX . $id,
-            static fn (array $challenge): bool => self::usableBy($challenge, $userId, $currentHandle)
+            static fn (array $challenge): bool => self::usableBy($challenge, $userId)
                 && hash_equals((string) ($challenge['reserved_hash'] ?? ''), $hash)
         );
+    }
+
+    /**
+     * Which challenge a (valoper, code) pair names, while it is LIVE
+     * (inside its window) and UNRESERVED: for the operator-facing lookup
+     * (design A5) that tells the operator, before they send, which member a
+     * code would link their validator to.
+     *
+     * Null alike for every other case, so a caller can answer each the same
+     * way: a malformed valoper or code, an unknown code, a code naming
+     * another validator, a window that has ended, a hash already reserved,
+     * a withdrawn or replaced challenge. The valoper and the code are
+     * compared with hash_equals().
+     *
+     * @return array{id: string, user_id: int, valoper: string, issued_at: int, window_ends_at: int}|null
+     */
+    public static function findLiveByCode(string $valoper, string $code): ?array
+    {
+        $valoper = self::canonicalValoper($valoper);
+        if ($valoper === null || !self::isCode($code)) {
+            return null;
+        }
+        $index     = ChallengeRepository::peek(self::CODE_INDEX . $code);
+        $id        = is_array($index) ? (string) ($index['id'] ?? '') : '';
+        $challenge = self::peek($id);
+        if ($challenge === null
+            || !hash_equals((string) ($challenge['valoper'] ?? ''), $valoper)
+            || !hash_equals((string) ($challenge['code'] ?? ''), $code)
+            || time() > (int) ($challenge['window_ends_at'] ?? 0)
+            || (string) ($challenge['reserved_hash'] ?? '') !== ''
+            || (int) ($challenge['withdrawn_at'] ?? 0) !== 0
+        ) {
+            return null;
+        }
+        return [
+            'id'             => $id,
+            'user_id'        => (int) ($challenge['user_id'] ?? 0),
+            'valoper'        => $valoper,
+            'issued_at'      => (int) ($challenge['issued_at'] ?? 0),
+            'window_ends_at' => (int) ($challenge['window_ends_at'] ?? 0),
+        ];
     }
 
     // ── internals ───────────────────────────────────────────────────────
 
     /** @param array<string, mixed> $challenge */
-    private static function usableBy(array $challenge, int $userId, string $currentHandle): bool
+    private static function usableBy(array $challenge, int $userId): bool
     {
         return ($challenge['purpose'] ?? '') === self::PURPOSE
             && (int) ($challenge['user_id'] ?? 0) === $userId
-            && $currentHandle !== ''
-            && hash_equals((string) ($challenge['handle'] ?? ''), $currentHandle)
             && (int) ($challenge['withdrawn_at'] ?? 0) === 0;
     }
 
