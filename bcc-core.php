@@ -1032,6 +1032,24 @@ add_filter('bcc_system_health', function (array $health): array {
         //                              persistent one can't keep the
         //                              alerter tripped. Expected rare.
         'validator_index' => ['solana_shared_identity'],
+        // cosmos_tx_proof — bcc-trust CosmosTxInclusionFetcher: the validator
+        // memo claim's check that a Cosmos transaction was included, asked of
+        // two independent public node operators per chain. Each event leaves
+        // the claim "not yet" (nothing is decided) or the warning email unsent.
+        //   - endpoint_disagreement: the two operators returned different
+        //     bytes, height, result code or block time for the same hash.
+        //   - network_mismatch: a node, or a block header it served, named a
+        //     network other than the one BCC pins for the chain.
+        //   - contact_disagreement: the operators returned different
+        //     security_contact values for a validator, so no warning email is
+        //     sent and staff are flagged.
+        // Expected steady state zero. A sustained count on one chain means an
+        // operator is serving bad data; replace it in CosmosTxProofEndpoints.
+        'cosmos_tx_proof' => [
+            'endpoint_disagreement', // 2026-11-24 — proof operators disagree on a transaction
+            'network_mismatch', // 2026-11-24 — a proof node or header names another network
+            'contact_disagreement', // 2026-11-24 — proof operators disagree on a security_contact
+        ],
     ]);
 
     return $health;
