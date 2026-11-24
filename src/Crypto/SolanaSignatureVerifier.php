@@ -5,7 +5,8 @@
  * Verifies a Solana wallet signature produced by Phantom's signMessage().
  * Solana uses Ed25519 — PHP's libsodium extension provides native support.
  *
- * Requires: sodium extension (bundled with PHP 7.2+).
+ * Requires: ext-sodium (bundled with PHP 7.2+), or WordPress's sodium_compat
+ * polyfill where it is absent.
  *
  * @package BCC\Core\Crypto
  */
@@ -73,11 +74,19 @@ final class SolanaSignatureVerifier {
             return false;
         }
 
+        // Any error from the signature library is a failed verification,
+        // never an escaping exception. Native ext-sodium throws only
+        // SodiumException, but where it is absent WordPress's
+        // sodium_compat polyfill provides this function, and it can also
+        // throw TypeError, RangeException or InvalidArgumentException.
         try {
             return sodium_crypto_sign_verify_detached($sigBytes, $message, $pubBytes);
-        } catch (\SodiumException $e) {
+        } catch (\Throwable $e) {
             if (class_exists('\\BCC\\Core\\Log\\Logger')) {
-                \BCC\Core\Log\Logger::error('[bcc-core] SolanaVerifier error', ['detail' => $e->getMessage()]);
+                \BCC\Core\Log\Logger::error('[bcc-core] SolanaVerifier error', [
+                    'exception' => get_class($e),
+                    'detail'    => $e->getMessage(),
+                ]);
             }
             return false;
         }
