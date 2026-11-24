@@ -957,8 +957,12 @@ add_filter('bcc_system_health', function (array $health): array {
         //                              vote account in getVoteAccounts, so
         //                              its row keeps no vote_account and it
         //                              can't be self-claimed until that
-        //                              resolves. Counted once per identity
-        //                              per run. Expected rare.
+        //                              resolves. Counted when an identity
+        //                              BECOMES shared (bcc-trust keeps the
+        //                              previous run's set per chain), not
+        //                              on every run it stays shared, so a
+        //                              persistent one can't keep the
+        //                              alerter tripped. Expected rare.
         'validator_index' => ['solana_shared_identity'],
     ]);
 
