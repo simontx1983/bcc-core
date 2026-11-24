@@ -25,6 +25,24 @@ final class PeepSoAddPostGuard
 
         return $write();
     }
+
+    /**
+     * The case the `self::` / `static::` branch exists for.
+     *
+     * This class IS named PeepSoAddPostGuard and IS declared in this file, so
+     * a class-declaration check alone accepts `self::pinOnly(` here and arms
+     * a pin the real guard knows nothing about. Only also requiring the
+     * guard's own NAMESPACE rejects it, and this namespace is not it.
+     *
+     * The write below must therefore come back UNPINNED.
+     */
+    public static function looksSelfPinnedButIsNot(int $author): int
+    {
+        return self::pinOnly([], static fn () => wp_insert_post([
+            'post_type'   => 'peepso-post',
+            'post_author' => $author,
+        ], true));
+    }
 }
 
 /*
