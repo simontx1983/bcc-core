@@ -375,6 +375,9 @@ final class PeepSoGroupRepository
      * (or build a batched sibling if a list surface needs it). The
      * /members card only shows the primary, so that's all we batch.
      *
+     * Callers show it only through bcc-trust's published-Hall check
+     * (HallRepository::primaryHallsForUsers()), never directly.
+     *
      * Empty `$userIds` short-circuits — no SQL.
      *
      * @param int[] $userIds Bounded by caller (directory `per_page`
