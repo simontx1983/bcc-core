@@ -43,6 +43,21 @@
  *     the key's address == from_address == to_address == the operator
  *     account (the valoper's bytes).
  *
+ * ⚠ LOAD-BEARING. Three invariants carry the proof; none is a tidy-up:
+ *  (a) Both extension option lists are EMPTY (rule 3). With an extension
+ *      the chain can authenticate a transaction by other means, and then
+ *      need not check signer_info's key against the sender: Osmosis smart
+ *      accounts (an /osmosis.smartaccount.v1beta1.TxExtension in
+ *      non_critical_extension_options selects a registered authenticator),
+ *      Injective's EIP-712 path (ExtensionOptionsWeb3Tx in
+ *      extension_options).
+ *  (b) The signature is verified HERE, against signer_info's key (rule 4),
+ *      and that key must derive the operator account (rule 5).
+ *  (c) Nothing in the decision relies on the chain having accepted the
+ *      transaction. Inclusion (bcc-trust's CosmosTxInclusionFetcher) only
+ *      says it is on chain; who signed it is decided from these bytes
+ *      alone.
+ *
  * Pure: no WordPress, no network, no database. Never throws: anything it
  * cannot read is a refusal.
  *
@@ -176,6 +191,11 @@ final class CosmosTxVerifier
         $auth = ProtoReader::decode($authInfoBytes, self::AUTH_INFO);
 
         // 3. Shape: the body.
+        // ⚠ LOAD-BEARING (invariant (a)): BOTH lists empty, the
+        // non-critical one included. An extension can move authentication
+        // off signer_info's key (Osmosis smart accounts in 2047, Injective
+        // EIP-712 in 1023), and then a chain-accepted transaction proves
+        // nothing about that key. Never relax this to an allowlist.
         if (ProtoReader::all($body, 1023) !== [] || ProtoReader::all($body, 2047) !== []) {
             return CosmosTxVerdict::refused(CosmosTxVerdict::REASON_EXTENSION_OPTIONS);
         }
@@ -273,6 +293,9 @@ final class CosmosTxVerifier
             }
             $signMode = 'amino_json';
         }
+        // ⚠ LOAD-BEARING (invariant (b)): verified here, against
+        // signer_info's key, never inferred from the chain having included
+        // the transaction. Step 5 then binds that key to the operator.
         if (!self::signatureVerifies($signBytes, $signatures[0], $pubKey, $ethermint)) {
             return CosmosTxVerdict::refused(CosmosTxVerdict::REASON_SIGNATURE_INVALID);
         }

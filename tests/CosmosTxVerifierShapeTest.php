@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BCC\Core\Tests;
 
 use BCC\Core\Crypto\Bech32;
+use BCC\Core\Crypto\CosmosAddress;
 use BCC\Core\Crypto\Cosmos\CosmosTxVerdict;
 use BCC\Core\Crypto\Cosmos\CosmosTxVerifier;
 use BCC\Core\Crypto\Cosmos\ProtoReader;
@@ -106,6 +107,10 @@ final class CosmosTxVerifierShapeTest extends TestCase
                 static fn (K $k): array => ['body_extra' => K::bytesField(2047, K::any('/cosmos.example.Option', ''))],
                 CosmosTxVerdict::REASON_EXTENSION_OPTIONS,
             ],
+            'an Osmosis smart-account TxExtension' => [
+                static fn (K $k): array => ['from' => $k->address('osmo'), 'to' => $k->address('osmo'), 'body_extra' => self::osmosisTxExtension()],
+                CosmosTxVerdict::REASON_EXTENSION_OPTIONS,
+            ],
             'no message' => [static fn (K $k): array => ['msgs' => []], CosmosTxVerdict::REASON_MESSAGE_COUNT],
             'two messages' => [static fn (K $k): array => ['msgs' => [$send($k), $send($k)]], CosmosTxVerdict::REASON_MESSAGE_COUNT],
             'a MsgSend wrapped in MsgExec' => [
@@ -196,17 +201,66 @@ final class CosmosTxVerifierShapeTest extends TestCase
         self::assertSame([], $v->amount);
     }
 
+    // ── account abstraction (the verifier's invariants (a) and (b)) ─────
+
+    /**
+     * Osmosis x/smart-account: a transaction that uses a registered
+     * authenticator carries this TxExtension in non_critical_extension_options
+     * (field 2047), selecting authenticator 1 (selected_authenticators,
+     * packed repeated uint64).
+     */
+    private static function osmosisTxExtension(): string
+    {
+        return K::bytesField(2047, K::any('/osmosis.smartaccount.v1beta1.TxExtension', K::bytesField(1, "\x01")));
+    }
+
+    /**
+     * An Osmosis self-send carrying a smart-account TxExtension is refused
+     * for the extension alone: the same transaction without it verifies,
+     * and with it, it is refused whether the operator's key signed it or
+     * another key (an authenticator's) did.
+     */
+    public function testAnOsmosisSmartAccountTransactionIsRefusedForItsExtension(): void
+    {
+        $osmo = ['from' => $this->kit->address('osmo'), 'to' => $this->kit->address('osmo')];
+        self::assertTrue($this->verify($this->kit->tx($osmo))->ok, 'control: the same self-send without the extension');
+
+        $other = K::create();
+        self::assertNotNull($other);
+        foreach (['the operator key' => $this->kit, 'another key' => $other] as $what => $signer) {
+            $v = $this->verify($this->kit->tx($osmo + ['body_extra' => self::osmosisTxExtension(), 'sign_with' => $signer]));
+            self::assertSame(CosmosTxVerdict::REASON_EXTENSION_OPTIONS, $v->reason, 'signed by ' . $what);
+        }
+    }
+
     // ── who signed ──────────────────────────────────────────────────────
 
+    /**
+     * signer_info names a key that DOES derive the operator account (the
+     * operator's public key is public), but the signature was made by
+     * another key: refused, because the signature is checked here against
+     * that key, never taken as checked by the chain. On Cosmos Hub and on
+     * Osmosis alike.
+     */
     public function testASignatureByAnotherKeyIsRefused(): void
     {
         $other = K::create();
         self::assertNotNull($other);
-
         self::assertSame(
-            CosmosTxVerdict::REASON_SIGNATURE_INVALID,
-            $this->verify($this->kit->tx(['sign_with' => $other]))->reason
+            Bech32::decode($this->kit->valoper())['bytes'] ?? null,
+            CosmosAddress::bytesFromPubKey($this->kit->pubKey, false),
+            'the key in signer_info derives the operator account'
         );
+
+        foreach (['cosmos', 'osmo'] as $hrp) {
+            $send = ['from' => $this->kit->address($hrp), 'to' => $this->kit->address($hrp)];
+            self::assertTrue($this->verify($this->kit->tx($send))->ok, "control: {$hrp}, signed by the operator key");
+            self::assertSame(
+                CosmosTxVerdict::REASON_SIGNATURE_INVALID,
+                $this->verify($this->kit->tx($send + ['sign_with' => $other]))->reason,
+                "{$hrp}, signed by another key"
+            );
+        }
     }
 
     public function testAKeyThatIsNotTheSendersIsRefused(): void
