@@ -34,6 +34,13 @@ namespace {
             'scheduled'  => [],   // [timestamp, hook, args, group]
             'queries'    => 0,    // posts queries actually executed
             'pins'       => [],   // $_GET seen INSIDE each trash write
+            'logs'       => [],   // [message, context] pairs, in order
+            // Throw switches. Each one models a DIFFERENT step blowing
+            // up, because the guarantee is that one failing step never
+            // stops the steps after it.
+            'trash_throws'    => false,  // a listener woken by the write
+            'log_throws'      => false,  // the file log is unwritable
+            'schedule_throws' => false,  // the scheduler is down
         ];
     }
 }
@@ -52,6 +59,38 @@ namespace BCC\Core\Observability {
     }
 }
 
+namespace BCC\Core\Log {
+    // ⚠ The real Logger writes to the filesystem. This records the
+    // CONTEXT as well as the message, because the post_id in the context
+    // is the whole point of the log line the ops runbook reads.
+    if (!\class_exists('BCC\Core\Log\Logger', false)) {
+        class Logger
+        {
+            /** @param array<string, mixed> $context */
+            public static function error(string $message, array $context = []): void
+            {
+                if ($GLOBALS['__bcc_orp']['log_throws']) {
+                    throw new \RuntimeException('log is unwritable');
+                }
+
+                $GLOBALS['__bcc_orp']['logs'][] = [$message, $context];
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function warning(string $message, array $context = []): void
+            {
+                unset($message, $context);
+            }
+
+            /** @param array<string, mixed> $context */
+            public static function info(string $message, array $context = []): void
+            {
+                unset($message, $context);
+            }
+        }
+    }
+}
+
 namespace BCC\Core\Cron {
     if (!\class_exists(AsyncDispatcher::class, false)) {
         final class AsyncDispatcher
@@ -59,6 +98,10 @@ namespace BCC\Core\Cron {
             /** @param list<mixed> $args */
             public static function scheduleSingle(int $timestamp, string $hook, array $args = [], string $group = ''): void
             {
+                if ($GLOBALS['__bcc_orp']['schedule_throws']) {
+                    throw new \RuntimeException('scheduler unavailable');
+                }
+
                 $GLOBALS['__bcc_orp']['scheduled'][] = [$timestamp, $hook, $args, $group];
             }
 
@@ -90,6 +133,13 @@ namespace BCC\Core\PeepSo {
 
             $state = &$GLOBALS['__bcc_orp'];
             $id    = (int) ($postarr['ID'] ?? 0);
+
+            if ($state['trash_throws']) {
+                // What a listener woken by the write looks like from here:
+                // the pin is recorded (it was held) and then it blows up.
+                $state['pins'][] = $_GET;
+                throw new \RuntimeException('a listener threw during the trash');
+            }
 
             // What the request looked like while the write ran — the pin.
             $state['pins'][]    = $_GET;
@@ -160,6 +210,11 @@ namespace {
 
             $state['queries']++;
             $mode = array_shift($state['modes']) ?: 'ok';
+
+            if ($mode === 'throw') {
+                // A driver exception rather than a false return.
+                throw new \RuntimeException('mysqli threw');
+            }
 
             if ($mode === 'error') {
                 $this->last_error = 'posts read failed';

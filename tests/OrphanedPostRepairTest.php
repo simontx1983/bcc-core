@@ -60,6 +60,10 @@ final class OrphanedPostRepairTest extends TestCase
             'scheduled'       => [],
             'queries'         => 0,
             'pins'            => [],
+            'logs'            => [],
+            'trash_throws'    => false,
+            'log_throws'      => false,
+            'schedule_throws' => false,
         ];
         $GLOBALS['wpdb'] = new \BccOrpWpdb();
 
@@ -360,5 +364,248 @@ final class OrphanedPostRepairTest extends TestCase
             PeepSoActivityRepository::postStatusOrUnknown(self::POST_ID),
             'a read that did not run is "unknown", not "gone"'
         );
+    }
+    // ── the contained steps (#178 review conditions) ─────────────────────
+
+    /** @return list<string> every logged message, in order */
+    private function logMessages(): array
+    {
+        return array_map(
+            static fn (array $line): string => $line[0],
+            $this->state()['logs']
+        );
+    }
+
+    /** @return list<int> the post_id carried by every logged line, in order */
+    private function loggedPostIds(): array
+    {
+        return array_map(
+            static fn (array $line): int => (int) ($line[1]['post_id'] ?? 0),
+            $this->state()['logs']
+        );
+    }
+
+    private function assertLogged(string $needle, string $why): void
+    {
+        $hit = array_filter(
+            $this->logMessages(),
+            static fn (string $m): bool => str_contains($m, $needle)
+        );
+        self::assertNotSame([], $hit, $why . ' — logged: ' . implode(' | ', $this->logMessages()));
+    }
+
+    /**
+     * ⛔ CONDITION 1 — a THROWING TRASH must still be probed and still queue.
+     *
+     * The trash fires post-write hooks, so any listener can throw. If that
+     * escaped, two things would break at once: the guard's 'hijacked' refusal
+     * would become a 500, and — worse — the retry would never be queued, so a
+     * recoverable orphan would become a permanent one. That is the exact
+     * failure this class exists to close, reached through its own repair.
+     */
+    public function testAThrowingTrashIsStillProbedAndStillQueues(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['trash_throws']         = true;
+
+        OrphanedPostRepair::afterDestroy(self::POST_ID);
+
+        $s = $this->state();
+        self::assertSame([[]], $s['pins'], 'the pin was held when the listener threw');
+        self::assertSame(
+            [['peepso_absence', 'orphan_repair_unconfirmed']],
+            $s['metrics'],
+            'a throwing trash is an UNCONFIRMED outcome, not a silent one'
+        );
+        self::assertCount(1, $s['scheduled'], 'and the retry must still be queued');
+        $this->assertLogged('the trash write threw', 'the throw itself must be recorded');
+        $this->assertLogged('could not be confirmed', 'and so must the outcome');
+    }
+
+    /**
+     * ⛔ CONDITION 1 + 2 — a THROWING SCHEDULER must not propagate, and the
+     * log must already name the post.
+     *
+     * `AsyncDispatcher::scheduleSingle()` is `void`, so a schedule that never
+     * landed is INVISIBLE. This is exactly why the file log is written BEFORE
+     * the scheduler is touched: when the queue is gone, that line is the only
+     * durable record that this post still needs looking at.
+     */
+    public function testAThrowingSchedulerDoesNotPropagateAndThePostIsStillOnRecord(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['post_read_fails']      = true;
+        $GLOBALS['__bcc_orp']['schedule_throws']      = true;
+
+        OrphanedPostRepair::afterDestroy(self::POST_ID);
+
+        $s = $this->state();
+        self::assertSame([], $s['scheduled'], 'precondition: nothing was queued');
+        self::assertSame(
+            [['peepso_absence', 'orphan_repair_unconfirmed']],
+            $s['metrics'],
+            'the outcome was already reported before the queue was touched'
+        );
+        self::assertContains(
+            self::POST_ID,
+            $this->loggedPostIds(),
+            'the log must name the post, because the queue did not keep it'
+        );
+        $this->assertLogged('could not be queued', 'the lost schedule must itself be visible');
+    }
+
+    /**
+     * ⛔ CONDITION 1 — a THROWING PROBE is UNKNOWN, and unknown queues.
+     *
+     * A driver exception is not a "no". Treating a thrown read as settled
+     * would be the original fail-open wearing a different hat.
+     */
+    public function testAThrowingProbeIsUnknownAndStillQueues(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['post_read_fails']      = true;
+        $GLOBALS['__bcc_orp']['modes']                = ['throw'];
+
+        OrphanedPostRepair::afterDestroy(self::POST_ID);
+
+        $s = $this->state();
+        self::assertSame(
+            [['peepso_absence', 'orphan_repair_unconfirmed']],
+            $s['metrics'],
+            'a thrown read must report, not be mistaken for "gone"'
+        );
+        self::assertCount(1, $s['scheduled'], 'and must queue the retry');
+        $this->assertLogged('the status read threw', 'the thrown read must be recorded');
+    }
+
+    /**
+     * ⛔ CONDITION 1 — an UNWRITABLE LOG must not stop the repair.
+     *
+     * The log is the durable record, but it is not the repair. If the two are
+     * wired so that losing the log loses the retry, the fix is worse than the
+     * bug it closes.
+     */
+    public function testAnUnwritableLogNeverStopsTheRepair(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['post_read_fails']      = true;
+        $GLOBALS['__bcc_orp']['log_throws']           = true;
+
+        OrphanedPostRepair::afterDestroy(self::POST_ID);
+
+        $s = $this->state();
+        self::assertSame([], $s['logs'], 'precondition: nothing could be logged');
+        self::assertSame(
+            [['peepso_absence', 'orphan_repair_unconfirmed']],
+            $s['metrics'],
+            'the metric must still be recorded'
+        );
+        self::assertCount(1, $s['scheduled'], 'and the retry must still be queued');
+    }
+
+    /**
+     * ⛔ CONDITION 2 — the ops runbook reads post_ids out of these lines, so
+     * the post_id has to BE there. Asserted on the context, not the message,
+     * because an id interpolated into prose is not a field ops can grep.
+     */
+    public function testTheUnconfirmedLineCarriesThePostIdAndTheAttempt(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['post_read_fails']      = true;
+
+        OrphanedPostRepair::afterDestroy(self::POST_ID);
+
+        $unconfirmed = array_values(array_filter(
+            $this->state()['logs'],
+            static fn (array $line): bool => str_contains($line[0], 'could not be confirmed')
+        ));
+
+        self::assertCount(1, $unconfirmed, 'exactly one unconfirmed line');
+        self::assertSame(self::POST_ID, $unconfirmed[0][1]['post_id'] ?? null, 'post_id as a field');
+        self::assertSame(1, $unconfirmed[0][1]['attempt'] ?? null, 'and which attempt it was');
+    }
+
+    /**
+     * ⛔ CONDITION 2 — the give-up names the post too. This is the line that
+     * matters most: after it, nothing is coming back for this post.
+     */
+    public function testTheAbandonedLineNamesThePost(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['post_read_fails']      = true;
+
+        OrphanedPostRepair::retry(self::POST_ID, 5);
+
+        $this->assertLogged('gave up', 'abandoning must be on the file log, not only in a metric');
+        self::assertContains(self::POST_ID, $this->loggedPostIds(), 'and must name the post');
+        self::assertSame(
+            [['peepso_absence', 'orphan_repair_abandoned']],
+            $this->state()['metrics'],
+            'the metric is unchanged by the new logging'
+        );
+    }
+
+    /**
+     * ⚠ A retry that is still unconfirmed LOGS per attempt but does NOT
+     * re-record the metric — `afterDestroy()` already counted this orphan
+     * once, and counting it again per attempt would multiply one orphan into
+     * up to MAX_ATTEMPTS activations on /system/health.
+     *
+     * This is pinned because it is a deliberate asymmetry, and the kind a
+     * later reader would "tidy up" into a double count.
+     */
+    public function testAnUnconfirmedRetryLogsButDoesNotReCountTheOrphan(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['post_read_fails']      = true;
+
+        OrphanedPostRepair::retry(self::POST_ID, 2);
+
+        $s = $this->state();
+        self::assertSame([], $s['metrics'], 'no second activation for the same orphan');
+        self::assertContains(self::POST_ID, $this->loggedPostIds(), 'but the attempt is on record');
+        self::assertCount(1, $s['scheduled'], 'and it reschedules');
+        self::assertSame(3, $s['scheduled'][0][2][1], 'with the attempt counter advanced');
+    }
+    /**
+     * ⛔ CONDITION 1, stated as the literal claim: with EVERY step rigged to
+     * throw at once, neither entry point throws.
+     *
+     * ⚠ This is not just the seven tests above run together. With the log
+     * also throwing, `trySchedule()`'s catch calls `tryLog()`, which throws
+     * INSIDE the catch that is handling the scheduler's throw — a
+     * throw-within-a-catch that no single-switch test reaches. If that path
+     * were not itself contained, the one place guaranteed to be running
+     * during a database outage would be the place that 500s.
+     *
+     * The assertion is deliberately weak on outcome and strong on survival:
+     * when everything is broken there is nothing left to record, and the only
+     * thing worth promising is that the caller's refusal still stands.
+     */
+    public function testNeitherEntryPointThrowsWhenEveryStepIsBroken(): void
+    {
+        $GLOBALS['__bcc_orp']['posts'][self::POST_ID] = 'publish';
+        $GLOBALS['__bcc_orp']['post_read_fails']      = true;
+        $GLOBALS['__bcc_orp']['trash_throws']         = true;
+        $GLOBALS['__bcc_orp']['log_throws']           = true;
+        $GLOBALS['__bcc_orp']['schedule_throws']      = true;
+        // 5 probes across the 3 calls below, with room to spare.
+        $GLOBALS['__bcc_orp']['modes']                = array_fill(0, 8, 'throw');
+
+        OrphanedPostRepair::afterDestroy(self::POST_ID);
+        OrphanedPostRepair::retry(self::POST_ID, 1);
+        OrphanedPostRepair::retry(self::POST_ID, 5);
+
+        self::assertSame(
+            [],
+            $this->state()['scheduled'],
+            'precondition: the scheduler really was broken for all three calls'
+        );
+        self::assertSame(
+            [],
+            $this->state()['logs'],
+            'precondition: the log really was unwritable'
+        );
+        self::assertTrue(true, 'reaching here at all is the assertion');
     }
 }

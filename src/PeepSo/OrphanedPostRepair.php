@@ -9,6 +9,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Core\Cron\AsyncDispatcher;
+use BCC\Core\Log\Logger;
 use BCC\Core\Observability\DegradationMetrics;
 use BCC\Core\Repositories\PeepSoActivityRepository;
 
@@ -111,27 +112,28 @@ final class OrphanedPostRepair
             return;
         }
 
-        self::attemptTrash($postId);
+        // ⛔ EVERY STEP IS INDIVIDUALLY CONTAINED, and the order below is the
+        // point: a step that throws must not stop the ones after it. A failed
+        // TRASH still gets probed and still gets queued — losing the retry
+        // because the write blew up would turn a recoverable orphan into a
+        // permanent one, which is the exact failure this class exists to
+        // close.
+        self::tryTrash($postId);
 
         // The probed read decides only whether to REPORT and queue — never
         // whether to act. Acting already happened, unconditionally, above.
-        $status = PeepSoActivityRepository::postStatusOrUnknown($postId);
+        $status = self::tryProbe($postId);
 
-        if ($status === PeepSoActivityRepository::POST_GONE || $status === 'trash') {
+        if (self::isSettled($status)) {
             return;
         }
 
         // Either the post is still live, or the read could not be trusted.
         // ⛔ UNKNOWN queues too: the one thing worse than a needless retry is
         // an orphan nobody is looking for.
-        DegradationMetrics::record('peepso_absence', 'orphan_repair_unconfirmed');
+        self::reportUnconfirmed($postId, 1, true);
 
-        AsyncDispatcher::scheduleSingle(
-            time() + self::RETRY_DELAY,
-            self::RETRY_HOOK,
-            [$postId, 1],
-            self::GROUP
-        );
+        self::trySchedule($postId, 1);
     }
 
     /**
@@ -141,6 +143,11 @@ final class OrphanedPostRepair
      *
      * ⚠ Bound to a hook, so the signature is positional: Action Scheduler and
      * `wp_schedule_single_event` both bind `$args` BY INDEX.
+     *
+     * ⛔ Contained step by step for the same reason as {@see afterDestroy()},
+     * and it matters more here: this runs under a scheduler, and a throw
+     * escaping into Action Scheduler marks the action failed, which can stop
+     * the chain that is the actual guarantee.
      */
     public static function retry(int $postId = 0, int $attempt = 1): void
     {
@@ -148,31 +155,175 @@ final class OrphanedPostRepair
             return;
         }
 
-        $status = PeepSoActivityRepository::postStatusOrUnknown($postId);
-        if ($status === PeepSoActivityRepository::POST_GONE || $status === 'trash') {
+        if (self::isSettled(self::tryProbe($postId))) {
             return;
         }
 
         // Still live, or still unreadable. Try again before deciding.
-        self::attemptTrash($postId);
+        self::tryTrash($postId);
 
-        $after = PeepSoActivityRepository::postStatusOrUnknown($postId);
-        if ($after === PeepSoActivityRepository::POST_GONE || $after === 'trash') {
+        if (self::isSettled(self::tryProbe($postId))) {
             return;
         }
 
         if ($attempt >= self::MAX_ATTEMPTS) {
-            DegradationMetrics::record('peepso_absence', 'orphan_repair_abandoned');
+            self::reportAbandoned($postId, $attempt);
 
             return;
         }
 
-        AsyncDispatcher::scheduleSingle(
-            time() + self::RETRY_DELAY,
-            self::RETRY_HOOK,
-            [$postId, $attempt + 1],
-            self::GROUP
-        );
+        // ⚠ The LOG line is written on every unconfirmed attempt, but the
+        // METRIC is deliberately NOT re-recorded here — `afterDestroy()`
+        // already counted this orphan once, and counting it again per attempt
+        // would multiply a single orphan into up to MAX_ATTEMPTS activations
+        // on /system/health. The log is what carries the per-attempt detail,
+        // and it is the thing ops reads post_ids out of.
+        self::reportUnconfirmed($postId, $attempt, false);
+
+        self::trySchedule($postId, $attempt + 1);
+    }
+
+    /**
+     * Gone, or confirmed in the trash. NULL is NOT settled — an unreadable
+     * answer is the whole reason this class exists.
+     */
+    private static function isSettled(?string $status): bool
+    {
+        return $status === PeepSoActivityRepository::POST_GONE || $status === 'trash';
+    }
+
+    /**
+     * ⚠ A THROWN probe is UNKNOWN, not "gone". Treating a thrown read as
+     * settled would be the original fail-open wearing a different hat.
+     */
+    private static function tryProbe(int $postId): ?string
+    {
+        try {
+            return PeepSoActivityRepository::postStatusOrUnknown($postId);
+        } catch (\Throwable $e) {
+            self::tryLog('[bcc-core] orphaned post repair: the status read threw', [
+                'post_id' => $postId,
+                'error'   => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
+    /** The trash write, contained. Its result is not read; see the class docblock. */
+    private static function tryTrash(int $postId): void
+    {
+        try {
+            self::attemptTrash($postId);
+        } catch (\Throwable $e) {
+            // A listener woken by the write threw, or the write itself did.
+            // Nothing to decide here: the probe below answers, and an
+            // unconfirmed answer queues.
+            self::tryLog('[bcc-core] orphaned post repair: the trash write threw', [
+                'post_id' => $postId,
+                'error'   => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * ⚠⚠ THE FILE LOG IS WRITTEN FIRST, AND THAT ORDER IS LOAD-BEARING.
+     * `DegradationMetrics` and the scheduler both reach for the database, so
+     * in the outage this class is most likely to be running in, they are the
+     * two things most likely to be lost. `AsyncDispatcher::scheduleSingle()`
+     * is `void`, so a schedule that never landed is INVISIBLE — the log line
+     * is the only durable record that this post needs looking at.
+     *
+     * ⇒ Ops runbook: re-check every `post_id` in these lines whose post is
+     * not actually gone or trashed. See docs/GOLDEN_PATHS.md.
+     */
+    private static function reportUnconfirmed(int $postId, int $attempt, bool $record): void
+    {
+        self::tryLog('[bcc-core] orphaned post repair could not be confirmed', [
+            'post_id' => $postId,
+            'attempt' => $attempt,
+        ]);
+
+        if ($record) {
+            self::recordUnconfirmed();
+        }
+    }
+
+    /** The give-up, which must be visible rather than silent. */
+    private static function reportAbandoned(int $postId, int $attempt): void
+    {
+        self::tryLog('[bcc-core] orphaned post repair gave up with the post unconfirmed', [
+            'post_id'  => $postId,
+            'attempts' => $attempt,
+        ]);
+
+        self::recordAbandoned();
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     */
+    private static function tryLog(string $message, array $context): void
+    {
+        try {
+            Logger::error($message, $context);
+        } catch (\Throwable $e) {
+            // A log that cannot be written is not a reason to drop the repair.
+            unset($e);
+        }
+    }
+
+    /**
+     * ⚠⚠ TWO NEAR-IDENTICAL HELPERS, NOT ONE TAKING THE EVENT AS A
+     * PARAMETER, and the duplication is REQUIRED rather than sloppy.
+     *
+     * `DegradationEventRegistrationTest` reads every `record()` call in `src/`
+     * with a regex that only accepts one-line LITERAL arguments, because that
+     * scan is what ties each call site to the canonical subsystem map in
+     * `bcc-core.php`. `record('peepso_absence', $event)` is unreadable to it
+     * and fails the suite — centralising these would hide both events from
+     * the only check that keeps the map honest.
+     *
+     * ⚠ This file has now failed that test twice while being written: once
+     * for using constants, once for using a parameter. If a third form
+     * suggests itself, it is probably also unreadable — keep the literals.
+     */
+    private static function recordUnconfirmed(): void
+    {
+        try {
+            DegradationMetrics::record('peepso_absence', 'orphan_repair_unconfirmed');
+        } catch (\Throwable $e) {
+            unset($e);
+        }
+    }
+
+    /** @see recordUnconfirmed() for why this is not one helper with a parameter. */
+    private static function recordAbandoned(): void
+    {
+        try {
+            DegradationMetrics::record('peepso_absence', 'orphan_repair_abandoned');
+        } catch (\Throwable $e) {
+            unset($e);
+        }
+    }
+
+    private static function trySchedule(int $postId, int $nextAttempt): void
+    {
+        try {
+            AsyncDispatcher::scheduleSingle(
+                time() + self::RETRY_DELAY,
+                self::RETRY_HOOK,
+                [$postId, $nextAttempt],
+                self::GROUP
+            );
+        } catch (\Throwable $e) {
+            // ⚠ Already logged above, which is the point of logging first.
+            self::tryLog('[bcc-core] orphaned post repair: the retry could not be queued', [
+                'post_id' => $postId,
+                'attempt' => $nextAttempt,
+                'error'   => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
