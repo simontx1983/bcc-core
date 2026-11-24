@@ -30,8 +30,10 @@ final class ChallengeRepositoryTransactionTest extends TestCase
     protected function setUp(): void
     {
         require_once __DIR__ . '/Stubs/challenge-tx-wpdb.php';
-        $this->db        = new \BccTxOptionsWpdb();
-        $GLOBALS['wpdb'] = $this->db;
+        $this->db                    = new \BccTxOptionsWpdb();
+        $GLOBALS['wpdb']             = $this->db;
+        $GLOBALS['__bcc_transients'] = [];
+        unset($GLOBALS['__bcc_errno']);
     }
 
     private function seed(string $key, int $expiresIn = 600): void
@@ -82,7 +84,88 @@ final class ChallengeRepositoryTransactionTest extends TestCase
         self::assertFalse($this->db->suppress, 'error suppression is restored');
     }
 
+    // ── the probe reads the error NUMBER (security L2) ──────────────────
+
+    private function withConnection(int $errno): void
+    {
+        $this->db->dbh       = (new \ReflectionClass(\mysqli::class))->newInstanceWithoutConstructor();
+        $GLOBALS['__bcc_errno'] = $errno;
+    }
+
+    /** A server answering in another language (lc_messages) is still "outside" on error 1305. */
+    public function testOutsideIsRecognisedByErrorNumberInAnyLanguage(): void
+    {
+        $this->db->localisedMessages = true;
+        $this->withConnection(1305);
+
+        self::assertSame(ChallengeRepository::TX_OUTSIDE, ChallengeRepository::transactionState());
+        $this->seed('k');
+        self::assertSame('n-k', ChallengeRepository::update('k', static fn (array $c): array => $c)['nonce'] ?? null, 'so update() still works');
+    }
+
+    /** Another error number is unknown, whatever the message says. */
+    public function testAnotherErrorNumberIsUnknownEvenWithTheEnglishMessage(): void
+    {
+        $this->withConnection(2013); // CR_SERVER_LOST
+
+        self::assertSame(ChallengeRepository::TX_UNKNOWN, ChallengeRepository::transactionState());
+    }
+
+    /** Only with no error number to read does the English message decide; a localised one cannot. */
+    public function testWithoutAConnectionTheEnglishMessageIsTheFallback(): void
+    {
+        self::assertSame(ChallengeRepository::TX_OUTSIDE, ChallengeRepository::transactionState());
+
+        $this->db->localisedMessages = true;
+        self::assertSame(ChallengeRepository::TX_UNKNOWN, ChallengeRepository::transactionState());
+    }
+
+    public function testEveryUnknownProbeIsCounted(): void
+    {
+        $count = static fn (): int => \BCC\Core\Observability\DegradationMetrics::readEvent('wallet_challenge', 'tx_probe_unknown', time());
+
+        ChallengeRepository::transactionState();
+        $this->db->query('START TRANSACTION');
+        ChallengeRepository::transactionState();
+        $this->db->query('ROLLBACK');
+        self::assertSame(0, $count(), 'inside and outside are not counted');
+
+        $this->db->faults = ['release_other_error' => true];
+        ChallengeRepository::transactionState();
+        $this->db->faults = ['savepoint_fails' => true];
+        ChallengeRepository::transactionState();
+        self::assertSame(2, $count());
+    }
+
     // ── consumeInTransaction() ──────────────────────────────────────────
+
+    /** Security L1: the row is checked under its lock BEFORE the delete. */
+    public function testARefusedAcceptDeletesNothingEvenIfTheCallerCommits(): void
+    {
+        $this->seed('k');
+        $this->db->query('START TRANSACTION');
+        $logFrom = count($this->db->log);
+
+        self::assertNull(ChallengeRepository::consumeInTransaction('k', static fn (array $c): bool => false));
+        self::assertArrayHasKey('_transient_k', $this->db->rows, 'not deleted inside the transaction');
+        self::assertSame([], array_values(array_filter(
+            array_slice($this->db->log, $logFrom),
+            static fn (string $q): bool => str_starts_with($q, 'DELETE')
+        )), 'not even a DELETE is sent');
+        $this->db->query('COMMIT');
+        self::assertArrayHasKey('_transient_k', $this->db->rows, 'still there after the caller commits');
+
+        $this->db->query('START TRANSACTION');
+        $seen = null;
+        $got  = ChallengeRepository::consumeInTransaction('k', static function (array $c) use (&$seen): bool {
+            $seen = $c['nonce'] ?? null;
+            return true;
+        });
+        self::assertSame('n-k', $seen, 'the check sees the stored challenge');
+        self::assertSame('n-k', $got['nonce'] ?? null);
+        self::assertArrayNotHasKey('_transient_k', $this->db->rows);
+        $this->db->query('COMMIT');
+    }
 
     public function testConsumeInTransactionIsRefusedOutsideATransaction(): void
     {

@@ -191,6 +191,46 @@ final class ValidatorMemoChallengeTest extends TestCase
         self::assertTrue(C::issue(11, 'operator-one', self::valoper(7))['ok'], 'after a withdrawal');
     }
 
+    /**
+     * F2: a reserve() that lands after issue() looked at the member's
+     * challenge, but before the replace closes it, keeps it: the close
+     * re-checks under the row's lock and issue() answers in_verification.
+     */
+    public function testAHashReservedDuringAReplaceKeepsTheChallenge(): void
+    {
+        $id  = (string) self::issued(11, 7)['id'];
+        $row = '_transient_bcc_vmc_' . $id;
+
+        $this->db->beforeLockedRead = function (string $name) use ($row): void {
+            if ($name === $row) {
+                $c                  = unserialize($this->db->rows[$row]);
+                $c['reserved_hash'] = self::HASH;
+                $this->db->concurrentWrite($row, serialize($c)); // the member's reserve(), committed meanwhile
+                $this->db->beforeLockedRead = null;
+            }
+        };
+        $again = C::issue(11, 'operator-one', self::valoper(7));
+
+        self::assertSame(C::REFUSED_IN_VERIFICATION, $again['reason']);
+        self::assertSame($id, $again['existing_id']);
+        self::assertSame(0, C::peek($id)['withdrawn_at'] ?? null, 'not withdrawn');
+        $this->db->query('START TRANSACTION');
+        self::assertNotNull(C::consumeInTransaction($id, 11, 'operator-one', self::HASH), 'its hash can still complete');
+        $this->db->query('COMMIT');
+    }
+
+    /** A replace whose close does not land is refused, and the old challenge stays open. */
+    public function testAReplaceWhoseCloseFailsIsRefusedAsBusy(): void
+    {
+        $id = (string) self::issued(11, 7)['id'];
+
+        $this->db->faults = ['update_fails' => true];
+        self::assertSame(C::REFUSED_BUSY, C::issue(11, 'operator-one', self::valoper(7))['reason']);
+        $this->db->faults = [];
+
+        self::assertNotNull(C::reserve($id, 11, 'operator-one', self::HASH), 'still open');
+    }
+
     public function testAMemberHoldsAtMostThreeLiveChallenges(): void
     {
         self::issued(11, 1);
@@ -338,6 +378,29 @@ final class ValidatorMemoChallengeTest extends TestCase
         $this->db->query('COMMIT');
         self::assertSame($id, $c['id'] ?? null);
         self::assertNull(C::peek($id), 'used once');
+    }
+
+    /**
+     * Security L1: another member, or the wrong hash, gets null AND deletes
+     * nothing, even if the caller then commits. The owner can still use it.
+     */
+    public function testTryingSomeoneElsesChallengeDeletesNothing(): void
+    {
+        $id = (string) self::issued(11, 7)['id'];
+        C::reserve($id, 11, 'operator-one', self::HASH);
+        $row = '_transient_bcc_vmc_' . $id;
+
+        foreach ([[22, 'operator-one', self::HASH], [11, 'renamed', self::HASH], [11, 'operator-one', str_repeat('2', 64)]] as [$user, $handle, $hash]) {
+            $this->db->query('START TRANSACTION');
+            self::assertNull(C::consumeInTransaction($id, $user, $handle, $hash));
+            self::assertArrayHasKey($row, $this->db->rows, 'not deleted inside the transaction');
+            $this->db->query('COMMIT');
+            self::assertArrayHasKey($row, $this->db->rows, 'nor after the caller commits');
+        }
+
+        $this->db->query('START TRANSACTION');
+        self::assertSame($id, C::consumeInTransaction($id, 11, 'operator-one', self::HASH)['id'] ?? null, 'the owner still can');
+        $this->db->query('COMMIT');
     }
 
     public function testAnUnreservedOrWithdrawnChallengeIsNotConsumed(): void
