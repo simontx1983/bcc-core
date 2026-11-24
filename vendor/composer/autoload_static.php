@@ -132,6 +132,7 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\Support\\FrontendOriginConfig' => __DIR__ . '/../..' . '/src/Support/FrontendOriginConfig.php',
         'BCC\\Core\\Support\\HeadlessOrigin' => __DIR__ . '/../..' . '/src/Support/HeadlessOrigin.php',
         'BCC\\Core\\Wallet\\ChallengeRepository' => __DIR__ . '/../..' . '/src/Wallet/ChallengeRepository.php',
+        'BCC\\Core\\Wallet\\ValidatorMemoChallenge' => __DIR__ . '/../..' . '/src/Wallet/ValidatorMemoChallenge.php',
         'BCC\\Core\\Wallet\\WalletIdentityService' => __DIR__ . '/../..' . '/src/Wallet/WalletIdentityService.php',
         'BCC\\Core\\Wallet\\WalletVerificationRequest' => __DIR__ . '/../..' . '/src/Wallet/WalletVerificationRequest.php',
         'Composer\\InstalledVersions' => __DIR__ . '/..' . '/composer/InstalledVersions.php',
