@@ -48,6 +48,12 @@ final class PeepSoAddPostGuardTest extends TestCase
         parent::setUp();
         require_once __DIR__ . '/Stubs/add-post-guard-stubs.php';
         require_once __DIR__ . '/Stubs/usermeta-wpdb.php';
+        // F-542 — the hijack path now hands the post to
+        // OrphanedPostRepair, so this suite needs the repair's
+        // collaborators (wp_update_post, DegradationMetrics,
+        // AsyncDispatcher). Reused rather than duplicated; this class
+        // runs in its own process, so the fakes reach nothing else.
+        require_once __DIR__ . '/Stubs/orphan-repair-stubs.php';
 
         // ⛔⛔ F-498 — the stamps are now read through
         // `PostMetaRepository::valuesOrUnknown()`, which goes to `$wpdb`, so
@@ -67,6 +73,10 @@ final class PeepSoAddPostGuardTest extends TestCase
         $GLOBALS['wpdb']        = new class {
             public string $prefix     = 'wp_';
             public string $postmeta   = 'wp_postmeta';
+            // F-542 — the hijack path reads post_status through
+            // PeepSoActivityRepository, which names the table the way the
+            // other nine call sites do: $wpdb->posts.
+            public string $posts      = 'wp_posts';
             public string $last_error = '';
             /** @var list<object> */
             public array $last_result = [];
@@ -577,6 +587,37 @@ final class PeepSoAddPostGuardTest extends TestCase
      * `wp_delete_post()`, which would leave the `peepso_activities` row
      * behind (PeepSo's `before_delete_post` cleanup only covers BLOG posts).
      */
+    /**
+     * F-542 — the hijack hands the post to the repair, and the repair's
+     * write is PINNED.
+     *
+     * ⚠ This assertion lives here, in the GUARD's own suite, and not only in
+     * OrphanedPostRepairTest. The repair suite proves the repair behaves; only
+     * this file can prove the guard still CALLS it. Delete the call site and
+     * the repair's own tests stay green — that is the regression this catches.
+     *
+     * ⚠ The empty `$_GET` recorded inside the write is the point of the pin:
+     * the trash runs while the request says nothing, so no listener it wakes
+     * can read the group id the hijacker supplied.
+     */
+    public function testAHijackHandsThePostToTheRepairWithThePinHeld(): void
+    {
+        $this->seedStamp(self::POST_ID, 'peepso_group_id', self::SECRET_HALL);
+
+        PeepSoAddPostGuard::failClosedIfHijacked(self::POST_ID, 0);
+
+        self::assertSame(
+            [['ID' => self::POST_ID, 'post_status' => 'trash']],
+            $GLOBALS['__bcc_orp']['updates'],
+            'the hijack must hand the post to OrphanedPostRepair exactly once'
+        );
+        self::assertSame(
+            [[]],
+            $GLOBALS['__bcc_orp']['pins'],
+            'the repair write must run with the request pinned empty'
+        );
+    }
+
     public function testAStampedPostIsDeletedThroughPeepSosOwnPath(): void
     {
         $this->seedStamp(self::POST_ID, 'peepso_group_id', self::SECRET_HALL);

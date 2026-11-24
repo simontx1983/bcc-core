@@ -504,8 +504,18 @@ final class PeepSoAddPostGuard
         );
 
         if (class_exists('PeepSoActivity')) {
+            // F-542 — the result is still not read, because it cannot be
+            // trusted: this branch is reached BECAUSE a read failed, so the
+            // destroy can fail the same way. OrphanedPostRepair does not ask
+            // whether it worked; it repairs unconditionally and then reports.
             \PeepSoActivity::get_instance()->delete_post($postId);
         }
+
+        // ⛔ F-542 — a destroy that silently failed used to leave the post
+        // with NO group stamp, reading as an ordinary post on the member's own
+        // wall, and nothing noticed. Best-effort repair here; the bounded
+        // retry it queues is where the guarantee actually is.
+        OrphanedPostRepair::afterDestroy($postId);
 
         return 'hijacked';
     }

@@ -252,6 +252,9 @@ final class PeepSoActivityRepository
      * query. Widening COLUMNS rather than adding a second read keeps a
      * single path onto this table (Â§1).
      */
+    /** {@see postStatusOrUnknown()}: the read RAN and there is no such post. */
+    public const POST_GONE = '';
+
     private const COLUMNS = 'a.act_id, p.post_author AS act_user_id, a.act_owner_id, a.act_module_id, a.act_external_id, p.post_date_gmt AS act_time, a.act_access, p.post_status AS act_status, a.act_repost_id';
 
     private static function table(): string
@@ -1215,6 +1218,60 @@ final class PeepSoActivityRepository
      * v1.5 reactions endpoint to derive the post's grammar — the
      * full row is overkill when only one column matters.
      */
+    /**
+     * F-542 — a post's `post_status`, or null when the read cannot be trusted.
+     *
+     * Three answers, and the third is the point:
+     *   a status string  the post exists and this is its status
+     *   POST_GONE ('')   the read RAN and found no such post
+     *   null             the read could not be vouched for
+     *
+     * ⚠ `get_row()` / `get_var()` cannot express the third: both answer null
+     * for "no row" and for "the query failed", which is the conflation that
+     * made the orphan invisible in the first place. This goes through
+     * {@see ProbesReads::trustedRows()}.
+     *
+     * ⚠ Reads `wp_posts` DIRECTLY rather than via `get_post()`, deliberately:
+     * `get_post()` consults the post cache and answers null for an unreadable
+     * row, which is exactly the answer this method exists to distinguish.
+     */
+    public static function postStatusOrUnknown(int $postId): ?string
+    {
+        if ($postId <= 0) {
+            // Not a post id at all. A real answer, not an unknown.
+            return self::POST_GONE;
+        }
+
+        global $wpdb;
+
+        // ⚠⚠ SELECTS `ID` TOO, AND CHECKS IT. Without the id this read cannot
+        // detect wpdb's PRE-FLUSH BAIL: that returns a row count with no
+        // `last_error`, so both of ProbesReads' checks pass while
+        // `last_result` still holds the PREVIOUS query's rows. A
+        // `SELECT post_status` alone would hand that stale status back as a
+        // trusted answer. `ReadsMetaRows` defends the same way — rows that
+        // name an object the query did not ask for are not ours.
+        $rows = self::trustedRows((string) $wpdb->prepare(
+            'SELECT ID, post_status FROM ' . $wpdb->posts . ' WHERE ID = %d LIMIT 1',
+            $postId
+        ));
+
+        if ($rows === null) {
+            return null;
+        }
+
+        if ($rows === []) {
+            return self::POST_GONE;
+        }
+
+        if ((int) ($rows[0]->ID ?? 0) !== $postId) {
+            // Rows from some other query. Untrusted, not "gone".
+            return null;
+        }
+
+        return (string) ($rows[0]->post_status ?? '');
+    }
+
     public static function getModuleIdByActId(int $actId): ?string
     {
         if ($actId <= 0) {
