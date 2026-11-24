@@ -117,6 +117,11 @@ final class MemberNameQueryTest extends TestCase
         self::assertStringContainsString('bcc_nm_u.ID = q.user_id', $sql, 'the member column');
         self::assertStringNotContainsString('user_email', $sql);
         self::assertSame(0, preg_match('/user_login\s+LIKE/i', $sql), 'the login is never matched');
+        self::assertStringContainsString(
+            "LOWER(bcc_nm_u.display_name) NOT REGEXP '^[[:space:]]*u_[a-z0-9-]{3,20}[[:space:]]*$'",
+            $sql,
+            'a name the card replaces with the handle is never searched'
+        );
     }
 
     /** The whole condition, pinned, so a rewrite that keeps the words cannot change its logic. */
@@ -131,6 +136,7 @@ final class MemberNameQueryTest extends TestCase
             . " OR (bcc_nm_u.display_name LIKE %s"
             . " AND TRIM(bcc_nm_u.display_name) <> ''"
             . " AND LOWER(TRIM(bcc_nm_u.display_name)) <> LOWER(TRIM(bcc_nm_u.user_login))"
+            . " AND LOWER(bcc_nm_u.display_name) NOT REGEXP '^[[:space:]]*u_[a-z0-9-]{3,20}[[:space:]]*$'"
             . " AND NOT EXISTS (SELECT 1 FROM wp_usermeta AS bcc_nm_r"
             . " WHERE bcc_nm_r.user_id = bcc_nm_u.ID AND bcc_nm_r.meta_key = 'bcc_privacy_real_name_hidden'"
             . " AND LOWER(TRIM(bcc_nm_r.meta_value)) NOT IN ('', '0', 'false', 'off', 'no')))))",

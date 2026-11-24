@@ -138,10 +138,14 @@ final class UserMetaRepository
      *   - the @handle: the first `bcc_handle` row, trimmed, or 'member-{id}'
      *     when there is none (bcc-trust's PublicIdentity::handle());
      *   - the display name, only where others see it: not empty, not the
-     *     login (in any case), and no "hide my real name" row that is not
-     *     plainly off. Any value but '', 0, false, off or no counts as
-     *     hidden. That is stricter than the flag read in PHP, so the filter
-     *     can miss a name that is shown but never match one that is hidden.
+     *     login (in any case), not shaped like a signup login (`u_` and 3 to
+     *     20 of a-z, 0-9 or `-`, in any case, surrounding whitespace
+     *     ignored), and no "hide my real name" row that is not plainly off.
+     *     Those are the names the card replaces with the handle
+     *     (bcc-trust's PublicIdentity::displayName()). Any value but '', 0,
+     *     false, off or no counts as hidden. That is stricter than the flag
+     *     read in PHP, so the filter can miss a name that is shown but never
+     *     match one that is hidden.
      * Never the login, the email, or a hidden real name.
      *
      * The fragment contains no `%` apart from its two placeholders.
@@ -165,6 +169,7 @@ final class UserMetaRepository
             . " OR (bcc_nm_u.display_name LIKE %s"
             . " AND TRIM(bcc_nm_u.display_name) <> ''"
             . " AND LOWER(TRIM(bcc_nm_u.display_name)) <> LOWER(TRIM(bcc_nm_u.user_login))"
+            . " AND LOWER(bcc_nm_u.display_name) NOT REGEXP '^[[:space:]]*u_[a-z0-9-]{3,20}[[:space:]]*$'"
             . " AND NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} AS bcc_nm_r"
             . " WHERE bcc_nm_r.user_id = bcc_nm_u.ID AND bcc_nm_r.meta_key = '" . self::REAL_NAME_HIDDEN_META . "'"
             . " AND LOWER(TRIM(bcc_nm_r.meta_value)) NOT IN ('', '0', 'false', 'off', 'no')))))";
