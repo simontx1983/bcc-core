@@ -615,7 +615,18 @@ final class PostWritePinInventoryTest extends TestCase
         }
 
         // self:: / static:: only inside the guard class itself.
+        // ⛔ BOTH, not either. A file can declare a class of this NAME in a
+        // FOREIGN namespace — the impostor fixture does exactly that — and a
+        // `self::pinOnly()` inside it would otherwise arm a pin. The class
+        // check alone is not identity.
+        //
+        // ⚠ bcc-trust's twin had both from the start; core had only the class
+        // check, and NEITHER impostor fixture contained a `self::pinOnly(`
+        // call, so no mutant could kill it. The review agent found it by
+        // hashing each rule function across the twins and diffing. Both
+        // fixtures now carry that call.
         return in_array(strtolower($written), ['self', 'static'], true)
+            && self::declaresGuardNamespace($tokens)
             && self::declaresGuardClass($tokens);
     }
 
@@ -1476,8 +1487,16 @@ self::assertCount(
         // global functions, so a skip-list that does not know the nullsafe
         // operator reports them — a false positive, and the opposite failure
         // from the nullsafe miss in {@see updateIsNotOnWpdb()}.
-        self::assertCount(
-            1,
+                // TWO writes, and both must be unpinned: the impostor pins one by
+        // its SHORT NAME and the other through `self::`. The second is the
+        // case the namespace requirement exists for -- a class-declaration
+        // check alone accepts `self::pinOnly(` in a foreign namespace.
+        //
+        // The fixture also calls two METHODS named like writers, one through
+        // `?->`; those are method calls, not the global functions, so a
+        // skip-list ignorant of the nullsafe operator would report them too.
+self::assertCount(
+            2,
             $rows,
             'only the real write may be reported; a method that merely shares a'
             . " writer's name is not a call to that writer, through `->` or `?->`"
