@@ -34,7 +34,8 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
     #[CoversClass(PeepSoActivityRepository::class)]
     final class ActivityRestrictedGroupExclusionTest extends TestCase
     {
-        private const PUBLIC_ALL_GATE = "(gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')";
+        // Per post: in no group, or EVERY visibility row is public_all.
+        private const PUBLIC_ALL_GATE = "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR (EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND vis_pm.meta_value IN ('public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta vis_pm_x WHERE vis_pm_x.post_id = p.ID AND vis_pm_x.meta_key = '_bcc_post_visibility' AND (vis_pm_x.meta_value IS NULL OR vis_pm_x.meta_value NOT IN ('public_all')))))";
 
         private const DENY_7_9 = "NOT EXISTS (SELECT 1 FROM wp_postmeta rg_pm WHERE rg_pm.post_id = p.ID"
             . " AND rg_pm.meta_key = 'peepso_group_id' AND rg_pm.meta_value IN ('7','9'))";
@@ -45,13 +46,8 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
         private const MEMBER_ALT = "EXISTS (SELECT 1 FROM wp_postmeta mg_pm WHERE mg_pm.post_id = p.ID"
             . " AND mg_pm.meta_key = 'peepso_group_id' AND mg_pm.meta_value IN ('3','4'))";
 
-        // Per-post: a public row must exist AND no non-public row may.
-        private const PUBLIC_VIS_ALT = "(EXISTS (SELECT 1 FROM wp_postmeta nmv_pm WHERE nmv_pm.post_id = p.ID"
-            . " AND nmv_pm.meta_key = '_bcc_post_visibility'"
-            . " AND nmv_pm.meta_value IN ('public_group','public_all'))"
-            . " AND NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_neg WHERE nmv_neg.post_id = p.ID"
-            . " AND nmv_neg.meta_key = '_bcc_post_visibility'"
-            . " AND nmv_neg.meta_value NOT IN ('public_group','public_all')))";
+        // Per-post: a public row must exist AND no other row may, NULL included.
+        private const PUBLIC_VIS_ALT = "(EXISTS (SELECT 1 FROM wp_postmeta nmv_pm WHERE nmv_pm.post_id = p.ID AND nmv_pm.meta_key = '_bcc_post_visibility' AND nmv_pm.meta_value IN ('public_group','public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_pm_x WHERE nmv_pm_x.post_id = p.ID AND nmv_pm_x.meta_key = '_bcc_post_visibility' AND (nmv_pm_x.meta_value IS NULL OR nmv_pm_x.meta_value NOT IN ('public_group','public_all'))))";
 
         // ⚠ `a.act_repost_id` added for F-346. The golden SQL did its job:
         // widening COLUMNS changed the rendered query and these two tests
@@ -63,10 +59,6 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             . ' a.act_module_id, a.act_external_id, p.post_date_gmt AS act_time, a.act_access,'
             . ' p.post_status AS act_status, a.act_repost_id FROM wp_peepso_activities a'
             . ' INNER JOIN wp_posts p ON p.ID = a.act_external_id';
-
-        private const GLOBAL_GATE_JOINS = " LEFT JOIN wp_postmeta gx_pm ON gx_pm.post_id = p.ID"
-            . " AND gx_pm.meta_key = 'peepso_group_id' LEFT JOIN wp_postmeta vis_pm ON vis_pm.post_id = p.ID"
-            . " AND vis_pm.meta_key = '_bcc_post_visibility'";
 
         private const BASE_WHERE = " WHERE p.post_status = 'publish'"
             . ' AND (a.act_comment_object_id = 0 OR a.act_comment_object_id IS NULL)';
@@ -119,7 +111,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             PeepSoActivityRepository::getActivities(null, null, null, null, 10);
 
             self::assertSame(
-                self::SELECT_PREFIX . self::GLOBAL_GATE_JOINS . self::BASE_WHERE
+                self::SELECT_PREFIX . self::BASE_WHERE
                     . self::DEFAULT_MODULES . ' AND ' . self::PUBLIC_ALL_GATE . self::TAIL . '10',
                 trim($wpdb->lastSql)
             );
@@ -150,7 +142,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             );
 
             self::assertSame(
-                self::SELECT_PREFIX . self::GLOBAL_GATE_JOINS . self::BASE_WHERE
+                self::SELECT_PREFIX . self::BASE_WHERE
                     . ' AND p.post_author NOT IN (11,12)'
                     . ' AND a.act_id NOT IN (13)'
                     // F-392: module NAMES are resolved to their numeric ids and
@@ -544,6 +536,13 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
                 "vis_in_pm.meta_value IN ('public_group','public_all')",
                 $wpdb->lastSql
             );
+            // Per post, every row: no other visibility row, NULL included,
+            // and no join that a single permissive row could satisfy.
+            self::assertStringContainsString(
+                "(vis_in_pm_x.meta_value IS NULL OR vis_in_pm_x.meta_value NOT IN ('public_group','public_all'))",
+                $wpdb->lastSql
+            );
+            self::assertStringNotContainsString('JOIN wp_postmeta vis_in_pm', $wpdb->lastSql);
             self::assertStringContainsString('p.post_author NOT IN (11,12)', $wpdb->lastSql);
             self::assertStringContainsString('a.act_id NOT IN (13)', $wpdb->lastSql);
             self::assertStringContainsString(self::DENY_7_9, $wpdb->lastSql);
@@ -649,9 +648,9 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
                 PeepSoActivityRepository::GROUP_GATE_VIEWER_ACCESS, null
             );
 
-            self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_neg', $wpdb->lastSql);
+            self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_pm_x', $wpdb->lastSql);
             self::assertStringContainsString(
-                "nmv_neg.meta_value NOT IN ('public_group','public_all')",
+                "(nmv_pm_x.meta_value IS NULL OR nmv_pm_x.meta_value NOT IN ('public_group','public_all'))",
                 $wpdb->lastSql
             );
         }

@@ -27,8 +27,8 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
     final class ActivityNonOpenGroupGateTest extends TestCase
     {
         /** Gate 12 escape: a post recorded as made while its group was already non-open. */
-        private const MADE_WHILE_NON_OPEN = "EXISTS (SELECT 1 FROM wp_postmeta gsg_at WHERE gsg_at.post_id = p.ID"
-            . " AND gsg_at.meta_key = '_bcc_post_group_privacy_at_post' AND gsg_at.meta_value IN ('1','2'))";
+        // Every privacy-at-post row non-open after TRIM, NULL included as "other".
+        private const MADE_WHILE_NON_OPEN = "(EXISTS (SELECT 1 FROM wp_postmeta gsg_at WHERE gsg_at.post_id = p.ID AND gsg_at.meta_key = '_bcc_post_group_privacy_at_post' AND TRIM(gsg_at.meta_value) IN ('1','2')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta gsg_at_x WHERE gsg_at_x.post_id = p.ID AND gsg_at_x.meta_key = '_bcc_post_group_privacy_at_post' AND (gsg_at_x.meta_value IS NULL OR TRIM(gsg_at_x.meta_value) NOT IN ('1','2'))))";
 
         private const NON_OPEN_7_9 = "(NOT EXISTS (SELECT 1 FROM wp_postmeta gsg_g WHERE gsg_g.post_id = p.ID"
             . " AND gsg_g.meta_key = 'peepso_group_id' AND gsg_g.meta_value IN ('7','9')) OR " . self::MADE_WHILE_NON_OPEN . ")";
@@ -69,7 +69,7 @@ namespace BCC\Core\Feed\Tests\NonOpenGroups {
 
             self::assertStringContainsString(self::NON_OPEN_7_9, self::sql());
             // Alongside, not instead of, the public_all gate.
-            self::assertStringContainsString("vis_pm.meta_value = 'public_all'", self::sql());
+            self::assertStringContainsString("vis_pm.meta_value IN ('public_all')", self::sql());
         }
 
         public function testNoNonOpenGroupsAddsNothing(): void

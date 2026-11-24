@@ -81,6 +81,7 @@ final class PeepSoAddPostGuardTest extends TestCase
             /** @var list<object> */
             public array $last_result = [];
             public int $metaQueries   = 0;
+            public int $insert_id     = 0;
 
             /**
              * ⚠ THE PLACEHOLDERS MUST BE SUBSTITUTED, not passed through.
@@ -127,6 +128,26 @@ final class PeepSoAddPostGuardTest extends TestCase
                 $this->last_result = [];
 
                 if (stripos($sql, 'wp_postmeta') === false) {
+                    return 0;
+                }
+
+                // attachToGroup()'s single-row writes (PostMetaRepository::
+                // replaceWithOneRow), handled BEFORE the scripted read modes
+                // so a write never consumes one: the INSERT lands in the meta
+                // store the reads see, one value per key, so the DELETE of the
+                // key's other rows has nothing left to do.
+                if (str_starts_with(ltrim($sql), 'INSERT INTO wp_postmeta')) {
+                    if (preg_match("/VALUES \\((\\d+), '((?:[^'\\\\]|\\\\.)*)', '((?:[^'\\\\]|\\\\.)*)'\\)/", $sql, $m) !== 1) {
+                        $this->last_error = 'unparsed insert';
+
+                        return false;
+                    }
+                    $GLOBALS['__bcc_apg']['meta'][(int) $m[1]][stripslashes($m[2])] = stripslashes($m[3]);
+                    $this->insert_id++;
+
+                    return 1;
+                }
+                if (str_starts_with(ltrim($sql), 'DELETE FROM wp_postmeta')) {
                     return 0;
                 }
 

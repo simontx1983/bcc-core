@@ -285,15 +285,30 @@ final class PeepSoStatusWriter
      * that don't care can omit it. Validation of the value set is the
      * caller's responsibility (PostsService clamps it); the writer
      * stores whatever it's given.
+     *
+     * Each of the three keys keeps EXACTLY ONE row: they are written with
+     * {@see \BCC\Core\Repositories\PostMetaRepository::replaceWithOneRow()}
+     * (insert, then delete the key's other rows; no read first), never
+     * update_post_meta(), so a re-attach replaces rather than appends. A
+     * key that could not be written is logged; the others are still
+     * written, and the hook still fires, as before.
+     *
+     * @return bool true when all three keys now hold exactly one row
      */
-    public static function attachToGroup(int $postId, int $groupId, string $visibility = 'members_only'): void
+    public static function attachToGroup(int $postId, int $groupId, string $visibility = 'members_only'): bool
     {
         if ($postId <= 0 || $groupId <= 0) {
-            return;
+            return false;
         }
 
-        update_post_meta($postId, 'peepso_group_id', (string) $groupId);
-        update_post_meta($postId, '_bcc_post_visibility', $visibility);
+        $written = [
+            'peepso_group_id' => \BCC\Core\Repositories\PostMetaRepository::replaceWithOneRow($postId, 'peepso_group_id', (string) $groupId),
+            \BCC\Core\Feed\GroupSyndicationGate::META_VISIBILITY => \BCC\Core\Repositories\PostMetaRepository::replaceWithOneRow(
+                $postId,
+                \BCC\Core\Feed\GroupSyndicationGate::META_VISIBILITY,
+                $visibility
+            ),
+        ];
         // F-23 / Gate 12: record the group's privacy at the moment the
         // visibility is stamped, so a public_all post made while the group
         // was ALREADY closed or secret keeps syndicating, while one made
@@ -310,12 +325,24 @@ final class PeepSoStatusWriter
         // read stamps a post made in a group that was ALREADY non-open as
         // '0', and it will not syndicate later: it drops, it never leaks.
         $privacy = \BCC\Core\Repositories\PeepSoGroupPrivacy::privacyForGroup($groupId);
-        update_post_meta(
+        $written[\BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST] = \BCC\Core\Repositories\PostMetaRepository::replaceWithOneRow(
             $postId,
             \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST,
             (string) ($privacy ?? \BCC\Core\Repositories\PeepSoGroupPrivacy::OPEN)
         );
+
+        $failed = array_keys(array_filter($written, static fn(bool $ok): bool => !$ok));
+        if ($failed !== []) {
+            \BCC\Core\Log\Logger::error('[PeepSoStatusWriter] attachToGroup could not write a group key', [
+                'post_id'  => $postId,
+                'group_id' => $groupId,
+                'keys'     => $failed,
+            ]);
+        }
+
         do_action('peepso_groups_new_post', $groupId, $postId);
+
+        return $failed === [];
     }
 
     /**

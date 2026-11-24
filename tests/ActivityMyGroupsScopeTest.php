@@ -128,7 +128,7 @@ namespace BCC\Core\Feed\Tests\MyGroups {
         private const ALLOW_7_9 = "EXISTS (SELECT 1 FROM wp_postmeta og_pm WHERE og_pm.post_id = p.ID"
             . " AND og_pm.meta_key = 'peepso_group_id' AND og_pm.meta_value IN ('7','9'))";
 
-        private const PUBLIC_ALL_GATE = "(gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')";
+        private const PUBLIC_ALL_GATE = "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR (EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND vis_pm.meta_value IN ('public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta vis_pm_x WHERE vis_pm_x.post_id = p.ID AND vis_pm_x.meta_key = '_bcc_post_visibility' AND (vis_pm_x.meta_value IS NULL OR vis_pm_x.meta_value NOT IN ('public_all')))))";
 
         /** @var mixed */
         private $priorWpdb;

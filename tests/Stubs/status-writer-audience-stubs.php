@@ -59,12 +59,24 @@ namespace {
     // Minimal $wpdb: resolveActIdForPost() runs AFTER add_post(), so it only
     // has to not fatal. It returns a non-zero act_id so create() reports
     // success and the test reads a realistic result shape.
+    // attachToGroup()'s writer drops the post's meta cache after a write.
+    if (!\function_exists('wp_cache_delete')) {
+        /** @param int|string $key */
+        function wp_cache_delete($key, string $group = ''): bool
+        {
+            unset($key, $group);
+
+            return true;
+        }
+    }
+
     if (!isset($GLOBALS['__bcc_swa_wpdb_installed'])) {
         $GLOBALS['__bcc_swa_wpdb_installed'] = true;
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
             public string $postmeta = 'wp_postmeta';
             public string $last_error = '';
+            public int $insert_id = 0;
             /** @var list<object> */
             public array $last_result = [];
 
@@ -72,15 +84,20 @@ namespace {
              * The group privacy read (PeepSoGroupPrivacy, F-460) that
              * attachToGroup() stamps from: a successful read with no
              * privacy row, so the group reads open. No test here asserts
-             * the stamp; GroupSyndicationGateTest does.
+             * the stamp; GroupSyndicationGateTest does. attachToGroup()'s
+             * single-row writes succeed (one row inserted, with an id).
              *
              * @param string $sql
              */
             public function query($sql): int
             {
-                unset($sql);
                 $this->last_error  = '';
                 $this->last_result = [];
+                if (str_starts_with(ltrim((string) $sql), 'INSERT INTO wp_postmeta')) {
+                    $this->insert_id++;
+
+                    return 1;
+                }
 
                 return 0;
             }

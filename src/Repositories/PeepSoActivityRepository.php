@@ -548,35 +548,36 @@ final class PeepSoActivityRepository
         // Per-post visibility scope (group-scoped path only).
         //
         // When a non-member reads the group teaser, bcc-trust passes
-        // $groupVisibilityIn = ['public_group','public_all']. We add an
-        // INNER JOIN on `_bcc_post_visibility` restricting to those values.
+        // $groupVisibilityIn = ['public_group','public_all']: the post must
+        // carry `_bcc_post_visibility`, and EVERY row of it must be one of
+        // those values (GroupSyndicationGate::everyRowIn, per post).
         //
-        // INNER (not LEFT) JOIN is the security invariant: a post with NO
-        // `_bcc_post_visibility` meta row (absent ⇒ members_only ⇒ hidden)
-        // produces no joined row and is therefore EXCLUDED — members_only
-        // and absent-meta posts can never reach a non-member. A distinct
-        // alias (`vis_in_pm`) avoids colliding with the global-feed
-        // `vis_pm` LEFT JOIN above.
+        // A post with NO `_bcc_post_visibility` row (absent ⇒ members_only
+        // ⇒ hidden) is EXCLUDED, as is one whose duplicate rows disagree
+        // (strictest-wins): members_only and absent-meta posts never reach
+        // a non-member. Subqueries, not a join, so nothing multiplies rows.
         //
-        // Member reads pass $groupVisibilityIn = null → the join is omitted
-        // → members see every post including members_only. Only meaningful
-        // on the group-scoped path; the guard requires $onlyForGroupId.
-        $visibilityInJoin = '';
+        // Member reads pass $groupVisibilityIn = null → no clause → members
+        // see every post including members_only. Only meaningful on the
+        // group-scoped path; the guard requires $onlyForGroupId.
         if ($groupVisibilityIn !== null && $groupVisibilityIn !== [] && $onlyForGroupId !== null) {
-            $visPlaceholders  = implode(',', array_fill(0, count($groupVisibilityIn), '%s'));
-            $visibilityInJoin = ' INNER JOIN ' . $wpdb->postmeta . ' vis_in_pm
-                                     ON vis_in_pm.post_id   = p.ID
-                                    AND vis_in_pm.meta_key  = \'_bcc_post_visibility\'
-                                    AND vis_in_pm.meta_value IN (' . $visPlaceholders . ') ';
-            foreach ($groupVisibilityIn as $vis) {
-                $joinParams[] = (string) $vis;
+            $visibilityIn = \BCC\Core\Feed\GroupSyndicationGate::everyRowIn(
+                $wpdb->postmeta,
+                'p',
+                'vis_in_pm',
+                \BCC\Core\Feed\GroupSyndicationGate::META_VISIBILITY,
+                array_values(array_map('strval', $groupVisibilityIn))
+            );
+            $where[] = $visibilityIn['where'];
+            foreach ($visibilityIn['params'] as $param) {
+                $params[] = $param;
             }
         }
 
         // Page scope: filter to activities whose backing wp_post was written
         // for a specific page. Same INNER JOIN shape as the group scope above,
-        // on a marker this codebase writes itself. Bound here, after gm_pm and
-        // vis_in_pm, because that is the order the joins render in $sql.
+        // on a marker this codebase writes itself. Bound here, after gm_pm,
+        // because that is the order the joins render in $sql.
         $pageJoin = '';
         if ($onlyForPageId !== null) {
             $pageJoin = ' INNER JOIN ' . $wpdb->postmeta . ' pg_pm
@@ -725,16 +726,14 @@ final class PeepSoActivityRepository
         // group's own feed it is a MEMBER read, and members see every post in
         // their groups, members_only included. The allow-list above already
         // confines it to the viewer's own groups.
-        $groupVisibilityJoin = '';
         if ($onlyForGroupId === null && $onlyForGroupIdsClean === null && !$gateRelaxed) {
-            $groupVisibilityJoin = ' LEFT JOIN ' . $wpdb->postmeta . ' gx_pm
-                                        ON gx_pm.post_id  = p.ID
-                                       AND gx_pm.meta_key = \'peepso_group_id\'
-                                     LEFT JOIN ' . $wpdb->postmeta . ' vis_pm
-                                        ON vis_pm.post_id  = p.ID
-                                       AND vis_pm.meta_key = \'_bcc_post_visibility\' ';
-            // meta_value is varchar — compare against the literal string.
-            $where[] = "(gx_pm.meta_value IS NULL OR vis_pm.meta_value = 'public_all')";
+            // Per post: in no group, or EVERY visibility row is public_all
+            // (strictest-wins). The same predicate public trending uses.
+            $publicAll = \BCC\Core\Feed\GroupSyndicationGate::publicAllPredicate($wpdb->postmeta);
+            $where[]   = $publicAll['where'];
+            foreach ($publicAll['params'] as $param) {
+                $params[] = $param;
+            }
 
             // F-23 + Gate 12: the shared group-syndication rule. A post in
             // a group that is closed or secret NOW drops from every read
@@ -860,17 +859,17 @@ final class PeepSoActivityRepository
             // visibility rows {members_only, public_group} would satisfy a
             // bare EXISTS on the public values and be shown — the same
             // per-row mistake the deny list had. So the post must have a
-            // public row AND no non-public row. WP writes one row per key,
+            // public row AND no other row, a NULL one included
+            // (GroupSyndicationGate::everyRowIn). WP writes one row per key,
             // but nothing enforces it, and this is a visibility gate.
-            $visPlaceholdersNm = implode(',', array_fill(0, count(self::NON_MEMBER_VISIBILITY), '%s'));
-            $alternatives[]    = '(EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' nmv_pm'
-                . ' WHERE nmv_pm.post_id = p.ID'
-                . ' AND nmv_pm.meta_key = \'_bcc_post_visibility\''
-                . ' AND nmv_pm.meta_value IN (' . $visPlaceholdersNm . '))'
-                . ' AND NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' nmv_neg'
-                . ' WHERE nmv_neg.post_id = p.ID'
-                . ' AND nmv_neg.meta_key = \'_bcc_post_visibility\''
-                . ' AND nmv_neg.meta_value NOT IN (' . $visPlaceholdersNm . ')))';
+            $nonMember      = \BCC\Core\Feed\GroupSyndicationGate::everyRowIn(
+                $wpdb->postmeta,
+                'p',
+                'nmv_pm',
+                \BCC\Core\Feed\GroupSyndicationGate::META_VISIBILITY,
+                self::NON_MEMBER_VISIBILITY
+            );
+            $alternatives[] = $nonMember['where'];
 
             $where[] = '(' . implode(' OR ', $alternatives) . ')';
 
@@ -879,11 +878,8 @@ final class PeepSoActivityRepository
             foreach ($memberGroupsClean as $mgid) {
                 $params[] = (string) $mgid;
             }
-            foreach (self::NON_MEMBER_VISIBILITY as $vis) {
-                $params[] = $vis;
-            }
-            foreach (self::NON_MEMBER_VISIBILITY as $vis) {
-                $params[] = $vis;
+            foreach ($nonMember['params'] as $param) {
+                $params[] = $param;
             }
         }
 
@@ -928,24 +924,22 @@ final class PeepSoActivityRepository
         }
 
         // Final argument order mirrors placeholder appearance in $sql:
-        // JOIN params (gm_pm, then vis_in_pm, then pg_pm) → WHERE params → LIMIT.
+        // JOIN params (gm_pm, then pg_pm) → WHERE params → LIMIT.
         $allParams = array_merge($joinParams, $params, [$limit]);
 
         // DISTINCT: row-multiplication guard. WP convention is one
         // postmeta row per (post_id, meta_key), but nothing enforces it —
-        // a duplicate `peepso_group_id` / `_bcc_post_visibility` row
-        // would multiply the joined activity into identical rows,
-        // duplicating feed items within a page and inflating the
-        // over-fetch-by-1 has_more. Dedup cost is negligible (≤ limit+1
-        // rows post-filter).
+        // a duplicate `peepso_group_id` row would multiply the gm_pm join
+        // into identical rows, duplicating feed items within a page and
+        // inflating the over-fetch-by-1 has_more. (The visibility gates are
+        // per-post subqueries and multiply nothing.) Dedup cost is
+        // negligible (≤ limit+1 rows post-filter).
         $sql = 'SELECT DISTINCT ' . self::COLUMNS . '
                   FROM ' . self::table() . ' a
                   INNER JOIN ' . $wpdb->posts . ' p ON p.ID = a.act_external_id
                   ' . $groupJoin . '
-                  ' . $visibilityInJoin . '
                   ' . $pageJoin . '
                   ' . $rankedJoin . '
-                  ' . $groupVisibilityJoin . '
                   ' . $authorAccJoin . '
                  WHERE ' . implode(' AND ', $where) . '
                  ORDER BY p.post_date_gmt DESC, a.act_id DESC
@@ -1053,6 +1047,13 @@ final class PeepSoActivityRepository
         // F-461: the group-visibility meta, as columns of the SAME statement.
         // Their placeholders sit in the SELECT list, before the WHERE, so
         // their values go first.
+        //
+        // Duplicate rows fold STRICTEST-WINS: the row that grants nothing
+        // sorts first, so `bcc_post_visibility` is `public_all` only when
+        // EVERY row is, and `bcc_privacy_at_post` is non-open only when
+        // every row is (after TRIM, as GroupSyndicationGate::
+        // madeWhileNonOpen() trims). Otherwise the first disagreeing row, by
+        // meta_id, a NULL one included. Never a value no row holds.
         $groupColumns = '';
         $selectParams = [];
         if ($withGroupVisibility) {
@@ -1066,16 +1067,21 @@ final class PeepSoActivityRepository
                 (SELECT vm.meta_value
                    FROM {$wpdb->postmeta} vm
                   WHERE vm.post_id = p.ID AND vm.meta_key = %s
-                  ORDER BY vm.meta_id LIMIT 1) AS bcc_post_visibility,
+                  ORDER BY CASE WHEN vm.meta_value = %s THEN 1 ELSE 0 END, vm.meta_id
+                  LIMIT 1) AS bcc_post_visibility,
                 (SELECT sm.meta_value
                    FROM {$wpdb->postmeta} sm
                   WHERE sm.post_id = p.ID AND sm.meta_key = %s
-                  ORDER BY sm.meta_id LIMIT 1) AS bcc_privacy_at_post";
+                  ORDER BY CASE WHEN TRIM(sm.meta_value) IN (%s, %s) THEN 1 ELSE 0 END, sm.meta_id
+                  LIMIT 1) AS bcc_privacy_at_post";
             $selectParams = [
                 'peepso_group_id',
                 'peepso_group_id',
-                '_bcc_post_visibility',
+                \BCC\Core\Feed\GroupSyndicationGate::META_VISIBILITY,
+                \BCC\Core\Feed\GroupSyndicationGate::VISIBILITY_GLOBAL,
                 \BCC\Core\Feed\GroupSyndicationGate::META_PRIVACY_AT_POST,
+                \BCC\Core\Feed\GroupSyndicationGate::NON_OPEN_PRIVACY[0],
+                \BCC\Core\Feed\GroupSyndicationGate::NON_OPEN_PRIVACY[1],
             ];
         }
         if ($allowedModuleIds !== null) {

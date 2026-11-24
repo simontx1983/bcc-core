@@ -76,19 +76,42 @@ final class GroupSyndicationGateTest extends TestCase
     public function testSqlPredicateBindsTheNonOpenIdsAndKeepsTheGate12Escape(): void
     {
         $p = GroupSyndicationGate::sqlPredicate('wp_postmeta', [7, 9, 7, 0]);
-        self::assertSame(['7', '9'], $p['params'], 'deduped, positive ids only, as strings');
+        self::assertSame(['7', '9', '1', '2', '1', '2'], $p['params'], 'ids deduped, positive, as strings; then the non-open values, twice');
         self::assertStringContainsString("gsg_g.meta_value IN (%s,%s)", $p['where']);
-        self::assertStringContainsString("_bcc_post_group_privacy_at_post' AND gsg_at.meta_value IN ('1','2')", $p['where']);
+        // Every privacy row must be non-open (after TRIM), a NULL row included as "other".
+        self::assertStringContainsString("_bcc_post_group_privacy_at_post' AND TRIM(gsg_at.meta_value) IN (%s,%s)", $p['where']);
+        self::assertStringContainsString("(gsg_at_x.meta_value IS NULL OR TRIM(gsg_at_x.meta_value) NOT IN (%s,%s))", $p['where']);
         self::assertStringStartsWith('(NOT EXISTS', $p['where']);
+    }
+
+    public function testEveryRowInWithNothingAllowedMatchesNothing(): void
+    {
+        self::assertSame(
+            ['where' => '(1 = 0)', 'params' => []],
+            GroupSyndicationGate::everyRowIn('wp_postmeta', 'p', 'x_pm', GroupSyndicationGate::META_VISIBILITY, [])
+        );
+    }
+
+    /** The key and alias are written into the SQL, so only identifiers are accepted. */
+    public function testEveryRowInRefusesAKeyOrAliasThatIsNotAnIdentifier(): void
+    {
+        foreach ([["_bcc_x' OR '1", 'x_pm'], ['_bcc_post_visibility', 'x pm'], ['_bcc_post_visibility', '1x']] as [$key, $alias]) {
+            try {
+                GroupSyndicationGate::everyRowIn('wp_postmeta', 'p', $alias, $key, ['public_all']);
+                self::fail('accepted ' . $key . ' / ' . $alias);
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('not an identifier', $e->getMessage());
+            }
+        }
     }
 
     public function testSqlPredicateFailsClosedOnUnknown(): void
     {
         $p = GroupSyndicationGate::sqlPredicate('wp_postmeta', null);
-        self::assertSame([], $p['params']);
+        self::assertSame(['1', '2', '1', '2'], $p['params']);
         self::assertStringNotContainsString('gsg_g.meta_value IN', $p['where']);
         self::assertStringContainsString("gsg_g.meta_key = 'peepso_group_id')", $p['where']);
-        self::assertStringContainsString('gsg_at.meta_value IN', $p['where'], 'Gate 12 escape kept');
+        self::assertStringContainsString('TRIM(gsg_at.meta_value) IN', $p['where'], 'Gate 12 escape kept');
     }
 
     /**
@@ -160,8 +183,11 @@ final class GroupSyndicationGateTest extends TestCase
         return new class ($mode, $rows) {
             public string $postmeta = 'wp_postmeta';
             public string $last_error = '';
+            public int $insert_id = 0;
             /** @var list<object> */
             public array $last_result;
+            /** @var list<mixed> */
+            private array $args = [];
 
             /** @param list<object> $rows */
             public function __construct(private string $mode, private array $rows)
@@ -172,12 +198,31 @@ final class GroupSyndicationGateTest extends TestCase
             /** @param mixed ...$args */
             public function prepare(string $sql, ...$args): string
             {
+                $this->args = $args;
+
                 return $sql;
             }
 
             /** @return int|false */
             public function query(string $sql)
             {
+                // The writer's single-row replace (PostMetaRepository::
+                // replaceWithOneRow): the INSERT stores the one value, and
+                // the DELETE of the key's other rows has nothing left to do
+                // in this one-value-per-key store.
+                if (str_starts_with(ltrim($sql), 'INSERT INTO wp_postmeta')) {
+                    [$postId, $key, $value] = $this->args;
+                    $GLOBALS['__gsg_meta'][(int) $postId][(string) $key] = (string) $value;
+                    $this->insert_id++;
+                    $this->last_error = '';
+
+                    return 1;
+                }
+                if (str_starts_with(ltrim($sql), 'DELETE FROM wp_postmeta')) {
+                    $this->last_error = '';
+
+                    return 0;
+                }
                 if ($this->mode === 'preflush') {
                     return false;
                 }
@@ -211,6 +256,10 @@ final class GroupSyndicationGateTest extends TestCase
                 return $GLOBALS['__gsg_meta'][$id][$key] ?? '';
             }
             function do_action(string $hook, ...$args): void {}
+            function wp_cache_delete($key, string $group = ''): bool
+            {
+                return true;
+            }
             PHP);
     }
 }
