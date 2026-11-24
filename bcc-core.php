@@ -642,6 +642,8 @@ add_filter('bcc_system_health', function (array $health): array {
         'auth_mail' => [
             'verify_email_send_failed', // 2026-06-02 — /auth/signup + /auth/resend-verification
             'welcome_email_send_failed', // 2026-06-04 — /auth/verify-email (post-confirmation)
+            'step_up_email_send_failed', // 2026-11-24 — bcc-trust validator staff step-up code (the admin cannot confirm the change)
+            'validator_log_mail_failed', // 2026-11-24 — bcc-trust relationship-log health alert to administrators
         ],
         // legacy_ajax — RETIRED 2026-11-11. Its last three events (the bcc-trust
         // UserLifecycleService sync/init AJAX handlers) were removed with their
@@ -815,6 +817,49 @@ add_filter('bcc_system_health', function (array $health): array {
             'delivery_failed_terminal',
             'lease_reaped',
             'delivery_context_unsupported',
+        ],
+        // validator_relationships — bcc-trust's validator owner and team
+        // relationship writers: ValidatorRelationshipService (staff link,
+        // revoke, cancel), the relationship log writer and its daily health
+        // check, PageOwnershipAligner (the PeepSo ownership move), the weekly
+        // claim re-verify sweep and the account-deletion purge. Every event
+        // means a change did not happen, or happened without part of its
+        // record. Expected steady state: zero.
+        //   - log_lock_unavailable / claim_lock_unavailable: a change could
+        //     not take its lock within 5s and wrote nothing (the caller got a
+        //     retryable 503). Sustained = lock contention or a stuck holder.
+        //   - followup_failed: a step AFTER a committed change (audit row,
+        //     bells, bonus, read model, align schedule) failed. The change
+        //     stands; the follow-up needs a look.
+        //   - page_owner_locked / page_owner_unknown / page_owner_misaligned:
+        //     the aligner did not move a page's ownership (its page lock was
+        //     busy; the claims could not be read; the author is someone no
+        //     claim names, which is reported and never overwritten). The page
+        //     stays on the retry list.
+        //   - align_backlog_full: that retry list reached its cap.
+        //   - deletion_revoke_failed: an account deletion purged claims it
+        //     could not revoke through the audited path.
+        //   - log_chain_broken: the daily verification found a break (every
+        //     administrator is emailed). Any occurrence needs investigation.
+        //   - log_verify_incomplete: the daily walk could not finish (a failed
+        //     read or the row limit); nothing was proven broken.
+        //   - log_anchor_missing: the log has rows but its anchor option is
+        //     gone; the next append sets a new one.
+        // ⚠ BAKE BEFORE ALERTING on everything except log_chain_broken.
+        'validator_relationships' => [
+            'unknown_verification_method', // 2026-11-17 — weekly claim re-verify met a method it does not know (skipped, not revoked)
+            'log_lock_unavailable', // 2026-11-24 — relationship log lock not taken within 5s
+            'log_append_failed', // 2026-11-24 — a standalone relationship log row was not written
+            'claim_lock_unavailable', // 2026-11-24 — the claim lock not taken within 5s
+            'followup_failed', // 2026-11-24 — a post-commit follow-up failed
+            'page_owner_locked', // 2026-11-24 — aligner: page lock busy
+            'page_owner_unknown', // 2026-11-24 — aligner: claims unreadable
+            'page_owner_misaligned', // 2026-11-24 — aligner: an author no claim names
+            'align_backlog_full', // 2026-11-24 — aligner retry list at its cap
+            'deletion_revoke_failed', // 2026-11-24 — account deletion purged without the audited revoke
+            'log_chain_broken', // 2026-11-24 — daily verification found a break
+            'log_verify_incomplete', // 2026-11-24 — daily verification could not finish
+            'log_anchor_missing', // 2026-11-24 — rows but no anchor
         ],
         // collection_persist — CollectionPersistBatch::persist(), the single
         // writer behind wallet seeding, the chain-refresh cron and the gallery
