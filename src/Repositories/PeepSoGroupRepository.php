@@ -79,11 +79,40 @@ final class PeepSoGroupRepository
         return $wpdb->prefix . self::TABLE_MEMBERS_SUFFIX;
     }
 
+    /** Longest name query the list reads use, in characters; the rest is ignored. */
+    public const NAME_QUERY_MAX = 100;
+
+    /**
+     * The optional name filter the group list reads share: a substring match
+     * on the group's title, prepared, with LIKE's wildcards in the query
+     * escaped so they match themselves. An empty or all-space query adds
+     * nothing, so the read is exactly what it was without one. A query that
+     * is not valid UTF-8 matches nothing.
+     *
+     * @return array{0: string, 1: list<string>} the fragment (with its leading " AND ") and its argument
+     */
+    private static function nameQueryClause(string $nameQuery, string $titleColumn): array
+    {
+        global $wpdb;
+
+        $query = trim($nameQuery);
+        if ($query === '') {
+            return ['', []];
+        }
+        if (preg_match('/^.{0,' . self::NAME_QUERY_MAX . '}/su', $query, $m) !== 1) {
+            return [' AND 1 = 0', []];
+        }
+
+        return [" AND {$titleColumn} LIKE %s", ['%' . $wpdb->esc_like($m[0]) . '%']];
+    }
+
     /**
      * Halls (`_bcc_group_kind = 'hall'`), with member counts. Optionally
      * filtered to a single chain via the `_bcc_chain_tag` numeric-chain-id
      * post-meta. Callers resolve a chain slug to its id (ChainRepository)
      * before passing it — bcc-core does not depend on the chain registry.
+     * Optionally filtered by name ({@see nameQueryClause()}); countHalls()
+     * takes the same filters, so a page and its total agree.
      *
      * @return list<object{
      *   id: numeric-string,
@@ -92,10 +121,11 @@ final class PeepSoGroupRepository
      *   member_count: numeric-string
      * }>
      */
-    public static function listHalls(?int $chainId, int $offset, int $limit): array
+    public static function listHalls(?int $chainId, int $offset, int $limit, string $nameQuery = ''): array
     {
         global $wpdb;
         $members = self::membersTable();
+        [$nameSql, $nameArgs] = self::nameQueryClause($nameQuery, 'p.post_title');
 
         // INNER JOIN on the hall-kind meta is the discriminator; a single
         // meta row per post keeps COUNT(gm.gm_id) accurate under GROUP BY.
@@ -115,7 +145,7 @@ final class PeepSoGroupRepository
              . " LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
                                         AND gm.gm_user_status LIKE %s
                  WHERE p.post_type = %s
-                   AND p.post_status = %s
+                   AND p.post_status = %s{$nameSql}
                  GROUP BY p.ID
                  ORDER BY p.post_title ASC
                  LIMIT %d OFFSET %d";
@@ -128,6 +158,7 @@ final class PeepSoGroupRepository
         $params[] = self::ACTIVE_MEMBER_STATUS;
         $params[] = self::POST_TYPE;
         $params[] = self::POST_STATUS;
+        array_push($params, ...$nameArgs);
         $params[] = $limit;
         $params[] = $offset;
 
@@ -942,6 +973,8 @@ final class PeepSoGroupRepository
     /**
      * IDs of all browsable peepso-groups — published, post_type =
      * 'peepso-group', not `is_secret`. Drives the discovery endpoint.
+     * Optionally filtered by name ({@see nameQueryClause()}), in the same
+     * statement as the secret exclusion, so a name never finds a secret group.
      *
      * Closed groups ARE included: per the plan, a non-member sees that
      * the group exists (encourages buying in for NFT-gated cases) but
@@ -950,9 +983,10 @@ final class PeepSoGroupRepository
      *
      * @return list<int>
      */
-    public static function listBrowsableGroupIds(int $limit = 500): array
+    public static function listBrowsableGroupIds(int $limit = 500, string $nameQuery = ''): array
     {
         global $wpdb;
+        [$nameSql, $nameArgs] = self::nameQueryClause($nameQuery, 'p.post_title');
 
         // F-429: the shared rule, not an inline check. The LEFT JOIN form
         // this replaced listed a group whenever ANY of its privacy rows was
@@ -966,12 +1000,12 @@ final class PeepSoGroupRepository
                FROM {$wpdb->posts} p
               WHERE p.post_type   = %s
                 AND p.post_status = %s
-                AND {$notSecret}
+                AND {$notSecret}{$nameSql}
               ORDER BY p.ID DESC
               LIMIT %d",
             self::POST_TYPE,
             self::POST_STATUS,
-            $limit
+            ...[...$nameArgs, $limit]
         ));
 
         return array_values(array_map('intval', $rows ?: []));
@@ -1822,11 +1856,13 @@ final class PeepSoGroupRepository
     /**
      * Total count for the same filter set as listHalls(). Drives the
      * pagination.total / pagination.total_pages fields. Optional chain
-     * filter via the `_bcc_chain_tag` numeric-chain-id post-meta.
+     * filter via the `_bcc_chain_tag` numeric-chain-id post-meta, and the
+     * same optional name filter as listHalls().
      */
-    public static function countHalls(?int $chainId): int
+    public static function countHalls(?int $chainId, string $nameQuery = ''): int
     {
         global $wpdb;
+        [$nameSql, $nameArgs] = self::nameQueryClause($nameQuery, 'p.post_title');
 
         $chainJoin = $chainId !== null
             ? " INNER JOIN {$wpdb->postmeta} pm_chain ON pm_chain.post_id = p.ID
@@ -1840,7 +1876,7 @@ final class PeepSoGroupRepository
                                                 AND pm_kind.meta_key = %s
                                                 AND pm_kind.meta_value = %s"
              . $chainJoin
-             . " WHERE p.post_type = %s AND p.post_status = %s";
+             . " WHERE p.post_type = %s AND p.post_status = %s{$nameSql}";
 
         $params = [self::META_KIND, self::KIND_HALL];
         if ($chainId !== null) {
@@ -1849,6 +1885,7 @@ final class PeepSoGroupRepository
         }
         $params[] = self::POST_TYPE;
         $params[] = self::POST_STATUS;
+        array_push($params, ...$nameArgs);
 
         return (int) $wpdb->get_var($wpdb->prepare($sql, ...$params));
     }
