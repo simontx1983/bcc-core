@@ -60,6 +60,19 @@ namespace BCC\Core\Wallet {
         }
     }
 
+    // Scripted draws for the Wallet namespace's random_int() (the memo
+    // code), taken from $GLOBALS['__bcc_rand'] while it holds any; the
+    // CSPRNG otherwise.
+    if (!function_exists(__NAMESPACE__ . '\random_int')) {
+        function random_int(int $min, int $max): int
+        {
+            if (!empty($GLOBALS['__bcc_rand'])) {
+                return (int) array_shift($GLOBALS['__bcc_rand']);
+            }
+            return \random_int($min, $max);
+        }
+    }
+
     // The connection's error number, for a double whose `dbh` is a mysqli
     // object (see BccTxOptionsWpdb::$dbh): what the driver would report.
     if (!function_exists(__NAMESPACE__ . '\mysqli_errno')) {
