@@ -112,7 +112,10 @@ final class CosmosVerifierTest extends TestCase
 
     public function testConvertBits8To5(): void
     {
-        $converted = self::callPrivate('convertBits', [str_repeat("\xff", 20), 8, 5, true]);
+        // convertBits() moved to Bech32 with the rest of the bech32 code.
+        $ref = new ReflectionMethod(\BCC\Core\Crypto\Bech32::class, 'convertBits');
+        $ref->setAccessible(true);
+        $converted = $ref->invokeArgs(null, [array_values(unpack('C*', str_repeat("\xff", 20)) ?: []), 8, 5, true]);
         self::assertIsArray($converted);
         self::assertCount(32, $converted, '20 bytes (160 bits) → 32 five-bit groups');
         self::assertSame(31, $converted[0], 'all-ones input → 0b11111');
