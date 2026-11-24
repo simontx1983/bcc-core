@@ -1432,13 +1432,13 @@ final class PostWritePinInventoryTest extends TestCase
             }
         }
 
-                // SEVEN in-scope receiver shapes, each a fixture LINE rather than a
+        // SEVEN in-scope receiver shapes, each a fixture LINE rather than a
         // claim: a plain variable, a property, a nullsafe property, a STATIC
         // property, an indexed property, an indexed variable, and an inline
         // new. Excluded, also fixture lines: the two wpdb spellings, an
         // INDEXED wpdb (same base rule), and a true call result -- the one
         // gap left, named in updateIsNotOnWpdb().
-self::assertCount(
+        self::assertCount(
             7,
             $updates,
             'the property receiver, the method-return receiver and the NULLSAFE'
@@ -1487,7 +1487,7 @@ self::assertCount(
         // global functions, so a skip-list that does not know the nullsafe
         // operator reports them — a false positive, and the opposite failure
         // from the nullsafe miss in {@see updateIsNotOnWpdb()}.
-                // TWO writes, and both must be unpinned: the impostor pins one by
+        // TWO writes, and both must be unpinned: the impostor pins one by
         // its SHORT NAME and the other through `self::`. The second is the
         // case the namespace requirement exists for -- a class-declaration
         // check alone accepts `self::pinOnly(` in a foreign namespace.
@@ -1495,7 +1495,7 @@ self::assertCount(
         // The fixture also calls two METHODS named like writers, one through
         // `?->`; those are method calls, not the global functions, so a
         // skip-list ignorant of the nullsafe operator would report them too.
-self::assertCount(
+        self::assertCount(
             2,
             $rows,
             'only the real write may be reported; a method that merely shares a'

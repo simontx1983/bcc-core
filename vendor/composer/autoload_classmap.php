@@ -69,6 +69,7 @@ return array(
     'BCC\\Core\\NullServices\\NullWalletSignalWrite' => $baseDir . '/src/NullServices/NullWalletSignalWrite.php',
     'BCC\\Core\\Observability\\DegradationAlerter' => $baseDir . '/src/Observability/DegradationAlerter.php',
     'BCC\\Core\\Observability\\DegradationMetrics' => $baseDir . '/src/Observability/DegradationMetrics.php',
+    'BCC\\Core\\PeepSo\\OrphanedPostRepair' => $baseDir . '/src/PeepSo/OrphanedPostRepair.php',
     'BCC\\Core\\PeepSo\\PeepSo' => $baseDir . '/src/PeepSo/PeepSo.php',
     'BCC\\Core\\PeepSo\\PeepSoAddPostGuard' => $baseDir . '/src/PeepSo/PeepSoAddPostGuard.php',
     'BCC\\Core\\PeepSo\\PeepSoBlockWriter' => $baseDir . '/src/PeepSo/PeepSoBlockWriter.php',
