@@ -1538,10 +1538,18 @@ final class PeepSoGroupRepository
      * rows are already grouped and scanned, so it costs one aggregate
      * over the same index path.
      *
-     * @param int[] $groupIds
+     * `$excludeActIds` are activity ids left out of every number: bcc-trust
+     * passes the posts moderation has hidden, which stay `publish`, so the
+     * counts exclude moderated posts. They drop out of `posts`, `actives`
+     * and `last_at` alike. Bounded by the caller (bcc-trust's hidden list is
+     * capped by its own reader); inlined as integers after intval(), a
+     * constant IN list. Empty: no exclusion, exactly as before.
+     *
+     * @param int[]     $groupIds
+     * @param list<int> $excludeActIds
      * @return array<int, object{posts: int, actives: int, last_at: string|null}>
      */
-    public static function getActivityHeat(array $groupIds, int $sinceSeconds = 7 * DAY_IN_SECONDS): array
+    public static function getActivityHeat(array $groupIds, int $sinceSeconds = 7 * DAY_IN_SECONDS, array $excludeActIds = []): array
     {
         if ($groupIds === []) {
             return [];
@@ -1562,6 +1570,17 @@ final class PeepSoGroupRepository
         }
         $params[] = $cutoff;
 
+        // Integers only (intval, positive, each once), so the list carries
+        // no `%` into prepare().
+        $exclude = [];
+        foreach ($excludeActIds as $raw) {
+            $actId = (int) $raw;
+            if ($actId > 0) {
+                $exclude[$actId] = $actId;
+            }
+        }
+        $notExcluded = $exclude === [] ? '' : ' AND a.act_id NOT IN (' . implode(',', $exclude) . ')';
+
         $sql = $wpdb->prepare(
             "SELECT pm.meta_value AS group_id,
                     COUNT(*) AS posts,
@@ -1573,7 +1592,7 @@ final class PeepSoGroupRepository
                                          AND pm.meta_key = 'peepso_group_id'
               WHERE pm.meta_value     IN ({$placeholders})
                 AND p.post_status     = 'publish'
-                AND p.post_date_gmt   >= %s
+                AND p.post_date_gmt   >= %s{$notExcluded}
               GROUP BY pm.meta_value
               LIMIT 500",
             ...$params
