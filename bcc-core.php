@@ -930,6 +930,18 @@ add_filter('bcc_system_health', function (array $health): array {
         //   Steady state zero. Gates that must refuse on an untrusted read
         //   consume MetaReadHealth — see F-460 / F-461.
         'meta_cache' => ['post_meta_read', 'user_meta_read'],
+        // page_privacy — bcc-trust PageAccess::refuseOverCap() (F-528). A
+        // member's Reviews and Disputes tabs, read by anyone else, leave out
+        // the SECRET pages that viewer may not see, checking each secret page.
+        //   `member_list_over_cap` — the member's list covers more than
+        //                            PageAccess::HIDDEN_LIST_CAP secret pages,
+        //                            so it was refused (503) rather than
+        //                            checked page by page. ⚠ Persistent for
+        //                            that member while they stay over the cap,
+        //                            so any count means real tabs cannot be
+        //                            read; the paired error log names the
+        //                            member. Steady state zero.
+        'page_privacy' => ['member_list_over_cap'],
     ]);
 
     return $health;
