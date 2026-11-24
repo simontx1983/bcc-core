@@ -117,6 +117,7 @@ return array(
     'BCC\\Core\\Support\\FrontendOriginConfig' => $baseDir . '/src/Support/FrontendOriginConfig.php',
     'BCC\\Core\\Support\\HeadlessOrigin' => $baseDir . '/src/Support/HeadlessOrigin.php',
     'BCC\\Core\\Wallet\\ChallengeRepository' => $baseDir . '/src/Wallet/ChallengeRepository.php',
+    'BCC\\Core\\Wallet\\ValidatorMemoChallenge' => $baseDir . '/src/Wallet/ValidatorMemoChallenge.php',
     'BCC\\Core\\Wallet\\WalletIdentityService' => $baseDir . '/src/Wallet/WalletIdentityService.php',
     'BCC\\Core\\Wallet\\WalletVerificationRequest' => $baseDir . '/src/Wallet/WalletVerificationRequest.php',
     'Composer\\InstalledVersions' => $vendorDir . '/composer/InstalledVersions.php',

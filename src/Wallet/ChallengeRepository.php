@@ -18,12 +18,16 @@
 
 namespace BCC\Core\Wallet;
 
+use BCC\Core\Observability\DegradationMetrics;
+
 if (!defined('ABSPATH')) {
     exit;
 }
 
 final class ChallengeRepository
 {
+    use \BCC\Core\Repositories\ProbesReads;
+
     /**
      * Store a challenge payload as a wp_options row using the WordPress
      * transient layout (`_transient_<key>` + `_transient_timeout_<key>`).
@@ -311,4 +315,250 @@ final class ChallengeRepository
         }
     }
 
+    /** transactionState(): an explicit or implicit transaction is open. */
+    public const TX_INSIDE = 'inside';
+
+    /** transactionState(): no transaction is open. */
+    public const TX_OUTSIDE = 'outside';
+
+    /** transactionState(): the probe failed in a way that answers neither. */
+    public const TX_UNKNOWN = 'unknown';
+
+    /**
+     * Take a challenge INSIDE the caller's open transaction: the
+     * use-once step of a write that must either all happen or not at all
+     * (the validator memo claim consumes its challenge in the same
+     * transaction as the claim it pays for, design §5.2).
+     *
+     * SELECT … FOR UPDATE, then DELETE of the value row, which must affect
+     * exactly one row. Nothing is committed or rolled back here: the
+     * caller's transaction decides, so a rollback restores the challenge.
+     *
+     * - Refused (LogicException) unless transactionState() is TX_INSIDE:
+     *   outside a transaction the delete would commit on its own, apart
+     *   from the write it pays for. A probe that cannot tell refuses too.
+     * - Null when there is no such challenge, it is corrupt or it expired,
+     *   or $accept refuses it. NOTHING is deleted then: the row is checked
+     *   under its lock BEFORE the delete, so a caller that commits after a
+     *   null has taken nothing (a challenge that is not the caller's to use
+     *   can never be deleted by trying it).
+     * - RuntimeException when the read or the delete fails; the caller
+     *   rolls back.
+     *
+     * @param string $key Transient key (without the `_transient_` prefix).
+     * @param (callable(array<string, mixed>): bool)|null $accept Decides,
+     *        on the locked row, whether this caller may take it.
+     * @return array<string, mixed>|null
+     */
+    public static function consumeInTransaction(string $key, ?callable $accept = null): ?array
+    {
+        global $wpdb;
+
+        if (self::transactionState() !== self::TX_INSIDE) {
+            throw new \LogicException(
+                'ChallengeRepository::consumeInTransaction must be called inside an open transaction'
+            );
+        }
+
+        $optionName = '_transient_' . $key;
+
+        // Through ProbesReads: a failed read must not pass for "no row",
+        // nor wpdb's pre-flush bail hand back the previous query's row.
+        $rows = self::trustedRows($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options}
+             WHERE option_name = %s
+             FOR UPDATE",
+            $optionName
+        ));
+        if ($rows === null) {
+            throw new \RuntimeException('challenge read failed');
+        }
+        if ($rows === []) {
+            return null;
+        }
+
+        $challenge = maybe_unserialize((string) ($rows[0]->option_value ?? ''));
+        if (!is_array($challenge) || time() > (int) ($challenge['expires_at'] ?? 0)) {
+            return null;
+        }
+        /** @var array<string, mixed> $challenge */
+        if ($accept !== null && $accept($challenge) !== true) {
+            return null;
+        }
+
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s",
+            $optionName
+        ));
+        if ($deleted !== 1) {
+            throw new \RuntimeException('challenge delete did not remove exactly one row');
+        }
+        // The timeout row only feeds WordPress's transient GC; same transaction.
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s",
+            '_transient_timeout_' . $key
+        ));
+
+        return $challenge;
+    }
+
+    /**
+     * Change a live challenge in its own transaction (SELECT … FOR UPDATE,
+     * then UPDATE): a compare-and-set, so concurrent callers see each
+     * other's writes. $change receives the payload and returns the new one,
+     * or null to leave it as it is (a refusal).
+     *
+     * Refused (LogicException) unless transactionState() is TX_OUTSIDE:
+     * START TRANSACTION inside an open transaction would commit the
+     * caller's work implicitly. Null when the challenge is missing,
+     * corrupt or expired, when $change refuses, or when the transaction
+     * cannot be had or the write fails (rolled back).
+     *
+     * @param string $key Transient key (without the `_transient_` prefix).
+     * @param callable(array<string, mixed>): (array<string, mixed>|null) $change
+     * @return array<string, mixed>|null the stored payload
+     */
+    public static function update(string $key, callable $change): ?array
+    {
+        global $wpdb;
+
+        if (self::transactionState() !== self::TX_OUTSIDE) {
+            throw new \LogicException(
+                'ChallengeRepository::update must be called outside any open transaction'
+            );
+        }
+        if ($wpdb->query('START TRANSACTION') === false) {
+            return null;
+        }
+
+        $optionName = '_transient_' . $key;
+        $result     = null;
+        try {
+            $rows    = self::trustedRows($wpdb->prepare(
+                "SELECT option_value FROM {$wpdb->options}
+                 WHERE option_name = %s
+                 FOR UPDATE",
+                $optionName
+            ));
+            $current = isset($rows[0]) ? maybe_unserialize((string) ($rows[0]->option_value ?? '')) : null;
+            if (is_array($current) && time() <= (int) ($current['expires_at'] ?? 0)) {
+                /** @var array<string, mixed> $current */
+                $next = $change($current);
+                if ($next !== null) {
+                    $written = $wpdb->query($wpdb->prepare(
+                        "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s",
+                        maybe_serialize($next),
+                        $optionName
+                    ));
+                    $result = $written === false ? null : $next;
+                }
+            }
+        } finally {
+            $wpdb->query($result === null ? 'ROLLBACK' : 'COMMIT');
+        }
+        if ($result !== null && function_exists('wp_cache_delete')) {
+            wp_cache_delete($key, 'transient');
+            wp_cache_delete($optionName, 'options');
+        }
+        return $result;
+    }
+
+    /**
+     * Is a transaction open on this connection? A probe that works the same
+     * on MySQL 8 and MariaDB: SAVEPOINT, then RELEASE SAVEPOINT. Inside a
+     * transaction (START TRANSACTION, BEGIN, or autocommit off) the release
+     * succeeds. Outside one the savepoint ends with its implicit
+     * transaction, so the release fails with error 1305 "SAVEPOINT … does
+     * not exist".
+     *
+     * ⚠ Any OTHER failure is TX_UNKNOWN, never TX_OUTSIDE, and every caller
+     * refuses on it.
+     * ⚠ The savepoint name is unique per call: a savepoint with a caller's
+     * name (bcc-trust's TransactionManager uses sp_<depth>_<rand>) would
+     * silently replace theirs.
+     *
+     * (INFORMATION_SCHEMA.INNODB_TRX cannot answer this on MySQL 8: the view
+     * is served from a cache refreshed at most every ~100 ms, and a
+     * transaction is not listed until it first touches InnoDB.)
+     *
+     * Errors are suppressed for the probe and `last_error` is cleared after
+     * it, so an expected 1305 is neither logged nor mistaken later for a
+     * failure of the next query.
+     *
+     * ⚠ "Outside" is recognised by the error NUMBER (1305,
+     * ER_SP_DOES_NOT_EXIST), read from the connection, never by the message
+     * alone. A server set to another language (lc_messages) words the
+     * message differently, and a message-only match would answer TX_UNKNOWN
+     * on every call, so every consume would refuse. The English message is
+     * matched only when the error number cannot be read (no mysqli link).
+     * Every TX_UNKNOWN records `wallet_challenge/tx_probe_unknown`.
+     */
+    public static function transactionState(): string
+    {
+        global $wpdb;
+
+        $name       = 'bcc_txprobe_' . bin2hex(random_bytes(8));
+        $suppressed = $wpdb->suppress_errors(true);
+        try {
+            self::clearLastError();
+            $state = self::probe($name);
+        } finally {
+            self::clearLastError();
+            $wpdb->suppress_errors($suppressed);
+        }
+        if ($state === self::TX_UNKNOWN) {
+            DegradationMetrics::record('wallet_challenge', 'tx_probe_unknown');
+        }
+        return $state;
+    }
+
+    /** MySQL / MariaDB ER_SP_DOES_NOT_EXIST: "SAVEPOINT … does not exist". */
+    private const ER_SP_DOES_NOT_EXIST = 1305;
+
+    /** One SAVEPOINT / RELEASE round on the connection (see transactionState()). */
+    private static function probe(string $name): string
+    {
+        global $wpdb;
+
+        if ($wpdb->query('SAVEPOINT ' . $name) === false) {
+            return self::TX_UNKNOWN;
+        }
+        if ($wpdb->query('RELEASE SAVEPOINT ' . $name) !== false) {
+            return self::TX_INSIDE;
+        }
+        $errno = self::lastErrorNumber();
+        if ($errno === self::ER_SP_DOES_NOT_EXIST) {
+            return self::TX_OUTSIDE;
+        }
+        if ($errno === 0 && self::lastErrorMessage() === 'SAVEPOINT ' . $name . ' does not exist') {
+            return self::TX_OUTSIDE; // no error number to read: the English message, as a fallback
+        }
+        return self::TX_UNKNOWN;
+    }
+
+    /**
+     * The connection's last error number (wpdb's mysqli link), or 0 when it
+     * cannot be read: no link, or a link that has gone away.
+     */
+    private static function lastErrorNumber(): int
+    {
+        global $wpdb;
+
+        $dbh = isset($wpdb->dbh) ? $wpdb->dbh : null;
+        if (!$dbh instanceof \mysqli) {
+            return 0;
+        }
+        try {
+            return (int) mysqli_errno($dbh);
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
+    /** The driver's last error message (a helper, for the reason ProbesReads::clearLastError() gives). */
+    private static function lastErrorMessage(): string
+    {
+        global $wpdb;
+        return (string) $wpdb->last_error;
+    }
 }
