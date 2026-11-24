@@ -240,7 +240,19 @@ final class ValidatorMemoChallenge
             }
 
             if ($own !== null) {
-                self::endWindow($own, $now);
+                // Closed under its lock, or not replaced. A hash reserved
+                // since the look above keeps it (in_verification); a write
+                // that did not land refuses (busy). Only a challenge already
+                // gone leaves nothing to replace.
+                if (!self::endWindow($own, $now)) {
+                    $still = ChallengeRepository::peek(self::KEY_PREFIX . $own);
+                    if ($still !== null && (string) ($still['reserved_hash'] ?? '') !== '') {
+                        return self::refused(self::REFUSED_IN_VERIFICATION, $own);
+                    }
+                    if ($still !== null) {
+                        return self::refused(self::REFUSED_BUSY);
+                    }
+                }
                 $member[$own]['window_ends_at'] = $now - 1;
                 $member[$own]['expires_at']     = $now - 1;
                 unset($onValoper[$own]);
@@ -391,8 +403,10 @@ final class ValidatorMemoChallenge
      * current handle, was neither withdrawn nor replaced, and carries
      * exactly $txHash as its reserved hash.
      *
-     * ⚠ On null the caller MUST roll back: the row may already be deleted
-     * inside the caller's transaction, and the rollback restores it.
+     * Those checks run on the LOCKED row before it is deleted, so a null
+     * has deleted nothing: trying another member's challenge, or with the
+     * wrong hash, leaves it intact even if the caller then commits. (The
+     * claim itself still rolls back on null, as any refusal does.)
      *
      * @return array<string, mixed>|null
      */
@@ -402,14 +416,11 @@ final class ValidatorMemoChallenge
         if (!self::isId($id) || $userId <= 0 || $hash === null) {
             return null;
         }
-        $challenge = ChallengeRepository::consumeInTransaction(self::KEY_PREFIX . $id);
-        if ($challenge === null
-            || !self::usableBy($challenge, $userId, $currentHandle)
-            || !hash_equals((string) ($challenge['reserved_hash'] ?? ''), $hash)
-        ) {
-            return null;
-        }
-        return $challenge;
+        return ChallengeRepository::consumeInTransaction(
+            self::KEY_PREFIX . $id,
+            static fn (array $challenge): bool => self::usableBy($challenge, $userId, $currentHandle)
+                && hash_equals((string) ($challenge['reserved_hash'] ?? ''), $hash)
+        );
     }
 
     // ── internals ───────────────────────────────────────────────────────
@@ -424,13 +435,21 @@ final class ValidatorMemoChallenge
             && (int) ($challenge['withdrawn_at'] ?? 0) === 0;
     }
 
-    /** Close a replaced challenge: it can no longer be reserved or consumed. */
-    private static function endWindow(string $id, int $now): void
+    /**
+     * Close a replaced challenge: it can no longer be reserved or consumed.
+     * The reserved-hash check is made AGAIN here, under the row's lock, so a
+     * reserve() that landed after issue() looked is never withdrawn: its
+     * hash is verifying. True only when this call closed it.
+     */
+    private static function endWindow(string $id, int $now): bool
     {
-        ChallengeRepository::update(self::KEY_PREFIX . $id, static function (array $challenge) use ($now): array {
+        return ChallengeRepository::update(self::KEY_PREFIX . $id, static function (array $challenge) use ($now): ?array {
+            if ((string) ($challenge['reserved_hash'] ?? '') !== '') {
+                return null;
+            }
             $challenge['withdrawn_at'] = $now;
             return $challenge;
-        });
+        }) !== null;
     }
 
     /**

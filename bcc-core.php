@@ -1022,6 +1022,16 @@ add_filter('bcc_system_health', function (array $health): array {
         //                        (the denial-of-service backstop).
         //   Steady state zero for both.
         'validator_memo_claim' => ['crowded_valoper', 'valoper_backstop'],
+        // wallet_challenge — Wallet\ChallengeRepository::transactionState(),
+        // the SAVEPOINT / RELEASE probe consume() and consumeInTransaction()
+        // ask before they run.
+        //   `tx_probe_unknown` — the probe could not tell whether a
+        //                        transaction is open (any error other than
+        //                        1305 "SAVEPOINT … does not exist"), so the
+        //                        consume was REFUSED. Steady state zero; a
+        //                        sustained count means wallet sign-in and
+        //                        linking are failing (a P1).
+        'wallet_challenge' => ['tx_probe_unknown'],
         // auth_token — bcc-trust's token revocation writes (JwtToken).
         //   `revoke_write_failed` — a revocation write did not land: the
         //                           revoke-all version bump (a password or

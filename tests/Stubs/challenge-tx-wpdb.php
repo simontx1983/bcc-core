@@ -59,6 +59,15 @@ namespace BCC\Core\Wallet {
             return isset($GLOBALS['__bcc_clock']) ? (int) $GLOBALS['__bcc_clock'] : \time();
         }
     }
+
+    // The connection's error number, for a double whose `dbh` is a mysqli
+    // object (see BccTxOptionsWpdb::$dbh): what the driver would report.
+    if (!function_exists(__NAMESPACE__ . '\mysqli_errno')) {
+        function mysqli_errno(\mysqli $link): int
+        {
+            return (int) ($GLOBALS['__bcc_errno'] ?? 0);
+        }
+    }
 }
 
 namespace BCC\Core\Log {
@@ -112,6 +121,28 @@ namespace {
 
         /** @var array<string, true> */
         public array $faults = [];
+
+        /**
+         * wpdb's mysqli link. Null = none (the probe falls back to the
+         * English message); a mysqli object = its error number is read
+         * through the Wallet namespace's mysqli_errno() double
+         * ($GLOBALS['__bcc_errno']).
+         *
+         * @var \mysqli|null
+         */
+        public $dbh = null;
+
+        /** RELEASE outside a transaction answers in another language (lc_messages). */
+        public bool $localisedMessages = false;
+
+        /**
+         * Runs just before a SELECT … FOR UPDATE reads its row, with the
+         * option name: how a test lands a concurrent write between a caller's
+         * unlocked look and its locked read.
+         *
+         * @var (\Closure(string): void)|null
+         */
+        public ?\Closure $beforeLockedRead = null;
         /** @var list<string> every statement, decoded */
         public array $log = [];
 
@@ -119,6 +150,18 @@ namespace {
         public function prepare(string $sql, ...$args): string
         {
             return 'PREP:' . json_encode([$sql, $args]);
+        }
+
+        /**
+         * A write COMMITTED by another connection: visible now, and not undone
+         * by this connection's ROLLBACK.
+         */
+        public function concurrentWrite(string $name, string $value): void
+        {
+            $this->rows[$name] = $value;
+            if ($this->inTransaction) {
+                $this->snapshot[$name] = $value;
+            }
         }
 
         public function suppress_errors(bool $suppress = true): bool
@@ -207,7 +250,9 @@ namespace {
                     $this->last_error = '';
                     return 0;
                 }
-                $this->last_error = 'SAVEPOINT ' . $name . ' does not exist';
+                $this->last_error = $this->localisedMessages
+                    ? 'SAVEPOINT ' . $name . ' existiert nicht'
+                    : 'SAVEPOINT ' . $name . ' does not exist';
                 return false;
             }
             if (str_starts_with($flat, 'SELECT option_value') && str_contains($flat, 'FOR UPDATE')) {
@@ -221,6 +266,9 @@ namespace {
                 }
                 $this->last_error  = '';
                 $name              = (string) $args[0];
+                if ($this->beforeLockedRead !== null) {
+                    ($this->beforeLockedRead)($name);
+                }
                 $this->last_result = isset($this->rows[$name]) ? [(object) ['option_value' => $this->rows[$name]]] : [];
                 return count($this->last_result);
             }

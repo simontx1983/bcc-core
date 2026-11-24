@@ -18,6 +18,8 @@
 
 namespace BCC\Core\Wallet;
 
+use BCC\Core\Observability\DegradationMetrics;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -320,15 +322,20 @@ final class ChallengeRepository
      * - Refused (LogicException) unless transactionState() is TX_INSIDE:
      *   outside a transaction the delete would commit on its own, apart
      *   from the write it pays for. A probe that cannot tell refuses too.
-     * - Null when there is no such challenge, it is corrupt or it expired
-     *   (nothing is deleted).
+     * - Null when there is no such challenge, it is corrupt or it expired,
+     *   or $accept refuses it. NOTHING is deleted then: the row is checked
+     *   under its lock BEFORE the delete, so a caller that commits after a
+     *   null has taken nothing (a challenge that is not the caller's to use
+     *   can never be deleted by trying it).
      * - RuntimeException when the read or the delete fails; the caller
      *   rolls back.
      *
      * @param string $key Transient key (without the `_transient_` prefix).
+     * @param (callable(array<string, mixed>): bool)|null $accept Decides,
+     *        on the locked row, whether this caller may take it.
      * @return array<string, mixed>|null
      */
-    public static function consumeInTransaction(string $key): ?array
+    public static function consumeInTransaction(string $key, ?callable $accept = null): ?array
     {
         global $wpdb;
 
@@ -359,6 +366,10 @@ final class ChallengeRepository
         if (!is_array($challenge) || time() > (int) ($challenge['expires_at'] ?? 0)) {
             return null;
         }
+        /** @var array<string, mixed> $challenge */
+        if ($accept !== null && $accept($challenge) !== true) {
+            return null;
+        }
 
         $deleted = $wpdb->query($wpdb->prepare(
             "DELETE FROM {$wpdb->options} WHERE option_name = %s",
@@ -373,7 +384,6 @@ final class ChallengeRepository
             '_transient_timeout_' . $key
         ));
 
-        /** @var array<string, mixed> $challenge */
         return $challenge;
     }
 
@@ -459,6 +469,14 @@ final class ChallengeRepository
      * Errors are suppressed for the probe and `last_error` is cleared after
      * it, so an expected 1305 is neither logged nor mistaken later for a
      * failure of the next query.
+     *
+     * ⚠ "Outside" is recognised by the error NUMBER (1305,
+     * ER_SP_DOES_NOT_EXIST), read from the connection, never by the message
+     * alone. A server set to another language (lc_messages) words the
+     * message differently, and a message-only match would answer TX_UNKNOWN
+     * on every call, so every consume would refuse. The English message is
+     * matched only when the error number cannot be read (no mysqli link).
+     * Every TX_UNKNOWN records `wallet_challenge/tx_probe_unknown`.
      */
     public static function transactionState(): string
     {
@@ -468,18 +486,57 @@ final class ChallengeRepository
         $suppressed = $wpdb->suppress_errors(true);
         try {
             self::clearLastError();
-            if ($wpdb->query('SAVEPOINT ' . $name) === false) {
-                return self::TX_UNKNOWN;
-            }
-            if ($wpdb->query('RELEASE SAVEPOINT ' . $name) !== false) {
-                return self::TX_INSIDE;
-            }
-            return self::lastErrorMessage() === 'SAVEPOINT ' . $name . ' does not exist'
-                ? self::TX_OUTSIDE
-                : self::TX_UNKNOWN;
+            $state = self::probe($name);
         } finally {
             self::clearLastError();
             $wpdb->suppress_errors($suppressed);
+        }
+        if ($state === self::TX_UNKNOWN) {
+            DegradationMetrics::record('wallet_challenge', 'tx_probe_unknown');
+        }
+        return $state;
+    }
+
+    /** MySQL / MariaDB ER_SP_DOES_NOT_EXIST: "SAVEPOINT … does not exist". */
+    private const ER_SP_DOES_NOT_EXIST = 1305;
+
+    /** One SAVEPOINT / RELEASE round on the connection (see transactionState()). */
+    private static function probe(string $name): string
+    {
+        global $wpdb;
+
+        if ($wpdb->query('SAVEPOINT ' . $name) === false) {
+            return self::TX_UNKNOWN;
+        }
+        if ($wpdb->query('RELEASE SAVEPOINT ' . $name) !== false) {
+            return self::TX_INSIDE;
+        }
+        $errno = self::lastErrorNumber();
+        if ($errno === self::ER_SP_DOES_NOT_EXIST) {
+            return self::TX_OUTSIDE;
+        }
+        if ($errno === 0 && self::lastErrorMessage() === 'SAVEPOINT ' . $name . ' does not exist') {
+            return self::TX_OUTSIDE; // no error number to read: the English message, as a fallback
+        }
+        return self::TX_UNKNOWN;
+    }
+
+    /**
+     * The connection's last error number (wpdb's mysqli link), or 0 when it
+     * cannot be read: no link, or a link that has gone away.
+     */
+    private static function lastErrorNumber(): int
+    {
+        global $wpdb;
+
+        $dbh = isset($wpdb->dbh) ? $wpdb->dbh : null;
+        if (!$dbh instanceof \mysqli) {
+            return 0;
+        }
+        try {
+            return (int) mysqli_errno($dbh);
+        } catch (\Throwable $e) {
+            return 0;
         }
     }
 
