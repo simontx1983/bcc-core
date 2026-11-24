@@ -193,45 +193,30 @@ final class ChallengeRepository
         $optionName = '_transient_' . $key;
         $timeoutKey = '_transient_timeout_' . $key;
 
-        // Detect outer transaction state. The earlier `SELECT @@in_transaction`
-        // probe is not portable: MySQL 8.0 / MariaDB 10.4–10.6 do not expose
-        // it as a system variable (the query fails with "Unknown system
-        // variable 'in_transaction'") and `IN_TRANSACTION()` is not a
-        // built-in either. The result was a 100% wallet-login crash on
-        // every supported MySQL we ship against.
+        // Contract: consume() owns its transaction. Inside a caller's, its
+        // DELETE would roll back with the caller's work (the nonce made
+        // replayable), and START TRANSACTION below would commit the caller's
+        // work implicitly. transactionState() asks the connection with a
+        // SAVEPOINT / RELEASE probe that answers the same on MySQL 8 and
+        // MariaDB.
         //
-        // Replacement: query INFORMATION_SCHEMA.INNODB_TRX scoped to our
-        // own thread. INNODB_TRX is a standard view present in MySQL 5.7+
-        // and MariaDB 10.x and lists every InnoDB transaction the engine
-        // is currently tracking, keyed by the OS-level connection id from
-        // CONNECTION_ID(). A row exists iff this session has an open
-        // explicit (or DML-implicit-non-autocommit) transaction. The
-        // CONNECTION_ID() null-fallback (driver in a degraded state →
-        // proceed without the protection) is implicit here: SQL equality
-        // against NULL is never true, so a degraded driver yields zero
-        // rows and we proceed, exactly as the old two-query probe did —
-        // failing closed would recreate the 100% outage we fixed, and the
-        // caller contract (consume() runs at the top of the wallet-login
-        // REST handler, no outer transaction by design) makes the
-        // protection belt-and-braces rather than load-bearing. One
-        // round-trip instead of two on the hot wallet-login path; no
-        // prepare() — the query contains zero user input.
-        $found = $wpdb->get_var(
-            'SELECT 1 FROM information_schema.INNODB_TRX
-              WHERE trx_mysql_thread_id = CONNECTION_ID()
-              LIMIT 1'
-        );
-        $inTransaction = $found !== null;
-
-        // Enforce contract: consume() must not run inside a caller's
-        // transaction. If the caller's outer transaction later rolls back,
-        // our SAVEPOINT-based DELETE is rolled back with it — making the
-        // nonce replayable. Require atomic consume to own the whole tx.
-        if ($inTransaction) {
+        // ⚠ It replaces an INFORMATION_SCHEMA.INNODB_TRX lookup that missed
+        // open transactions on MySQL 8: the view is cached for ~100 ms, and
+        // a transaction is not listed until it first touches InnoDB, so a
+        // consume() right after START TRANSACTION was not caught. (The
+        // `SELECT @@in_transaction` tried before that does not exist on
+        // MySQL 8 and crashed every wallet login.)
+        $state = self::transactionState();
+        if ($state === self::TX_INSIDE) {
             throw new \LogicException(
                 'ChallengeRepository::consume must be called outside any open transaction ' .
                 '(nonce-replay hazard under outer-transaction rollback)'
             );
+        }
+        if ($state !== self::TX_OUTSIDE) {
+            // The probe could not tell. Refuse rather than guess: the
+            // challenge is reported unavailable and is left where it is.
+            return null;
         }
 
         if ($wpdb->query('START TRANSACTION') === false) {

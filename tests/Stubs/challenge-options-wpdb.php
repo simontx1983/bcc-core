@@ -52,6 +52,22 @@ namespace {
             /** @var array<string, string> option_name => option_value */
             public array $rows = [];
 
+            public string $last_error = '';
+            public bool $suppress = false;
+            /** An open transaction, as consume()'s SAVEPOINT / RELEASE probe sees it. */
+            public bool $inTransaction = false;
+            /** RELEASE SAVEPOINT fails with an error other than 1305 (the probe cannot tell). */
+            public bool $probeFails = false;
+            /** @var array<string, true> */
+            private array $savepoints = [];
+
+            public function suppress_errors(bool $suppress = true): bool
+            {
+                $was            = $this->suppress;
+                $this->suppress = $suppress;
+                return $was;
+            }
+
             /** @param mixed ...$args */
             public function prepare(string $sql, ...$args): string
             {
@@ -112,8 +128,36 @@ namespace {
             public function query(string $q)
             {
                 [$sql, $args] = self::decode($q);
-                if (in_array(trim($sql), ['START TRANSACTION', 'COMMIT', 'ROLLBACK'], true)) {
+                if (trim($sql) === 'START TRANSACTION') {
+                    $this->inTransaction = true;
                     return true;
+                }
+                if (in_array(trim($sql), ['COMMIT', 'ROLLBACK'], true)) {
+                    $this->inTransaction = false;
+                    $this->savepoints    = [];
+                    return true;
+                }
+                // As MySQL 8 and MariaDB answer the probe: outside a
+                // transaction the savepoint is not kept, so RELEASE fails
+                // with error 1305.
+                if (str_starts_with(trim($sql), 'SAVEPOINT ')) {
+                    if ($this->inTransaction) {
+                        $this->savepoints[substr(trim($sql), 10)] = true;
+                    }
+                    return 0;
+                }
+                if (str_starts_with(trim($sql), 'RELEASE SAVEPOINT ')) {
+                    $name = substr(trim($sql), 18);
+                    if ($this->probeFails) {
+                        $this->last_error = 'Lost connection to MySQL server during query';
+                        return false;
+                    }
+                    if (isset($this->savepoints[$name])) {
+                        unset($this->savepoints[$name]);
+                        return 0;
+                    }
+                    $this->last_error = 'SAVEPOINT ' . $name . ' does not exist';
+                    return false;
                 }
                 if (str_starts_with(trim($sql), 'INSERT INTO')) {
                     $this->rows[(string) $args[0]] = (string) $args[1];

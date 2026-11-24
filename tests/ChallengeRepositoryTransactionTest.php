@@ -84,6 +84,52 @@ final class ChallengeRepositoryTransactionTest extends TestCase
         self::assertFalse($this->db->suppress, 'error suppression is restored');
     }
 
+    // ── consume(): owns its transaction ─────────────────────────────────
+
+    public function testConsumeTakesTheChallengeInItsOwnTransaction(): void
+    {
+        $this->seed('k');
+
+        self::assertSame('n-k', ChallengeRepository::consume('k')['nonce'] ?? null);
+        self::assertArrayNotHasKey('_transient_k', $this->db->rows);
+        self::assertContains('START TRANSACTION', $this->db->log);
+        self::assertContains('COMMIT', $this->db->log);
+        self::assertFalse($this->db->inTransaction);
+    }
+
+    /**
+     * The MySQL 8 regression: right after START TRANSACTION, before any
+     * statement, INFORMATION_SCHEMA.INNODB_TRX lists nothing, so the old
+     * guard let consume() run inside the caller's transaction (where its
+     * START TRANSACTION commits the caller's work). The probe sees it.
+     */
+    public function testConsumeIsRefusedInsideATransactionEvenBeforeItsFirstStatement(): void
+    {
+        $this->seed('k');
+        $this->db->query('START TRANSACTION');
+        $logFrom = count($this->db->log);
+
+        try {
+            ChallengeRepository::consume('k');
+            self::fail('consumed inside the caller\'s transaction');
+        } catch (\LogicException $e) {
+            self::assertArrayHasKey('_transient_k', $this->db->rows, 'nothing taken');
+            self::assertTrue($this->db->inTransaction, 'the caller\'s transaction is untouched');
+            self::assertNotContains('START TRANSACTION', array_slice($this->db->log, $logFrom));
+        }
+    }
+
+    /** A probe that cannot tell refuses: no transaction is opened and the challenge stays. */
+    public function testConsumeRefusesWhenTheProbeCannotTell(): void
+    {
+        $this->seed('k');
+        $this->db->faults = ['release_other_error' => true];
+
+        self::assertNull(ChallengeRepository::consume('k'));
+        self::assertArrayHasKey('_transient_k', $this->db->rows);
+        self::assertNotContains('START TRANSACTION', $this->db->log);
+    }
+
     // ── the probe reads the error NUMBER (security L2) ──────────────────
 
     private function withConnection(int $errno): void
@@ -135,6 +181,16 @@ final class ChallengeRepositoryTransactionTest extends TestCase
         $this->db->faults = ['savepoint_fails' => true];
         ChallengeRepository::transactionState();
         self::assertSame(2, $count());
+    }
+
+    /** Security L2's outage case: a server answering in German still lets consume() take a challenge. */
+    public function testConsumeWorksOnAServerWithLocalisedMessages(): void
+    {
+        $this->db->localisedMessages = true;
+        $this->withConnection(1305);
+        $this->seed('k');
+
+        self::assertSame('n-k', ChallengeRepository::consume('k')['nonce'] ?? null);
     }
 
     // ── consumeInTransaction() ──────────────────────────────────────────
