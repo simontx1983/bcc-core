@@ -33,6 +33,10 @@
  * front. Any write to a member's meta drops that member's memo. Pass
  * `$fresh = true` to neither read nor write the memo: a compare-and-swap
  * retry loop, or a value that must never be memoised.
+ *
+ * Also the shared member-name filter, {@see publicNameMatchSql()} with
+ * {@see nameQueryLike()}: the SQL that finds a member by what other people
+ * are shown for them.
  * ⚠ Cron and other long-running consumers, and every compare-and-swap,
  * pass `$fresh = true`: the memo cannot see writes made by other
  * processes.
@@ -74,6 +78,16 @@ final class UserMetaRepository
     /** The memo is dropped wholesale past this many users (long cron runs). */
     private const MEMO_MAX = 5000;
 
+    /** Longest member-name query, in characters; the rest is ignored. */
+    public const NAME_QUERY_MAX = 100;
+
+    /**
+     * bcc-trust's @handle and "hide my real name" keys. Spelled out because
+     * bcc-core cannot depend on bcc-trust, as ActivityFeedService does.
+     */
+    private const HANDLE_META           = 'bcc_handle';
+    private const REAL_NAME_HIDDEN_META = 'bcc_privacy_real_name_hidden';
+
     /**
      * user => key => values, trusted reads only. A key read with no row
      * holds [], so a repeat costs nothing.
@@ -83,6 +97,83 @@ final class UserMetaRepository
     private static array $memo = [];
 
     private static bool $listening = false;
+
+    /**
+     * The LIKE argument for a name query, normalised the one way every
+     * name search here normalises it: trimmed, one leading '@' dropped (so
+     * "@alice" finds the handle "alice"), cut to NAME_QUERY_MAX characters,
+     * and LIKE's wildcards escaped so they match themselves.
+     *
+     * NULL for an empty query: no filter. FALSE for a query that is not
+     * valid UTF-8: it matches nothing. Bind the string to every `%s` of
+     * {@see publicNameMatchSql()}, and to a page's title or slug where a
+     * list shows those beside members.
+     */
+    public static function nameQueryLike(string $nameQuery): string|false|null
+    {
+        $query = trim($nameQuery);
+        if (str_starts_with($query, '@')) {
+            $query = trim(substr($query, 1));
+        }
+        if ($query === '') {
+            return null;
+        }
+        if (preg_match('/^.{0,' . self::NAME_QUERY_MAX . '}/su', $query, $m) !== 1) {
+            return false;
+        }
+
+        global $wpdb;
+
+        return '%' . $wpdb->esc_like($m[0]) . '%';
+    }
+
+    /**
+     * The ONE member-name filter for lists that show members (F-512): a
+     * condition, `EXISTS (…)`, that is TRUE when the member in
+     * `$userIdColumn` matches. It has two `%s` placeholders; bind
+     * {@see nameQueryLike()} to both, in the caller's own prepare().
+     *
+     * It matches what other people are SHOWN for the member, and nothing
+     * else:
+     *   - the @handle: the first `bcc_handle` row, trimmed, or 'member-{id}'
+     *     when there is none (bcc-trust's PublicIdentity::handle());
+     *   - the display name, only where others see it: not empty, not the
+     *     login (in any case), not shaped like a signup login (`u_` and 3 to
+     *     20 of a-z, 0-9 or `-`, in any case, surrounding whitespace
+     *     ignored), and no "hide my real name" row that is not plainly off.
+     *     Those are the names the card replaces with the handle
+     *     (bcc-trust's PublicIdentity::displayName()). Any value but '', 0,
+     *     false, off or no counts as hidden. That is stricter than the flag
+     *     read in PHP, so the filter can miss a name that is shown but never
+     *     match one that is hidden.
+     * Never the login, the email, or a hidden real name.
+     *
+     * The fragment contains no `%` apart from its two placeholders.
+     *
+     * @param string $userIdColumn a column reference such as `u.ID`, never input
+     * @throws \InvalidArgumentException when `$userIdColumn` is not a column reference
+     */
+    public static function publicNameMatchSql(string $userIdColumn): string
+    {
+        if (preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/', $userIdColumn) !== 1) {
+            throw new \InvalidArgumentException('publicNameMatchSql() takes a column reference such as u.ID.');
+        }
+
+        global $wpdb;
+
+        return "EXISTS (SELECT 1 FROM {$wpdb->users} AS bcc_nm_u"
+            . " WHERE bcc_nm_u.ID = {$userIdColumn}"
+            . " AND (COALESCE(NULLIF(TRIM((SELECT bcc_nm_h.meta_value FROM {$wpdb->usermeta} AS bcc_nm_h"
+            . " WHERE bcc_nm_h.user_id = bcc_nm_u.ID AND bcc_nm_h.meta_key = '" . self::HANDLE_META . "'"
+            . " ORDER BY bcc_nm_h.umeta_id ASC LIMIT 1)), ''), CONCAT('member-', bcc_nm_u.ID)) LIKE %s"
+            . " OR (bcc_nm_u.display_name LIKE %s"
+            . " AND TRIM(bcc_nm_u.display_name) <> ''"
+            . " AND LOWER(TRIM(bcc_nm_u.display_name)) <> LOWER(TRIM(bcc_nm_u.user_login))"
+            . " AND LOWER(bcc_nm_u.display_name) NOT REGEXP '^[[:space:]]*u_[a-z0-9-]{3,20}[[:space:]]*$'"
+            . " AND NOT EXISTS (SELECT 1 FROM {$wpdb->usermeta} AS bcc_nm_r"
+            . " WHERE bcc_nm_r.user_id = bcc_nm_u.ID AND bcc_nm_r.meta_key = '" . self::REAL_NAME_HIDDEN_META . "'"
+            . " AND LOWER(TRIM(bcc_nm_r.meta_value)) NOT IN ('', '0', 'false', 'off', 'no')))))";
+    }
 
     /**
      * Every stored value per (user, key), lowest umeta_id first, or null
