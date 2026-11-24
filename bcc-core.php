@@ -250,6 +250,22 @@ $bccBustNonOpenGroupCache = static function ($_metaIdOrIds, $_objectId, $metaKey
         \BCC\Core\Repositories\PeepSoHashtagRepository::bustPublicTrendingCache();
     }
 };
+// ── F-542: the orphaned-post repair retry ───────────────────────────
+//
+// ⚠ Bound unconditionally, not behind a PeepSo check. The repair exists for
+// the case where things are already failing, and a hook that is only
+// registered when the world looks healthy is not there when it is needed.
+// OrphanedPostRepair::retry() re-checks before it does anything.
+//
+// ⚠ Args bind BY INDEX (both Action Scheduler and wp_schedule_single_event),
+// so the callback takes ($postId, $attempt) positionally and defaults both.
+add_action(
+    \BCC\Core\PeepSo\OrphanedPostRepair::RETRY_HOOK,
+    [\BCC\Core\PeepSo\OrphanedPostRepair::class, 'retry'],
+    10,
+    2
+);
+
 add_action('added_post_meta',   $bccBustNonOpenGroupCache, 10, 3);
 add_action('updated_post_meta', $bccBustNonOpenGroupCache, 10, 3);
 add_action('deleted_post_meta', $bccBustNonOpenGroupCache, 10, 3);
@@ -511,6 +527,13 @@ add_filter('bcc_system_health', function (array $health): array {
             'message_repo_root_conversation_id',
             'message_repo_participants',
             'message_repo_mark_viewed',
+            // F-542 — the guard's destroy could not be confirmed, so a
+            // best-effort trash ran and a bounded retry was queued.
+            'orphan_repair_unconfirmed',
+            // F-542 — that bounded retry gave up with the post still
+            // unconfirmed. Sustained activation means orphaned group posts
+            // are accumulating: treat as an incident, not noise.
+            'orphan_repair_abandoned',
         ],
         // bcc-search subsystems
         'search_lkg'           => ['served', 'unavailable_503'],

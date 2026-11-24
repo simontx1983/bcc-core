@@ -84,6 +84,7 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\NullServices\\NullWalletSignalWrite' => __DIR__ . '/../..' . '/src/NullServices/NullWalletSignalWrite.php',
         'BCC\\Core\\Observability\\DegradationAlerter' => __DIR__ . '/../..' . '/src/Observability/DegradationAlerter.php',
         'BCC\\Core\\Observability\\DegradationMetrics' => __DIR__ . '/../..' . '/src/Observability/DegradationMetrics.php',
+        'BCC\\Core\\PeepSo\\OrphanedPostRepair' => __DIR__ . '/../..' . '/src/PeepSo/OrphanedPostRepair.php',
         'BCC\\Core\\PeepSo\\PeepSo' => __DIR__ . '/../..' . '/src/PeepSo/PeepSo.php',
         'BCC\\Core\\PeepSo\\PeepSoAddPostGuard' => __DIR__ . '/../..' . '/src/PeepSo/PeepSoAddPostGuard.php',
         'BCC\\Core\\PeepSo\\PeepSoBlockWriter' => __DIR__ . '/../..' . '/src/PeepSo/PeepSoBlockWriter.php',
