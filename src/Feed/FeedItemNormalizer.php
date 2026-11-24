@@ -297,6 +297,30 @@ final class FeedItemNormalizer
             // for stable client-side react keys; the frontend treats it
             // as opaque.
             'external_id' => (int) $row->act_external_id,
+            // F-346 — the act id of the post this one reposts, or 0 when
+            // this is not a repost.
+            //
+            // ⭐ TAKEN STRAIGHT OFF THE ROW, and that is the point.
+            // `PeepSoActivityRepository::COLUMNS` already ends in
+            // `a.act_repost_id`, so every activity row the feed reads is
+            // already carrying this. Resolving it per item through
+            // `PeepSoActivityRepository::resolveRepostRoot()` would cost one
+            // `getById()` row read EACH — an N+1 on every feed page — to
+            // learn something the row in hand already says.
+            //
+            // ⚠⚠ DELIBERATELY NOT THE SAME SEMANTICS AS
+            // `resolveRepostRoot()`, which answers the act's OWN id when the
+            // act is not a repost. Here 0 means "not a repost", because the
+            // consumer's question is "is there a root to show?" and an id
+            // that is its own root would answer that wrongly. Do not
+            // "align" the two: they answer different questions.
+            //
+            // ⛔ THIS IS RAW PLUMBING, NOT A READABILITY VERDICT. Whether
+            // the viewer may see that root is decided per viewer, far later,
+            // in `FeedRankingService::pageFilters()`. Nothing here may be
+            // read as permission, and this stage cannot decide it: it also
+            // runs for the viewer-independent shared hot-feed cache.
+            'repost_root_id' => (int) ($row->act_repost_id ?? 0),
             'posted_at'  => self::toIso8601((string) ($row->act_time ?? '')),
             'scope_tags' => self::deriveScopeTags($postKind, (string) ($row->act_access ?? '')),
             'author'     => $author,
