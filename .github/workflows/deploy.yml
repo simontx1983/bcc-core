@@ -167,7 +167,7 @@ jobs:
           # sweep. Collapses the mixed-tree window from the full transfer
           # duration to a sub-second rename pass — the window that produced
           # cross-plugin fatals mid-deploy (2026-08-05 incident).
-          # F-36: dev-only files are HIDDEN from the transfer (rsync `H`), not
+          # F-36: agent/development-only files are HIDDEN from the transfer (rsync `H`), not
           # excluded. A plain --exclude also PROTECTS the path on the server, so
           # copies already deployed would be stranded forever (exactly how .git
           # was). `H` hides on the sender only, so --delete removes the existing
@@ -184,6 +184,7 @@ jobs:
             --filter='H /phpunit-integration.xml.dist' \
             --filter='H /.gitignore' \
             --filter='H /.gitattributes' \
+            --filter='H /AGENTS.md' \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes" \
             ./ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:$TARGET/"
 
@@ -289,10 +290,10 @@ jobs:
             exit 1
           fi
           echo "deploy guard: no stranded .git/.github under \$T"
-          # F-36: the hidden dev-only paths must be gone from the target too —
+          # F-36: the hidden agent/dev-only paths must be gone from the target too —
           # proves the first deploy with the new filters actually removed them.
           LEFT=""
-          for p in tests composer.json composer.lock phpstan.neon phpstan-bootstrap.php phpunit.xml.dist phpunit-integration.xml.dist .gitignore .gitattributes; do
+          for p in tests composer.json composer.lock phpstan.neon phpstan-bootstrap.php phpunit.xml.dist phpunit-integration.xml.dist .gitignore .gitattributes AGENTS.md; do
             [ -e "\$T/\$p" ] && LEFT="\$LEFT \$p"
           done
           if [ -n "\$LEFT" ]; then
