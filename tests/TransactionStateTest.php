@@ -82,6 +82,15 @@ final class TransactionStateTest extends TestCase
         self::assertFalse($this->db->suppress, 'error suppression is restored');
     }
 
+    /** The expected 1305 must not reach the error log: both probe statements run with errors suppressed. */
+    public function testTheProbeRunsWithErrorsSuppressed(): void
+    {
+        TransactionState::current();
+
+        self::assertSame(['SAVEPOINT', 'RELEASE'], array_map(static fn (string $sql): string => strtok($sql, ' '), $this->db->log));
+        self::assertSame([true, true], $this->db->suppressedLog);
+    }
+
     /** A failed probe still clears its error and restores suppression. */
     public function testAFailedProbeLeavesNoErrorBehindEither(): void
     {

@@ -140,7 +140,7 @@ namespace {
         /**
          * wpdb's mysqli link. Null = none (the probe falls back to the
          * English message); a mysqli object = its error number is read
-         * through the Wallet namespace's mysqli_errno() double
+         * through the DB namespace's mysqli_errno() double
          * ($GLOBALS['__bcc_errno']).
          *
          * @var \mysqli|null
@@ -160,6 +160,8 @@ namespace {
         public ?\Closure $beforeLockedRead = null;
         /** @var list<string> every statement, decoded */
         public array $log = [];
+        /** @var list<bool> whether errors were suppressed, per statement (same order as $log) */
+        public array $suppressedLog = [];
 
         /** @param mixed ...$args */
         public function prepare(string $sql, ...$args): string
@@ -222,6 +224,7 @@ namespace {
             [$sql, $args] = self::decode($q);
             $flat         = self::flat($sql);
             $this->log[]  = $flat;
+            $this->suppressedLog[] = $this->suppress;
 
             if ($flat === 'START TRANSACTION' || $flat === 'BEGIN') {
                 $this->last_error    = '';
