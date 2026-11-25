@@ -19,6 +19,8 @@ use PDO;
  *   would (false, `last_error` set) without reaching the engine.
  * - `$insertIdOverride`: report this `insert_id` after an INSERT instead of
  *   the engine's.
+ * - `$beforeQuery`: called with each statement just before it runs (after
+ *   `$failOn`); a test can suspend a Fiber there to interleave two callers.
  *
  * The per-file PdoWpdb copies in the post-meta, user-meta and group-privacy
  * read tests predate this one and read only.
@@ -36,6 +38,8 @@ final class PdoWpdb
     public array $log = [];
     public ?string $failOn = null;
     public ?int $insertIdOverride = null;
+    /** @var (\Closure(string): void)|null */
+    public ?\Closure $beforeQuery = null;
 
     public function __construct(private PDO $pdo, string $prefix)
     {
@@ -67,15 +71,21 @@ final class PdoWpdb
     public function query(string $sql)
     {
         $flat              = trim((string) preg_replace('/\s+/', ' ', $sql));
-        $this->log[]       = $flat;
         $this->last_error  = '';
         $this->last_result = [];
 
         if ($this->failOn !== null && preg_match($this->failOn, $flat) === 1) {
+            $this->log[]      = $flat;
             $this->last_error = 'injected failure';
 
             return false;
         }
+        if ($this->beforeQuery !== null) {
+            ($this->beforeQuery)($flat);
+        }
+        // Logged as it RUNS (after a suspension in beforeQuery), so the log
+        // is the order the engine saw.
+        $this->log[] = $flat;
 
         try {
             $statement = $this->pdo->query($sql);

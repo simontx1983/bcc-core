@@ -1051,9 +1051,10 @@ final class PeepSoActivityRepository
         // Duplicate rows fold STRICTEST-WINS: the row that grants nothing
         // sorts first, so `bcc_post_visibility` is `public_all` only when
         // EVERY row is, and `bcc_privacy_at_post` is non-open only when
-        // every row is (after TRIM, as GroupSyndicationGate::
+        // every row is (after TRIM of spaces, as GroupSyndicationGate::
         // madeWhileNonOpen() trims). Otherwise the first disagreeing row, by
-        // meta_id, a NULL one included. Never a value no row holds.
+        // meta_id, a NULL one included. Never a value no row holds. Values
+        // compare byte for byte (CAST … AS BINARY), as PHP compares them.
         $groupColumns = '';
         $selectParams = [];
         if ($withGroupVisibility) {
@@ -1067,12 +1068,12 @@ final class PeepSoActivityRepository
                 (SELECT vm.meta_value
                    FROM {$wpdb->postmeta} vm
                   WHERE vm.post_id = p.ID AND vm.meta_key = %s
-                  ORDER BY CASE WHEN vm.meta_value = %s THEN 1 ELSE 0 END, vm.meta_id
+                  ORDER BY CASE WHEN CAST(vm.meta_value AS BINARY) = %s THEN 1 ELSE 0 END, vm.meta_id
                   LIMIT 1) AS bcc_post_visibility,
                 (SELECT sm.meta_value
                    FROM {$wpdb->postmeta} sm
                   WHERE sm.post_id = p.ID AND sm.meta_key = %s
-                  ORDER BY CASE WHEN TRIM(sm.meta_value) IN (%s, %s) THEN 1 ELSE 0 END, sm.meta_id
+                  ORDER BY CASE WHEN CAST(TRIM(sm.meta_value) AS BINARY) IN (%s, %s) THEN 1 ELSE 0 END, sm.meta_id
                   LIMIT 1) AS bcc_privacy_at_post";
             $selectParams = [
                 'peepso_group_id',

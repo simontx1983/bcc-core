@@ -97,7 +97,7 @@ final class PostMetaRepositoryWriteTest extends TestCase
         self::assertSame([], $GLOBALS['__pmw_deletes'], 'nothing was written, so the cache stays');
     }
 
-    /** An insert with no id must not run the delete: `meta_id <> 0` would take the new row too. */
+    /** An insert with no id is a failure: without its id the delete has no bound. */
     public function testAnInsertWithNoIdIsAFailureAndDeletesNothing(): void
     {
         $this->sqlite();
@@ -122,6 +122,36 @@ final class PostMetaRepositoryWriteTest extends TestCase
 
         self::assertSame(['a', 'b', 'c'], $this->values(self::POST, 'k'));
         self::assertSame([[self::POST, 'post_meta']], $GLOBALS['__pmw_deletes']);
+    }
+
+    /**
+     * Two writers at once, interleaved as insert A, insert B, delete A,
+     * delete B (each in its own Fiber, suspended just before its DELETE):
+     * each deletes only rows OLDER than its own, so exactly one row is left,
+     * the newest. Deleting "every other row" would leave none.
+     */
+    public function testTwoInterleavedWritersLeaveExactlyTheNewestRow(): void
+    {
+        $this->sqlite();
+        $this->seed([[self::POST, 'k', 'old']]);
+        $this->db->beforeQuery = static function (string $sql): void {
+            if (str_starts_with($sql, 'DELETE') && \Fiber::getCurrent() !== null) {
+                \Fiber::suspend();
+            }
+        };
+        $a = new \Fiber(static fn (): bool => PostMetaRepository::replaceWithOneRow(self::POST, 'k', 'A'));
+        $b = new \Fiber(static fn (): bool => PostMetaRepository::replaceWithOneRow(self::POST, 'k', 'B'));
+
+        $a->start();  // insert A, then suspends before its delete
+        $b->start();  // insert B, then suspends before its delete
+        $a->resume(); // delete A
+        $b->resume(); // delete B
+
+        self::assertTrue($a->isTerminated() && $b->isTerminated());
+        self::assertTrue($a->getReturn());
+        self::assertTrue($b->getReturn());
+        self::assertSame(['INSERT', 'INSERT', 'DELETE', 'DELETE'], array_map(static fn (string $s): string => strtok($s, ' '), $this->db->log), 'the interleaving happened');
+        self::assertSame(['B'], $this->values(self::POST, 'k'));
     }
 
     public function testUnusableInputWritesNothing(): void

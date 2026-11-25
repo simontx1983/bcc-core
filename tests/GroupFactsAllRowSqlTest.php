@@ -32,9 +32,11 @@ require_once __DIR__ . '/Stubs/rendering-wpdb.php';
  *
  * Engines:
  *   - SQLite, always. ⚠ FAILS, not skips, in GitHub Actions without
- *     pdo_sqlite. getById()'s `GROUP_CONCAT(x ORDER BY … SEPARATOR ',')`
- *     becomes `GROUP_CONCAT(x, ',')` (the group-id list, not under test);
- *     nothing else is rewritten.
+ *     pdo_sqlite. Two rewrites, each counted so a rewrite that matched
+ *     nothing fails: `CAST(x AS BINARY)` becomes `x` (SQLite gives a
+ *     BINARY cast NUMERIC affinity, and already compares strings byte for
+ *     byte), and getById()'s `GROUP_CONCAT(x ORDER BY … SEPARATOR ',')`
+ *     becomes `GROUP_CONCAT(x, ',')` (the group-id list, not under test).
  *   - MySQL, opt-in: BCC_TEST_DB_PORT (with _HOST, _USER, _PASS, _NAME) and
  *     pdo_mysql. Untranslated. Real tables under a random prefix, dropped
  *     afterwards: MySQL cannot reference a TEMPORARY table twice in one
@@ -134,6 +136,10 @@ final class GroupFactsAllRowSqlTest extends TestCase
             [['public_all', null], false],
             [[], false],
             [['members_only'], false],
+            // Byte for byte, as PHP compares: no collation folds these in.
+            [['Public_All'], false],
+            [['public_all '], false],
+            [['public_all', 'PUBLIC_ALL'], false],
         ] as [$vis, $holds]) {
             $this->bothOrders($vis, function (array $rows) use ($publicAll, $byId, $holds): void {
                 $this->seed(['7'], $rows, []);
@@ -176,6 +182,10 @@ final class GroupFactsAllRowSqlTest extends TestCase
             [['2', null], false],
             [[], false],
             [['0'], false],
+            // TRIM strips spaces only, in SQL and in PHP alike.
+            [["\t1"], false],
+            [["1\n"], false],
+            [['1', "2\r"], false],
         ] as [$privacy, $holds]) {
             $this->bothOrders($privacy, function (array $rows) use ($known, $unknown, $madeWhile, $byId, $holds): void {
                 $this->seed(['7'], [], $rows);
@@ -281,7 +291,19 @@ final class GroupFactsAllRowSqlTest extends TestCase
             ...$predicate['params']
         );
 
-        return array_map('intval', $this->pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN)) === [self::POST];
+        return array_map('intval', $this->pdo->query($this->dialect($sql))->fetchAll(PDO::FETCH_COLUMN)) === [self::POST];
+    }
+
+    /** MySQL runs the statement as written; SQLite gets `CAST(x AS BINARY)` → `x` (see the class docblock). */
+    private function dialect(string $sql): string
+    {
+        if ($this->mysql) {
+            return $sql;
+        }
+        $sqlite = (string) preg_replace('/CAST\((.+?) AS BINARY\)/', '$1', $sql, -1, $n);
+        self::assertGreaterThan(0, $n, 'expected a byte-exact comparison to rewrite');
+
+        return $sqlite;
     }
 
     /** getById()'s real statement, with the group-visibility columns. */
@@ -301,6 +323,8 @@ final class GroupFactsAllRowSqlTest extends TestCase
         if (!$this->mysql) {
             $sql = (string) preg_replace('/GROUP_CONCAT\((\w+\.meta_value) ORDER BY \w+\.meta_id SEPARATOR \',\'\)/', 'GROUP_CONCAT($1, \',\')', $sql, -1, $n);
             self::assertSame(1, $n, 'expected one GROUP_CONCAT to rewrite');
+            $sql = (string) preg_replace('/CAST\((.+?) AS BINARY\)/', '$1', $sql, -1, $casts);
+            self::assertSame(2, $casts, 'expected the two byte-exact CASE comparisons to rewrite');
         }
 
         return $sql;

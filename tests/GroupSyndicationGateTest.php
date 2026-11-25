@@ -58,6 +58,16 @@ final class GroupSyndicationGateTest extends TestCase
         self::assertFalse(GroupSyndicationGate::allows([7], 'junk', [7]));
     }
 
+    /** Spaces are trimmed, as SQL's TRIM() trims them; a tab or newline is not, by either. */
+    public function testMadeWhileNonOpenTrimsSpacesOnlyAsSqlDoes(): void
+    {
+        self::assertTrue(GroupSyndicationGate::madeWhileNonOpen(' 1 '));
+        self::assertTrue(GroupSyndicationGate::madeWhileNonOpen('2 '));
+        self::assertFalse(GroupSyndicationGate::madeWhileNonOpen("\t1"));
+        self::assertFalse(GroupSyndicationGate::madeWhileNonOpen("1\n"));
+        self::assertFalse(GroupSyndicationGate::madeWhileNonOpen("\r2"));
+    }
+
     public function testAnyNonOpenGroupOfSeveralDrops(): void
     {
         self::assertFalse(GroupSyndicationGate::allows([7, 12], '0', [12]));
@@ -79,8 +89,8 @@ final class GroupSyndicationGateTest extends TestCase
         self::assertSame(['7', '9', '1', '2', '1', '2'], $p['params'], 'ids deduped, positive, as strings; then the non-open values, twice');
         self::assertStringContainsString("gsg_g.meta_value IN (%s,%s)", $p['where']);
         // Every privacy row must be non-open (after TRIM), a NULL row included as "other".
-        self::assertStringContainsString("_bcc_post_group_privacy_at_post' AND TRIM(gsg_at.meta_value) IN (%s,%s)", $p['where']);
-        self::assertStringContainsString("(gsg_at_x.meta_value IS NULL OR TRIM(gsg_at_x.meta_value) NOT IN (%s,%s))", $p['where']);
+        self::assertStringContainsString("_bcc_post_group_privacy_at_post' AND CAST(TRIM(gsg_at.meta_value) AS BINARY) IN (%s,%s)", $p['where']);
+        self::assertStringContainsString("(gsg_at_x.meta_value IS NULL OR CAST(TRIM(gsg_at_x.meta_value) AS BINARY) NOT IN (%s,%s))", $p['where']);
         self::assertStringStartsWith('(NOT EXISTS', $p['where']);
     }
 
@@ -111,7 +121,7 @@ final class GroupSyndicationGateTest extends TestCase
         self::assertSame(['1', '2', '1', '2'], $p['params']);
         self::assertStringNotContainsString('gsg_g.meta_value IN', $p['where']);
         self::assertStringContainsString("gsg_g.meta_key = 'peepso_group_id')", $p['where']);
-        self::assertStringContainsString('TRIM(gsg_at.meta_value) IN', $p['where'], 'Gate 12 escape kept');
+        self::assertStringContainsString('CAST(TRIM(gsg_at.meta_value) AS BINARY) IN', $p['where'], 'Gate 12 escape kept');
     }
 
     /**

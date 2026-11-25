@@ -133,7 +133,7 @@ namespace BCC\Core\Feed\Tests\PageScope {
             );
 
             self::assertStringContainsString("gm_pm.meta_value = '42'", $wpdb->lastSql);
-            self::assertStringContainsString("vis_in_pm.meta_value IN ('public_all')", $wpdb->lastSql);
+            self::assertStringContainsString("CAST(vis_in_pm.meta_value AS BINARY) IN ('public_all')", $wpdb->lastSql);
             self::assertStringContainsString(self::MARKER_JOIN, $wpdb->lastSql);
         }
 
@@ -150,7 +150,7 @@ namespace BCC\Core\Feed\Tests\PageScope {
             );
 
             self::assertStringContainsString(
-                "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR (EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND vis_pm.meta_value IN ('public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta vis_pm_x WHERE vis_pm_x.post_id = p.ID AND vis_pm_x.meta_key = '_bcc_post_visibility' AND (vis_pm_x.meta_value IS NULL OR vis_pm_x.meta_value NOT IN ('public_all')))))",
+                "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR (EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND CAST(vis_pm.meta_value AS BINARY) IN ('public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta vis_pm_x WHERE vis_pm_x.post_id = p.ID AND vis_pm_x.meta_key = '_bcc_post_visibility' AND (vis_pm_x.meta_value IS NULL OR CAST(vis_pm_x.meta_value AS BINARY) NOT IN ('public_all')))))",
                 $wpdb->lastSql
             );
             self::assertStringContainsString('a.act_module_id IN (', $wpdb->lastSql);

@@ -136,8 +136,11 @@ final class GroupSyndicationGate
      * joins, so it can't multiply rows. Placeholders are the $allowed
      * values, twice (the EXISTS, then the NOT EXISTS), in `params`.
      *
+     * Values are compared BYTE FOR BYTE (CAST … AS BINARY), as PHP compares
+     * them: no collation folds case or pads trailing spaces into a match.
+     *
      * @param list<string> $allowed empty = nothing qualifies (fails closed)
-     * @param bool         $trim    compare TRIM(meta_value), as madeWhileNonOpen() trims
+     * @param bool         $trim    compare TRIM(meta_value) (spaces), as madeWhileNonOpen() trims
      * @return array{where: string, params: list<string>}
      */
     public static function everyRowIn(
@@ -158,7 +161,7 @@ final class GroupSyndicationGate
 
         $in    = implode(',', array_fill(0, count($allowed), '%s'));
         $neg   = $alias . '_x';
-        $value = static fn(string $a): string => $trim ? 'TRIM(' . $a . '.meta_value)' : $a . '.meta_value';
+        $value = static fn(string $a): string => 'CAST(' . ($trim ? 'TRIM(' . $a . '.meta_value)' : $a . '.meta_value') . ' AS BINARY)';
 
         return [
             'where'  => '(EXISTS (SELECT 1 FROM ' . $postmetaTable . ' ' . $alias
@@ -195,11 +198,17 @@ final class GroupSyndicationGate
         return array_intersect($groups, self::cleanIds($nonOpenGroupIds)) === [];
     }
 
-    /** True when the record says the group was closed or secret at post time. */
+    /**
+     * True when the record says the group was closed or secret at post time.
+     *
+     * Trims SPACES only, exactly as SQL's TRIM() does in the predicates
+     * above, so PHP and SQL decide every stored value the same way (a tab or
+     * newline is not trimmed by either).
+     */
     public static function madeWhileNonOpen(mixed $privacyAtPost): bool
     {
         return is_scalar($privacyAtPost)
-            && in_array(trim((string) $privacyAtPost), self::NON_OPEN_PRIVACY, true);
+            && in_array(trim((string) $privacyAtPost, ' '), self::NON_OPEN_PRIVACY, true);
     }
 
     /**

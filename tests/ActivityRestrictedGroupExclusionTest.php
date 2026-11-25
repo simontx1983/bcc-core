@@ -35,7 +35,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
     final class ActivityRestrictedGroupExclusionTest extends TestCase
     {
         // Per post: in no group, or EVERY visibility row is public_all.
-        private const PUBLIC_ALL_GATE = "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR (EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND vis_pm.meta_value IN ('public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta vis_pm_x WHERE vis_pm_x.post_id = p.ID AND vis_pm_x.meta_key = '_bcc_post_visibility' AND (vis_pm_x.meta_value IS NULL OR vis_pm_x.meta_value NOT IN ('public_all')))))";
+        private const PUBLIC_ALL_GATE = "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR (EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND CAST(vis_pm.meta_value AS BINARY) IN ('public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta vis_pm_x WHERE vis_pm_x.post_id = p.ID AND vis_pm_x.meta_key = '_bcc_post_visibility' AND (vis_pm_x.meta_value IS NULL OR CAST(vis_pm_x.meta_value AS BINARY) NOT IN ('public_all')))))";
 
         private const DENY_7_9 = "NOT EXISTS (SELECT 1 FROM wp_postmeta rg_pm WHERE rg_pm.post_id = p.ID"
             . " AND rg_pm.meta_key = 'peepso_group_id' AND rg_pm.meta_value IN ('7','9'))";
@@ -47,7 +47,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
             . " AND mg_pm.meta_key = 'peepso_group_id' AND mg_pm.meta_value IN ('3','4'))";
 
         // Per-post: a public row must exist AND no other row may, NULL included.
-        private const PUBLIC_VIS_ALT = "(EXISTS (SELECT 1 FROM wp_postmeta nmv_pm WHERE nmv_pm.post_id = p.ID AND nmv_pm.meta_key = '_bcc_post_visibility' AND nmv_pm.meta_value IN ('public_group','public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_pm_x WHERE nmv_pm_x.post_id = p.ID AND nmv_pm_x.meta_key = '_bcc_post_visibility' AND (nmv_pm_x.meta_value IS NULL OR nmv_pm_x.meta_value NOT IN ('public_group','public_all'))))";
+        private const PUBLIC_VIS_ALT = "(EXISTS (SELECT 1 FROM wp_postmeta nmv_pm WHERE nmv_pm.post_id = p.ID AND nmv_pm.meta_key = '_bcc_post_visibility' AND CAST(nmv_pm.meta_value AS BINARY) IN ('public_group','public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_pm_x WHERE nmv_pm_x.post_id = p.ID AND nmv_pm_x.meta_key = '_bcc_post_visibility' AND (nmv_pm_x.meta_value IS NULL OR CAST(nmv_pm_x.meta_value AS BINARY) NOT IN ('public_group','public_all'))))";
 
         // ⚠ `a.act_repost_id` added for F-346. The golden SQL did its job:
         // widening COLUMNS changed the rendered query and these two tests
@@ -533,13 +533,13 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
             self::assertStringContainsString("gm_pm.meta_value = '42'", $wpdb->lastSql);
             self::assertStringContainsString(
-                "vis_in_pm.meta_value IN ('public_group','public_all')",
+                "CAST(vis_in_pm.meta_value AS BINARY) IN ('public_group','public_all')",
                 $wpdb->lastSql
             );
             // Per post, every row: no other visibility row, NULL included,
             // and no join that a single permissive row could satisfy.
             self::assertStringContainsString(
-                "(vis_in_pm_x.meta_value IS NULL OR vis_in_pm_x.meta_value NOT IN ('public_group','public_all'))",
+                "(vis_in_pm_x.meta_value IS NULL OR CAST(vis_in_pm_x.meta_value AS BINARY) NOT IN ('public_group','public_all'))",
                 $wpdb->lastSql
             );
             self::assertStringNotContainsString('JOIN wp_postmeta vis_in_pm', $wpdb->lastSql);
@@ -650,7 +650,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
             self::assertStringContainsString('NOT EXISTS (SELECT 1 FROM wp_postmeta nmv_pm_x', $wpdb->lastSql);
             self::assertStringContainsString(
-                "(nmv_pm_x.meta_value IS NULL OR nmv_pm_x.meta_value NOT IN ('public_group','public_all'))",
+                "(nmv_pm_x.meta_value IS NULL OR CAST(nmv_pm_x.meta_value AS BINARY) NOT IN ('public_group','public_all'))",
                 $wpdb->lastSql
             );
         }
@@ -685,7 +685,7 @@ namespace BCC\Core\Feed\Tests\RestrictedGroups {
 
             self::assertStringContainsString("mg_pm.meta_value IN ('3','4')", $wpdb->lastSql);
             self::assertStringContainsString(
-                "nmv_pm.meta_value IN ('public_group','public_all')",
+                "CAST(nmv_pm.meta_value AS BINARY) IN ('public_group','public_all')",
                 $wpdb->lastSql
             );
         }
