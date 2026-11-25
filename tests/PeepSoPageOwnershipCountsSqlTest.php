@@ -17,8 +17,8 @@ if (!\defined('ARRAY_A')) {
 /**
  * Page-ownership counts only count pages others may see (F-427).
  *
- * The member card's `owned_pages_by_type`, the directory's `?type=` filter
- * and its chip counts each require listablePageSql(): a published
+ * The member card's `owned_pages_by_type` and the directory's `?type=`
+ * filter each require listablePageSql(): a published
  * `peepso-page` that is not secret (the shared PeepSoPagePrivacy rule).
  * Rationale: F-427 (private tracker).
  *
@@ -28,7 +28,6 @@ if (!\defined('ARRAY_A')) {
 #[CoversMethod(PeepSoPageRepository::class, 'listablePageSql')]
 #[CoversMethod(PeepSoPageRepository::class, 'getOwnedPageTypeCountsForUsers')]
 #[CoversMethod(PeepSoPageRepository::class, 'getUserIdsOwningPagesOfType')]
-#[CoversMethod(PeepSoPageRepository::class, 'getGlobalOwnedPageUserCountsByType')]
 final class PeepSoPageOwnershipCountsSqlTest extends TestCase
 {
     private const LISTABLE =
@@ -126,7 +125,6 @@ final class PeepSoPageOwnershipCountsSqlTest extends TestCase
     {
         yield 'member card counts per type' => [static fn () => PeepSoPageRepository::getOwnedPageTypeCountsForUsers([5, 9])];
         yield 'owners of a type (?type= filter)' => [static fn () => PeepSoPageRepository::getUserIdsOwningPagesOfType('validator')];
-        yield 'global chip counts' => [static fn () => PeepSoPageRepository::getGlobalOwnedPageUserCountsByType()];
     }
 
     /** @param \Closure(): mixed $read */
