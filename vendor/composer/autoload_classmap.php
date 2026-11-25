@@ -49,6 +49,7 @@ return array(
     'BCC\\Core\\Crypto\\WalletVerifier' => $baseDir . '/src/Crypto/WalletVerifier.php',
     'BCC\\Core\\DB\\AdvisoryLock' => $baseDir . '/src/DB/AdvisoryLock.php',
     'BCC\\Core\\DB\\DB' => $baseDir . '/src/DB/DB.php',
+    'BCC\\Core\\DB\\TransactionState' => $baseDir . '/src/DB/TransactionState.php',
     'BCC\\Core\\DTO\\DTOAssert' => $baseDir . '/src/DTO/DTOAssert.php',
     'BCC\\Core\\DTO\\RowAssert' => $baseDir . '/src/DTO/RowAssert.php',
     'BCC\\Core\\Feed\\ActivityFeedService' => $baseDir . '/src/Feed/ActivityFeedService.php',

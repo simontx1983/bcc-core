@@ -64,6 +64,7 @@ class ComposerStaticInitea7b703606a2e0006d221abf64e2ef6e
         'BCC\\Core\\Crypto\\WalletVerifier' => __DIR__ . '/../..' . '/src/Crypto/WalletVerifier.php',
         'BCC\\Core\\DB\\AdvisoryLock' => __DIR__ . '/../..' . '/src/DB/AdvisoryLock.php',
         'BCC\\Core\\DB\\DB' => __DIR__ . '/../..' . '/src/DB/DB.php',
+        'BCC\\Core\\DB\\TransactionState' => __DIR__ . '/../..' . '/src/DB/TransactionState.php',
         'BCC\\Core\\DTO\\DTOAssert' => __DIR__ . '/../..' . '/src/DTO/DTOAssert.php',
         'BCC\\Core\\DTO\\RowAssert' => __DIR__ . '/../..' . '/src/DTO/RowAssert.php',
         'BCC\\Core\\Feed\\ActivityFeedService' => __DIR__ . '/../..' . '/src/Feed/ActivityFeedService.php',

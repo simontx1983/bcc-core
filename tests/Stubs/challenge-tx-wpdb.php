@@ -2,9 +2,10 @@
 
 /**
  * An in-memory wp_options table with TRANSACTION semantics behind a $wpdb
- * double, for ChallengeRepository's in-transaction primitives
- * (transactionState / consumeInTransaction / update) and the validator memo
- * challenge built on them. Plus recording doubles for AdvisoryLock and
+ * double, for the transaction probe (DB\TransactionState), ChallengeRepository's
+ * in-transaction primitives (transactionState / consumeInTransaction /
+ * update) and the validator memo challenge built on them. Plus recording
+ * doubles for AdvisoryLock and
  * Logger, and transient functions for DegradationMetrics.
  *
  * Loaded ONLY from #[RunTestsInSeparateProcesses] tests, BEFORE anything
@@ -47,6 +48,16 @@ namespace BCC\Core\DB {
             }
         }
     }
+
+    // The connection's error number, for a double whose `dbh` is a mysqli
+    // object (see BccTxOptionsWpdb::$dbh): what the driver would report.
+    // In the DB namespace, where the probe (TransactionState) reads it.
+    if (!function_exists(__NAMESPACE__ . '\mysqli_errno')) {
+        function mysqli_errno(\mysqli $link): int
+        {
+            return (int) ($GLOBALS['__bcc_errno'] ?? 0);
+        }
+    }
 }
 
 namespace BCC\Core\Wallet {
@@ -70,15 +81,6 @@ namespace BCC\Core\Wallet {
                 return (int) array_shift($GLOBALS['__bcc_rand']);
             }
             return \random_int($min, $max);
-        }
-    }
-
-    // The connection's error number, for a double whose `dbh` is a mysqli
-    // object (see BccTxOptionsWpdb::$dbh): what the driver would report.
-    if (!function_exists(__NAMESPACE__ . '\mysqli_errno')) {
-        function mysqli_errno(\mysqli $link): int
-        {
-            return (int) ($GLOBALS['__bcc_errno'] ?? 0);
         }
     }
 }
@@ -138,7 +140,7 @@ namespace {
         /**
          * wpdb's mysqli link. Null = none (the probe falls back to the
          * English message); a mysqli object = its error number is read
-         * through the Wallet namespace's mysqli_errno() double
+         * through the DB namespace's mysqli_errno() double
          * ($GLOBALS['__bcc_errno']).
          *
          * @var \mysqli|null
@@ -158,6 +160,8 @@ namespace {
         public ?\Closure $beforeLockedRead = null;
         /** @var list<string> every statement, decoded */
         public array $log = [];
+        /** @var list<bool> whether errors were suppressed, per statement (same order as $log) */
+        public array $suppressedLog = [];
 
         /** @param mixed ...$args */
         public function prepare(string $sql, ...$args): string
@@ -220,6 +224,7 @@ namespace {
             [$sql, $args] = self::decode($q);
             $flat         = self::flat($sql);
             $this->log[]  = $flat;
+            $this->suppressedLog[] = $this->suppress;
 
             if ($flat === 'START TRANSACTION' || $flat === 'BEGIN') {
                 $this->last_error    = '';

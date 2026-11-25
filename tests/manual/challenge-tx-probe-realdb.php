@@ -1,7 +1,8 @@
 <?php
 /**
  * MANUAL check, never run by CI (PHPUnit collects only *Test.php files):
- * ChallengeRepository's transaction probe, consume() and
+ * the transaction probe (DB\TransactionState, asked through
+ * ChallengeRepository::transactionState()), consume() and
  * consumeInTransaction() against a REAL MySQL 8 or MariaDB server.
  *
  * It goes through a wpdb-shaped adapter that exposes its mysqli link as
