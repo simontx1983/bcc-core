@@ -95,7 +95,7 @@ final class PublicTrendingHashtagsTest extends TestCase
         foreach ([
             "p.post_type = 'peepso-post'",
             "p.post_status = 'publish'",
-            "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND vis_pm.meta_value = 'public_all'))",
+            "(NOT EXISTS (SELECT 1 FROM wp_postmeta gx_pm WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = 'peepso_group_id') OR (EXISTS (SELECT 1 FROM wp_postmeta vis_pm WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = '_bcc_post_visibility' AND CAST(vis_pm.meta_value AS BINARY) IN ('public_all')) AND NOT EXISTS (SELECT 1 FROM wp_postmeta vis_pm_x WHERE vis_pm_x.post_id = p.ID AND vis_pm_x.meta_key = '_bcc_post_visibility' AND (vis_pm_x.meta_value IS NULL OR CAST(vis_pm_x.meta_value AS BINARY) NOT IN ('public_all')))))",
             'FROM wp_posts p LEFT JOIN wp_peepso_users pu ON pu.usr_id = p.post_author WHERE',
             'COALESCE(pu.usr_profile_acc, 10)',
             'IF(a_pub.act_access IS NULL OR a_pub.act_access <= 0, 10, a_pub.act_access)',
@@ -143,7 +143,8 @@ final class PublicTrendingHashtagsTest extends TestCase
         self::assertSame([['a', 1]], self::pairs(PeepSoHashtagRepository::getTrendingPubliclyVisible(5)));
 
         $gate = \BCC\Core\Feed\GroupSyndicationGate::sqlPredicate('wp_postmeta', null, 'p');
-        self::assertStringContainsString('AND ' . (string) preg_replace('/\s+/', ' ', $gate['where']) . ' AND EXISTS', $GLOBALS['__pt']['sql'][2]);
+        $rendered = vsprintf(str_replace('%s', "'%s'", $gate['where']), $gate['params']);
+        self::assertStringContainsString('AND ' . (string) preg_replace('/\s+/', ' ', $rendered) . ' AND EXISTS', $GLOBALS['__pt']['sql'][2]);
     }
 
     /**
