@@ -106,14 +106,69 @@ final class PeepSoGroupRepository
         return [" AND {$titleColumn} LIKE %s", ['%' . $wpdb->esc_like($m[0]) . '%']];
     }
 
+    /** listHalls() / countHalls() `$hallKind`: a Hall connected to a chain. */
+    public const HALL_KIND_CHAIN = 'chain';
+
+    /** listHalls() / countHalls() `$hallKind`: a Hall about a topic, with no chain. */
+    public const HALL_KIND_TOPIC = 'topic';
+
+    /** A topic Hall's topic slug (paired with bcc-trust's HallRepository, which writes it). */
+    private const META_HALL_TOPIC = '_bcc_hall_topic';
+
+    /** A chain tag names a chain only as a positive id; the writers store nothing else. */
+    private const CHAIN_TAG_PATTERN = '^[1-9][0-9]*$';
+
+    /**
+     * The optional Hall-kind filter listHalls() and countHalls() share, so a
+     * page and its total agree:
+     *  - HALL_KIND_CHAIN: the Hall has a `_bcc_chain_tag` row naming a chain;
+     *  - HALL_KIND_TOPIC: the Hall has a non-empty `_bcc_hall_topic` row and
+     *    no such chain tag.
+     * The two never overlap. A Hall with neither is in neither filtered
+     * list and still in the unfiltered one: nothing is inferred. null adds
+     * nothing, so the read is exactly what it was without a kind. Any other
+     * value matches nothing.
+     *
+     * @return array{0: string, 1: list<string>} the fragment (with its leading " AND ") and its arguments
+     */
+    private static function hallKindClause(?string $hallKind, string $idColumn): array
+    {
+        global $wpdb;
+
+        if ($hallKind === null) {
+            return ['', []];
+        }
+
+        $chain     = "EXISTS (SELECT 1 FROM {$wpdb->postmeta} hk_chain
+                               WHERE hk_chain.post_id = {$idColumn}
+                                 AND hk_chain.meta_key = %s
+                                 AND hk_chain.meta_value REGEXP %s)";
+        $chainArgs = [self::META_CHAIN_TAG, self::CHAIN_TAG_PATTERN];
+
+        return match ($hallKind) {
+            self::HALL_KIND_CHAIN => [" AND {$chain}", $chainArgs],
+            self::HALL_KIND_TOPIC => [
+                " AND EXISTS (SELECT 1 FROM {$wpdb->postmeta} hk_topic
+                               WHERE hk_topic.post_id = {$idColumn}
+                                 AND hk_topic.meta_key = %s
+                                 AND hk_topic.meta_value <> '')
+                  AND NOT {$chain}",
+                [self::META_HALL_TOPIC, ...$chainArgs],
+            ],
+            default => [' AND 1 = 0', []],
+        };
+    }
+
     /**
      * Halls (`_bcc_group_kind = 'hall'`), with member counts. Optionally
      * filtered to a single chain via the `_bcc_chain_tag` numeric-chain-id
      * post-meta. Callers resolve a chain slug to its id (ChainRepository)
      * before passing it — bcc-core does not depend on the chain registry.
-     * Optionally filtered by name ({@see nameQueryClause()}); countHalls()
-     * takes the same filters, so a page and its total agree.
+     * Optionally filtered by name ({@see nameQueryClause()}) and by Hall
+     * kind ({@see hallKindClause()}); countHalls() takes the same filters,
+     * so a page and its total agree.
      *
+     * @param self::HALL_KIND_*|null $hallKind
      * @return list<object{
      *   id: numeric-string,
      *   post_name: string,
@@ -121,11 +176,12 @@ final class PeepSoGroupRepository
      *   member_count: numeric-string
      * }>
      */
-    public static function listHalls(?int $chainId, int $offset, int $limit, string $nameQuery = ''): array
+    public static function listHalls(?int $chainId, int $offset, int $limit, string $nameQuery = '', ?string $hallKind = null): array
     {
         global $wpdb;
         $members = self::membersTable();
         [$nameSql, $nameArgs] = self::nameQueryClause($nameQuery, 'p.post_title');
+        [$kindSql, $kindArgs] = self::hallKindClause($hallKind, 'p.ID');
 
         // INNER JOIN on the hall-kind meta is the discriminator; a single
         // meta row per post keeps COUNT(gm.gm_id) accurate under GROUP BY.
@@ -145,7 +201,7 @@ final class PeepSoGroupRepository
              . " LEFT JOIN {$members} gm ON gm.gm_group_id = p.ID
                                         AND gm.gm_user_status LIKE %s
                  WHERE p.post_type = %s
-                   AND p.post_status = %s{$nameSql}
+                   AND p.post_status = %s{$nameSql}{$kindSql}
                  GROUP BY p.ID
                  ORDER BY p.post_title ASC
                  LIMIT %d OFFSET %d";
@@ -158,7 +214,7 @@ final class PeepSoGroupRepository
         $params[] = self::ACTIVE_MEMBER_STATUS;
         $params[] = self::POST_TYPE;
         $params[] = self::POST_STATUS;
-        array_push($params, ...$nameArgs);
+        array_push($params, ...$nameArgs, ...$kindArgs);
         $params[] = $limit;
         $params[] = $offset;
 
@@ -1857,12 +1913,15 @@ final class PeepSoGroupRepository
      * Total count for the same filter set as listHalls(). Drives the
      * pagination.total / pagination.total_pages fields. Optional chain
      * filter via the `_bcc_chain_tag` numeric-chain-id post-meta, and the
-     * same optional name filter as listHalls().
+     * same optional name and Hall-kind filters as listHalls().
+     *
+     * @param self::HALL_KIND_*|null $hallKind
      */
-    public static function countHalls(?int $chainId, string $nameQuery = ''): int
+    public static function countHalls(?int $chainId, string $nameQuery = '', ?string $hallKind = null): int
     {
         global $wpdb;
         [$nameSql, $nameArgs] = self::nameQueryClause($nameQuery, 'p.post_title');
+        [$kindSql, $kindArgs] = self::hallKindClause($hallKind, 'p.ID');
 
         $chainJoin = $chainId !== null
             ? " INNER JOIN {$wpdb->postmeta} pm_chain ON pm_chain.post_id = p.ID
@@ -1876,7 +1935,7 @@ final class PeepSoGroupRepository
                                                 AND pm_kind.meta_key = %s
                                                 AND pm_kind.meta_value = %s"
              . $chainJoin
-             . " WHERE p.post_type = %s AND p.post_status = %s{$nameSql}";
+             . " WHERE p.post_type = %s AND p.post_status = %s{$nameSql}{$kindSql}";
 
         $params = [self::META_KIND, self::KIND_HALL];
         if ($chainId !== null) {
@@ -1885,7 +1944,7 @@ final class PeepSoGroupRepository
         }
         $params[] = self::POST_TYPE;
         $params[] = self::POST_STATUS;
-        array_push($params, ...$nameArgs);
+        array_push($params, ...$nameArgs, ...$kindArgs);
 
         return (int) $wpdb->get_var($wpdb->prepare($sql, ...$params));
     }
