@@ -298,12 +298,14 @@ final class PeepSoHashtagRepository
         }
         $syndication = GroupSyndicationGate::sqlPredicate($wpdb->postmeta, $nonOpen, 'p');
 
-        // ⚠ The group and visibility markers are EXISTS checks, not the
-        // feed's LEFT JOINs: this is a SUM, and a post with two rows of
-        // either meta key would be counted twice through a join. Same
-        // meaning as the feed's `(gx_pm IS NULL OR vis_pm = 'public_all')`.
+        // The global feed's marker, from its one home: in no group, or
+        // EVERY visibility row is public_all (strictest-wins). Per-post
+        // subqueries, not joins: this is a SUM, and a post with two rows of
+        // a meta key would be counted twice through a join.
         // `peepso_users` is joined because usr_id is its primary key (one
         // row at most).
+        $publicAll = GroupSyndicationGate::publicAllPredicate($wpdb->postmeta, 'p');
+
         $sql = 'SELECT ' . implode(', ', $sums) . '
                   FROM ' . $wpdb->posts . ' p
                   LEFT JOIN ' . $wpdb->prefix . 'peepso_users pu
@@ -311,11 +313,7 @@ final class PeepSoHashtagRepository
                  WHERE p.post_type   = \'peepso-post\'
                    AND p.post_status = \'publish\'
                    AND p.post_content LIKE \'%%#%%\'
-                   AND (NOT EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' gx_pm
-                                     WHERE gx_pm.post_id = p.ID AND gx_pm.meta_key = \'peepso_group_id\')
-                        OR EXISTS (SELECT 1 FROM ' . $wpdb->postmeta . ' vis_pm
-                                    WHERE vis_pm.post_id = p.ID AND vis_pm.meta_key = \'_bcc_post_visibility\'
-                                      AND vis_pm.meta_value = \'public_all\'))'
+                   AND ' . $publicAll['where']
                    . ($syndication['where'] !== '' ? ' AND ' . $syndication['where'] : '') . '
                    AND EXISTS (SELECT 1 FROM ' . $acts . ' a_pub
                                 WHERE a_pub.act_external_id = p.ID
@@ -323,8 +321,9 @@ final class PeepSoHashtagRepository
                    AND NOT EXISTS (SELECT 1 FROM ' . $acts . ' a_hid
                                     WHERE a_hid.act_external_id = p.ID
                                       AND ' . $level('a_hid') . ' > ' . $public . ')';
-        // WHERE placeholders follow the SELECT's LIKE placeholders.
-        foreach ($syndication['params'] as $param) {
+        // WHERE placeholders follow the SELECT's LIKE placeholders, in
+        // clause order: the public_all marker, then the syndication rule.
+        foreach (array_merge($publicAll['params'], $syndication['params']) as $param) {
             $params[] = $param;
         }
 

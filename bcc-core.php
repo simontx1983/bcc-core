@@ -654,18 +654,18 @@ add_filter('bcc_system_health', function (array $health): array {
         // means the worker never fires. Most post-mutation paths have a
         // reconciliation sweep that re-enqueues (DisputeScheduler::doReconcile
         // for panelist notify, the recurring graph/recalc/stats sweeps for
-        // routine work) — the two events below are the surfaces where loss
-        // is unrecoverable without manual replay:
-        //   - endorsement_fraud_analyzer: per-endorsement fraud rescoring.
-        //     No reconciliation; a missed enqueue means the endorser keeps
-        //     a trust bonus they should not.
+        // routine work) — the event below is the surface where loss is
+        // unrecoverable without manual replay:
         //   - vote_job_dispatcher: the composite `bcc_trust_async_post_vote`
         //     job that fans out to fraud analysis + trust graph + recalc +
         //     stats refresh. A miss strands all four sub-tasks for that vote.
         // Sustained nonzero activation = wp_options is unhealthy on the
         // hot mutation path — read like an incident, not a warning.
+        // endorsement_fraud_analyzer — RETIRED 2026-11-24. Its only writer
+        // (the endorsement fraud-analysis enqueue) was removed with the
+        // Endorse→Attestation cutover (bcc-trust b4a8c6ae), so the counter
+        // could never move; bcc-trust's DegradationMetricsCoreMapTest found it.
         'cron_dispatch'        => [
-            'endorsement_fraud_analyzer',
             'vote_job_dispatcher',
         ],
         // post_commit_task — a post-commit trust-processing STEP threw during
@@ -1010,6 +1010,28 @@ add_filter('bcc_system_health', function (array $health): array {
         //                            read; the paired error log names the
         //                            member. Steady state zero.
         'page_privacy' => ['member_list_over_cap'],
+        // validator_memo_claim — the validator memo claim's challenges
+        // (Wallet\ValidatorMemoChallenge::issue(), design A2).
+        //   `crowded_valoper`  — a challenge was issued while 5 or more
+        //                        members hold live challenges on the same
+        //                        validator: it looks like a phishing
+        //                        campaign against that operator. The paired
+        //                        warning names the validator. Flag for staff.
+        //   `valoper_backstop` — a new member was refused because 50
+        //                        challenges are already live on one validator
+        //                        (the denial-of-service backstop).
+        //   Steady state zero for both.
+        'validator_memo_claim' => ['crowded_valoper', 'valoper_backstop'],
+        // wallet_challenge — Wallet\ChallengeRepository::transactionState(),
+        // the SAVEPOINT / RELEASE probe consume() and consumeInTransaction()
+        // ask before they run.
+        //   `tx_probe_unknown` — the probe could not tell whether a
+        //                        transaction is open (any error other than
+        //                        1305 "SAVEPOINT … does not exist"), so the
+        //                        consume was REFUSED. Steady state zero; a
+        //                        sustained count means wallet sign-in and
+        //                        linking are failing (a P1).
+        'wallet_challenge' => ['tx_probe_unknown'],
         // auth_token — bcc-trust's token revocation writes (JwtToken).
         //   `revoke_write_failed` — a revocation write did not land: the
         //                           revoke-all version bump (a password or
@@ -1032,6 +1054,24 @@ add_filter('bcc_system_health', function (array $health): array {
         //                              persistent one can't keep the
         //                              alerter tripped. Expected rare.
         'validator_index' => ['solana_shared_identity'],
+        // cosmos_tx_proof — bcc-trust CosmosTxInclusionFetcher: the validator
+        // memo claim's check that a Cosmos transaction was included, asked of
+        // two independent public node operators per chain. Each event leaves
+        // the claim "not yet" (nothing is decided) or the warning email unsent.
+        //   - endpoint_disagreement: the two operators returned different
+        //     bytes, height, result code or block time for the same hash.
+        //   - network_mismatch: a node, or a block header it served, named a
+        //     network other than the one BCC pins for the chain.
+        //   - contact_disagreement: the operators returned different
+        //     security_contact values for a validator, so no warning email is
+        //     sent and staff are flagged.
+        // Expected steady state zero. A sustained count on one chain means an
+        // operator is serving bad data; replace it in CosmosTxProofEndpoints.
+        'cosmos_tx_proof' => [
+            'endpoint_disagreement', // 2026-11-24 — proof operators disagree on a transaction
+            'network_mismatch', // 2026-11-24 — a proof node or header names another network
+            'contact_disagreement', // 2026-11-24 — proof operators disagree on a security_contact
+        ],
     ]);
 
     return $health;

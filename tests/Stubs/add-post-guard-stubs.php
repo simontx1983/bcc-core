@@ -570,14 +570,28 @@ namespace {
         }
     }
 
+    // attachToGroup()'s writer drops the post's meta cache after a write.
+    if (!\function_exists('wp_cache_delete')) {
+        /** @param int|string $key */
+        function wp_cache_delete($key, string $group = ''): bool
+        {
+            unset($key, $group);
+
+            return true;
+        }
+    }
+
     if (!isset($GLOBALS['__bcc_apg_wpdb_installed'])) {
         $GLOBALS['__bcc_apg_wpdb_installed'] = true;
         $GLOBALS['wpdb'] = new class {
             public string $prefix = 'wp_';
             public string $postmeta = 'wp_postmeta';
             public string $last_error = '';
+            public int $insert_id = 0;
             /** @var list<object> */
             public array $last_result = [];
+            /** @var list<mixed> */
+            private array $args = [];
 
             /**
              * The group privacy read (PeepSoGroupPrivacy, F-460) that
@@ -585,13 +599,24 @@ namespace {
              * privacy row, so the group reads open. No test here asserts
              * the stamp; GroupSyndicationGateTest does.
              *
+             * attachToGroup()'s writes (PostMetaRepository::
+             * replaceWithOneRow): the INSERT lands in the same meta store
+             * the post-meta stubs read, one value per key, so the DELETE of
+             * the key's other rows has nothing left to do.
+             *
              * @param string $sql
              */
             public function query($sql): int
             {
-                unset($sql);
                 $this->last_error  = '';
                 $this->last_result = [];
+                if (str_starts_with(ltrim((string) $sql), 'INSERT INTO wp_postmeta')) {
+                    [$postId, $key, $value] = $this->args;
+                    $GLOBALS['__bcc_apg']['meta'][(int) $postId][(string) $key] = (string) $value;
+                    $this->insert_id++;
+
+                    return 1;
+                }
 
                 return 0;
             }
@@ -599,7 +624,7 @@ namespace {
             /** @param mixed ...$args */
             public function prepare(string $sql, ...$args): string
             {
-                unset($args);
+                $this->args = $args;
 
                 return $sql;
             }

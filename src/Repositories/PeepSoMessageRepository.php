@@ -93,11 +93,58 @@ final class PeepSoMessageRepository
      */
     public static function findConversationsForUserOrUnknown(int $userId, int $limit, int $offset): ?array
     {
+        return self::readConversations($userId, $limit, $offset, '');
+    }
+
+    /**
+     * {@see findConversationsForUserOrUnknown()} narrowed to the
+     * conversations with a participant who matches `$nameQuery`
+     * (structure A: the inbox's search). An empty query is the unfiltered
+     * read.
+     *
+     * Only the participants the viewer is SHOWN are searched, as PeepSo's
+     * get_participants() lists them: never the viewer, and never a member
+     * either side has blocked. Each matches by the shared member-name filter
+     * {@see UserMetaRepository::publicNameMatchSql()}, so a hidden real name
+     * is never searched. Message text is never searched.
+     *
+     * @return list<array{
+     *     root_msg_id: int,
+     *     last_msg_id: int,
+     *     last_msg_author_id: int,
+     *     last_msg_content: string,
+     *     last_msg_posted_at: string,
+     *     is_group: bool,
+     *     last_activity: string|null
+     * }>|null
+     */
+    public static function findConversationsMatchingOrUnknown(int $userId, string $nameQuery, int $limit, int $offset): ?array
+    {
+        return self::readConversations($userId, $limit, $offset, $nameQuery);
+    }
+
+    /**
+     * The inbox read behind both list methods; `$nameQuery` '' is unfiltered.
+     *
+     * @return list<array{
+     *     root_msg_id: int,
+     *     last_msg_id: int,
+     *     last_msg_author_id: int,
+     *     last_msg_content: string,
+     *     last_msg_posted_at: string,
+     *     is_group: bool,
+     *     last_activity: string|null
+     * }>|null
+     */
+    private static function readConversations(int $userId, int $limit, int $offset, string $nameQuery): ?array
+    {
         if ($userId <= 0 || $limit <= 0) {
             return [];
         }
 
         global $wpdb;
+
+        [$matchSql, $matchArgs] = self::participantMatchClause($userId, $nameQuery);
 
         // Outer query joins each viewer-visible parent conversation to
         // its most-recent message via a correlated MAX(mrec_msg_id).
@@ -129,13 +176,12 @@ final class PeepSoMessageRepository
                       AND p.post_type IN ('peepso-message', 'peepso-message-notic')
                 )
              WHERE mpart.mpart_user_id = %d
-               AND last_msg.ID IS NOT NULL
+               AND last_msg.ID IS NOT NULL{$matchSql}
              ORDER BY mpart.mpart_last_activity DESC, mpart.mpart_msg_id DESC
              LIMIT %d OFFSET %d",
             $userId,
             $userId,
-            $limit,
-            max(0, $offset)
+            ...[...$matchArgs, $limit, max(0, $offset)]
         );
 
         if (!self::runProbe((string) $sql)) {
@@ -171,6 +217,37 @@ final class PeepSoMessageRepository
         }
         global $wpdb;
 
+        return (int) $wpdb->get_var(self::conversationCountSql($userId, ''));
+    }
+
+    /**
+     * The total for {@see findConversationsMatchingOrUnknown()}: the same
+     * conversations, counted. NULL when the read failed, so a search never
+     * reports "0 conversations" over a database error.
+     */
+    public static function countConversationsMatchingOrUnknown(int $userId, string $nameQuery): ?int
+    {
+        if ($userId <= 0) {
+            return 0;
+        }
+        $rows = self::trustedRows(self::conversationCountSql($userId, $nameQuery));
+        if ($rows === null) {
+            return null;
+        }
+
+        return isset($rows[0]->n) && is_numeric($rows[0]->n) ? (int) $rows[0]->n : 0;
+    }
+
+    /**
+     * The prepared count behind both count methods; `$nameQuery` '' is
+     * unfiltered.
+     */
+    private static function conversationCountSql(int $userId, string $nameQuery): string
+    {
+        global $wpdb;
+
+        [$matchSql, $matchArgs] = self::participantMatchClause($userId, $nameQuery);
+
         // Mirror the WHERE of findConversationsForUser — only count parents
         // where the viewer has a non-deleted recipient row whose resolved
         // message post is actually published. The list's INNER JOIN requires
@@ -178,8 +255,8 @@ final class PeepSoMessageRepository
         // count must apply the SAME post filter or it overcounts conversations
         // whose only visible recipient rows point at an unpublished/deleted
         // post, yielding an empty trailing page. [audit L-B1]
-        return (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(DISTINCT mpart.mpart_msg_id)
+        return (string) $wpdb->prepare(
+            "SELECT COUNT(DISTINCT mpart.mpart_msg_id) AS n
              FROM {$wpdb->prefix}peepso_message_participants AS mpart
              WHERE mpart.mpart_user_id = %d
                AND EXISTS (
@@ -193,10 +270,44 @@ final class PeepSoMessageRepository
                           OR mrec.mrec_msg_id = mpart.mpart_msg_id)
                      AND p.post_status = 'publish'
                      AND p.post_type IN ('peepso-message', 'peepso-message-notic')
-               )",
+               ){$matchSql}",
             $userId,
-            $userId
-        ));
+            $userId,
+            ...$matchArgs
+        );
+    }
+
+    /**
+     * The inbox search, as a fragment on the outer `mpart` row: a participant
+     * other than the viewer, not blocked either way (PeepSo's
+     * get_participants() leaves those out), matching the shared member-name
+     * filter. `['', []]` for an empty query; `' AND 1 = 0'` for one that
+     * matches nothing.
+     *
+     * @return array{0: string, 1: list<int|string>}
+     */
+    private static function participantMatchClause(int $userId, string $nameQuery): array
+    {
+        $like = UserMetaRepository::nameQueryLike($nameQuery);
+        if ($like === null) {
+            return ['', []];
+        }
+        if ($like === false) {
+            return [' AND 1 = 0', []];
+        }
+
+        global $wpdb;
+
+        return [
+            " AND EXISTS (SELECT 1 FROM {$wpdb->prefix}peepso_message_participants AS bcc_q_p"
+            . " WHERE bcc_q_p.mpart_msg_id = mpart.mpart_msg_id"
+            . " AND bcc_q_p.mpart_user_id <> %d"
+            . " AND NOT EXISTS (SELECT 1 FROM {$wpdb->prefix}peepso_blocks AS bcc_q_b"
+            . " WHERE (bcc_q_b.blk_user_id = bcc_q_p.mpart_user_id AND bcc_q_b.blk_blocked_id = %d)"
+            . " OR (bcc_q_b.blk_user_id = %d AND bcc_q_b.blk_blocked_id = bcc_q_p.mpart_user_id))"
+            . ' AND ' . UserMetaRepository::publicNameMatchSql('bcc_q_p.mpart_user_id') . ')',
+            [$userId, $userId, $userId, $like, $like],
+        ];
     }
 
     /**
