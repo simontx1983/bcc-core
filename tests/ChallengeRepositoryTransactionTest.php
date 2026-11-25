@@ -12,7 +12,8 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * ChallengeRepository's in-transaction primitives (design §4.4, A2):
- *   - transactionState(): the SAVEPOINT / RELEASE probe;
+ *   - transactionState(): the shared probe (DB\TransactionState, tested in
+ *     TransactionStateTest), answered here and counted as wallet_challenge;
  *   - consumeInTransaction(): the use-once step inside the caller's
  *     transaction, refused outside one;
  *   - update(): a compare-and-set in its own transaction, refused inside
@@ -42,46 +43,26 @@ final class ChallengeRepositoryTransactionTest extends TestCase
         $this->db->rows['_transient_timeout_' . $key] = (string) (time() + $expiresIn);
     }
 
-    // ── transactionState() ──────────────────────────────────────────────
+    // ── transactionState(): the shared probe, kept here ─────────────────
+    //
+    // The probe itself (DB\TransactionState::current()) is tested in
+    // TransactionStateTest; these pin that this entry point answers the
+    // same, with the same constant values, and counts its own UNKNOWNs.
 
-    public function testTheProbeTellsInsideFromOutside(): void
+    public function testTransactionStateAnswersWhatTheSharedProbeAnswers(): void
     {
-        self::assertSame(ChallengeRepository::TX_OUTSIDE, ChallengeRepository::transactionState());
+        self::assertSame(
+            [\BCC\Core\DB\TransactionState::INSIDE, \BCC\Core\DB\TransactionState::OUTSIDE, \BCC\Core\DB\TransactionState::UNKNOWN],
+            [ChallengeRepository::TX_INSIDE, ChallengeRepository::TX_OUTSIDE, ChallengeRepository::TX_UNKNOWN]
+        );
+        self::assertSame(['inside', 'outside', 'unknown'], [ChallengeRepository::TX_INSIDE, ChallengeRepository::TX_OUTSIDE, ChallengeRepository::TX_UNKNOWN], 'the values callers compare against');
 
+        self::assertSame(ChallengeRepository::TX_OUTSIDE, ChallengeRepository::transactionState());
         $this->db->query('START TRANSACTION');
         self::assertSame(ChallengeRepository::TX_INSIDE, ChallengeRepository::transactionState());
-        self::assertTrue($this->db->inTransaction, 'the probe leaves the transaction open');
         $this->db->query('ROLLBACK');
-
-        self::assertSame(ChallengeRepository::TX_OUTSIDE, ChallengeRepository::transactionState());
-    }
-
-    /** Only the 1305 message means "outside"; anything else cannot tell. */
-    public function testAnyOtherProbeFailureIsUnknown(): void
-    {
-        $this->db->faults = ['release_other_error' => true];
-        self::assertSame(ChallengeRepository::TX_UNKNOWN, ChallengeRepository::transactionState());
-
         $this->db->faults = ['savepoint_fails' => true];
         self::assertSame(ChallengeRepository::TX_UNKNOWN, ChallengeRepository::transactionState());
-    }
-
-    public function testEachProbeUsesAFreshSavepointAndLeavesNoErrorBehind(): void
-    {
-        ChallengeRepository::transactionState();
-        ChallengeRepository::transactionState();
-
-        $names = [];
-        foreach ($this->db->log as $sql) {
-            if (str_starts_with($sql, 'SAVEPOINT ')) {
-                $names[] = substr($sql, 10);
-            }
-        }
-        self::assertCount(2, $names);
-        self::assertNotSame($names[0], $names[1], 'a caller\'s savepoint of the same name would be replaced');
-        self::assertMatchesRegularExpression('/\Abcc_txprobe_[0-9a-f]{16}\z/', $names[0]);
-        self::assertSame('', $this->db->last_error, 'the expected 1305 is cleared');
-        self::assertFalse($this->db->suppress, 'error suppression is restored');
     }
 
     // ── consume(): owns its transaction ─────────────────────────────────
@@ -147,23 +128,6 @@ final class ChallengeRepositoryTransactionTest extends TestCase
         self::assertSame(ChallengeRepository::TX_OUTSIDE, ChallengeRepository::transactionState());
         $this->seed('k');
         self::assertSame('n-k', ChallengeRepository::update('k', static fn (array $c): array => $c)['nonce'] ?? null, 'so update() still works');
-    }
-
-    /** Another error number is unknown, whatever the message says. */
-    public function testAnotherErrorNumberIsUnknownEvenWithTheEnglishMessage(): void
-    {
-        $this->withConnection(2013); // CR_SERVER_LOST
-
-        self::assertSame(ChallengeRepository::TX_UNKNOWN, ChallengeRepository::transactionState());
-    }
-
-    /** Only with no error number to read does the English message decide; a localised one cannot. */
-    public function testWithoutAConnectionTheEnglishMessageIsTheFallback(): void
-    {
-        self::assertSame(ChallengeRepository::TX_OUTSIDE, ChallengeRepository::transactionState());
-
-        $this->db->localisedMessages = true;
-        self::assertSame(ChallengeRepository::TX_UNKNOWN, ChallengeRepository::transactionState());
     }
 
     public function testEveryUnknownProbeIsCounted(): void

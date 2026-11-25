@@ -18,6 +18,7 @@
 
 namespace BCC\Core\Wallet;
 
+use BCC\Core\DB\TransactionState;
 use BCC\Core\Observability\DegradationMetrics;
 
 if (!defined('ABSPATH')) {
@@ -301,13 +302,13 @@ final class ChallengeRepository
     }
 
     /** transactionState(): an explicit or implicit transaction is open. */
-    public const TX_INSIDE = 'inside';
+    public const TX_INSIDE = TransactionState::INSIDE;
 
     /** transactionState(): no transaction is open. */
-    public const TX_OUTSIDE = 'outside';
+    public const TX_OUTSIDE = TransactionState::OUTSIDE;
 
     /** transactionState(): the probe failed in a way that answers neither. */
-    public const TX_UNKNOWN = 'unknown';
+    public const TX_UNKNOWN = TransactionState::UNKNOWN;
 
     /**
      * Take a challenge INSIDE the caller's open transaction: the
@@ -449,101 +450,21 @@ final class ChallengeRepository
     }
 
     /**
-     * Is a transaction open on this connection? A probe that works the same
-     * on MySQL 8 and MariaDB: SAVEPOINT, then RELEASE SAVEPOINT. Inside a
-     * transaction (START TRANSACTION, BEGIN, or autocommit off) the release
-     * succeeds. Outside one the savepoint ends with its implicit
-     * transaction, so the release fails with error 1305 "SAVEPOINT … does
-     * not exist".
+     * Is a transaction open on this connection? The shared probe,
+     * \BCC\Core\DB\TransactionState::current() (SAVEPOINT, then RELEASE
+     * SAVEPOINT; see there for how it reads the answer). Kept here, with the
+     * TX_* constants, for the callers that already ask it.
      *
-     * ⚠ Any OTHER failure is TX_UNKNOWN, never TX_OUTSIDE, and every caller
-     * refuses on it.
-     * ⚠ The savepoint name is unique per call: a savepoint with a caller's
-     * name (bcc-trust's TransactionManager uses sp_<depth>_<rand>) would
-     * silently replace theirs.
-     *
-     * (INFORMATION_SCHEMA.INNODB_TRX cannot answer this on MySQL 8: the view
-     * is served from a cache refreshed at most every ~100 ms, and a
-     * transaction is not listed until it first touches InnoDB.)
-     *
-     * Errors are suppressed for the probe and `last_error` is cleared after
-     * it, so an expected 1305 is neither logged nor mistaken later for a
-     * failure of the next query.
-     *
-     * ⚠ "Outside" is recognised by the error NUMBER (1305,
-     * ER_SP_DOES_NOT_EXIST), read from the connection, never by the message
-     * alone. A server set to another language (lc_messages) words the
-     * message differently, and a message-only match would answer TX_UNKNOWN
-     * on every call, so every consume would refuse. The English message is
-     * matched only when the error number cannot be read (no mysqli link).
-     * Every TX_UNKNOWN records `wallet_challenge/tx_probe_unknown`.
+     * ⚠ UNKNOWN is never OUTSIDE, and every caller refuses on it.
+     * Every TX_UNKNOWN asked through here records
+     * `wallet_challenge/tx_probe_unknown`.
      */
     public static function transactionState(): string
     {
-        global $wpdb;
-
-        $name       = 'bcc_txprobe_' . bin2hex(random_bytes(8));
-        $suppressed = $wpdb->suppress_errors(true);
-        try {
-            self::clearLastError();
-            $state = self::probe($name);
-        } finally {
-            self::clearLastError();
-            $wpdb->suppress_errors($suppressed);
-        }
+        $state = TransactionState::current();
         if ($state === self::TX_UNKNOWN) {
             DegradationMetrics::record('wallet_challenge', 'tx_probe_unknown');
         }
         return $state;
-    }
-
-    /** MySQL / MariaDB ER_SP_DOES_NOT_EXIST: "SAVEPOINT … does not exist". */
-    private const ER_SP_DOES_NOT_EXIST = 1305;
-
-    /** One SAVEPOINT / RELEASE round on the connection (see transactionState()). */
-    private static function probe(string $name): string
-    {
-        global $wpdb;
-
-        if ($wpdb->query('SAVEPOINT ' . $name) === false) {
-            return self::TX_UNKNOWN;
-        }
-        if ($wpdb->query('RELEASE SAVEPOINT ' . $name) !== false) {
-            return self::TX_INSIDE;
-        }
-        $errno = self::lastErrorNumber();
-        if ($errno === self::ER_SP_DOES_NOT_EXIST) {
-            return self::TX_OUTSIDE;
-        }
-        if ($errno === 0 && self::lastErrorMessage() === 'SAVEPOINT ' . $name . ' does not exist') {
-            return self::TX_OUTSIDE; // no error number to read: the English message, as a fallback
-        }
-        return self::TX_UNKNOWN;
-    }
-
-    /**
-     * The connection's last error number (wpdb's mysqli link), or 0 when it
-     * cannot be read: no link, or a link that has gone away.
-     */
-    private static function lastErrorNumber(): int
-    {
-        global $wpdb;
-
-        $dbh = isset($wpdb->dbh) ? $wpdb->dbh : null;
-        if (!$dbh instanceof \mysqli) {
-            return 0;
-        }
-        try {
-            return (int) mysqli_errno($dbh);
-        } catch (\Throwable $e) {
-            return 0;
-        }
-    }
-
-    /** The driver's last error message (a helper, for the reason ProbesReads::clearLastError() gives). */
-    private static function lastErrorMessage(): string
-    {
-        global $wpdb;
-        return (string) $wpdb->last_error;
     }
 }

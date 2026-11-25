@@ -1032,6 +1032,23 @@ add_filter('bcc_system_health', function (array $health): array {
         //                        sustained count means wallet sign-in and
         //                        linking are failing (a P1).
         'wallet_challenge' => ['tx_probe_unknown'],
+        // db_transaction — bcc-trust's transaction guard: code that starts
+        // its own transaction, or must run inside one, asks the connection
+        // first (DB\TransactionState::current()).
+        //   `probe_unknown`        — the probe could not tell whether a
+        //                            transaction is open, so the write was
+        //                            REFUSED. Steady state zero; a sustained
+        //                            count means those writes are failing.
+        //   `nested_start_refused` — code that starts its own transaction
+        //                            was called while one was already open,
+        //                            and refused. Steady state zero; any
+        //                            count is a code path to fix (the paired
+        //                            error log names the site).
+        //   `required_missing`     — code that must run inside a transaction
+        //                            was called outside one, and refused.
+        //                            Steady state zero; the paired error log
+        //                            names the site.
+        'db_transaction' => ['probe_unknown', 'nested_start_refused', 'required_missing'],
         // auth_token — bcc-trust's token revocation writes (JwtToken).
         //   `revoke_write_failed` — a revocation write did not land: the
         //                           revoke-all version bump (a password or
