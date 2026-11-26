@@ -54,7 +54,7 @@ final class BccMailer
      * the failure is logged — the caller's execution path is not affected.
      *
      * @param string $to           Recipient address. Must be a valid email;
-     *                             call silently returns if is_email() fails.
+     *                             returns false if is_email() fails.
      * @param string $subject      Subject line.
      * @param string $htmlBody     Complete HTML document. Caller is responsible
      *                             for escaping any user-supplied values before
@@ -68,9 +68,9 @@ final class BccMailer
         string $subject,
         string $htmlBody,
         string $failureEvent
-    ): void {
+    ): bool {
         if ($to === '' || !is_email($to)) {
-            return;
+            return false;
         }
 
         $headers = ['Content-Type: text/html; charset=UTF-8'];
@@ -98,6 +98,7 @@ final class BccMailer
             ]);
             DegradationMetrics::record(self::SUBSYSTEM, $failureEvent);
         }
+        return $sent;
     }
 
     /**
