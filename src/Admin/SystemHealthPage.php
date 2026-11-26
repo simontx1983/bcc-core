@@ -102,12 +102,14 @@ final class SystemHealthPage
 
         if ($response->is_error()) {
             $body = $response->get_data();
-            $msg  = is_array($body) && isset($body['message']) ? (string) $body['message'] : 'HTTP ' . $response->get_status();
+            $msg  = is_array($body) && is_string($body['message'] ?? null) ? $body['message'] : 'HTTP ' . $response->get_status();
             return ['error' => true, 'message' => $msg];
         }
 
         $data = $response->get_data();
-        return is_array($data) ? $data : ['error' => true, 'message' => 'unexpected response shape'];
+        return is_array($data) && is_string($data['status'] ?? null) && $data['status'] !== ''
+            ? $data
+            : ['error' => true, 'message' => 'unexpected response shape'];
     }
 
     // ────────────────────────────────────────────────────────────
@@ -266,14 +268,66 @@ final class SystemHealthPage
             unset($plugins['degradation_metrics']);
         }
 
+        $crons = $plugins['crons'] ?? null;
+        if (is_array($crons)) {
+            self::renderScheduledJobs($crons);
+            unset($plugins['crons']);
+        }
+
         // Everything else: pretty-print per-key. Shape is arbitrary per
         // contributor (NftIndexerHealthSnapshot, bcc-search, etc.).
+        if ($plugins === []) {
+            return;
+        }
+        echo '<details open style="margin-top:24px;">';
+        echo '<summary style="cursor:pointer;font-weight:bold;">Additional plugin diagnostics</summary>';
+        echo '<p>These plugin details are not summarized above. They stay expanded so warnings remain visible. The complete response is also available under Raw JSON.</p>';
         foreach ($plugins as $key => $value) {
             printf('<h3 style="margin-top:24px;">%s</h3>', esc_html((string) $key));
             echo '<pre style="background:var(--bcc-bg-raised);padding:12px;max-height:280px;overflow:auto;border-left:4px solid var(--bcc-border-strong);">';
             echo esc_html((string) wp_json_encode($value, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
             echo '</pre>';
         }
+        echo '</details>';
+    }
+
+    /** @param array<string,mixed> $snapshot */
+    private static function renderScheduledJobs(array $snapshot): void
+    {
+        echo '<h3 style="margin-top:24px;">Scheduled job health</h3>';
+        echo '<p>States come from each job\'s recorded successful run. Pending means no successful run has been recorded yet.</p>';
+        $jobs = $snapshot['jobs'] ?? null;
+        if (!is_array($jobs) || $jobs === []) {
+            echo '<p>Scheduled job details are unavailable. Inspect Raw JSON or open the Cron page.</p>';
+            return;
+        }
+
+        echo '<div style="overflow-x:auto;">';
+        echo '<table class="widefat striped"><thead><tr><th scope="col">Job</th><th scope="col">State</th><th scope="col">Last successful run</th><th scope="col">Schedule</th></tr></thead><tbody>';
+        foreach ($jobs as $hook => $job) {
+            $job = is_array($job) ? $job : [];
+            $state = $job['state'] ?? null;
+            $age = $job['age_seconds'] ?? null;
+            $hasAge = is_int($age) && $age >= 0;
+            if ($state === 'ok' && !$hasAge) {
+                $state = null;
+            }
+            $badge = match ($state) {
+                'ok' => AdminUi::badge('OK', AdminUi::OK),
+                'stale' => AdminUi::badge('Stale', AdminUi::BAD),
+                'pending' => AdminUi::badge('Pending', AdminUi::WARN),
+                default => AdminUi::badge('Unknown', AdminUi::WARN),
+            };
+            $lastRun = is_int($age) && $age >= 0 ? AdminUi::interval($age) . ' ago' : 'Not recorded';
+            $description = is_string($job['description'] ?? null) ? $job['description'] : '';
+            $interval = is_string($job['interval'] ?? null) && trim($job['interval']) !== '' ? $job['interval'] : 'Unknown';
+            echo '<tr><th scope="row"><code>' . esc_html((string) $hook) . '</code>';
+            if ($description !== '') {
+                echo '<br><span class="bcc-muted">' . esc_html($description) . '</span>';
+            }
+            echo '</th><td>' . $badge . '</td><td>' . esc_html($lastRun) . '</td><td>' . esc_html($interval) . '</td></tr>';
+        }
+        echo '</tbody></table></div>';
     }
 
     /**
