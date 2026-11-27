@@ -1604,11 +1604,15 @@ final class PeepSoGroupRepository
      * capped by its own reader); inlined as integers after intval(), a
      * constant IN list. Empty: no exclusion, exactly as before.
      *
+     * ⚠ FAILS CLOSED: null when the read cannot be trusted (ProbesReads:
+     * an error, or wpdb's silent early return), never an empty map that
+     * would read as "no activity". Callers show no number then.
+     *
      * @param int[]     $groupIds
      * @param list<int> $excludeActIds
-     * @return array<int, object{posts: int, actives: int, last_at: string|null}>
+     * @return array<int, object{posts: int, actives: int, last_at: string|null}>|null
      */
-    public static function getActivityHeat(array $groupIds, int $sinceSeconds = 7 * DAY_IN_SECONDS, array $excludeActIds = []): array
+    public static function getActivityHeat(array $groupIds, int $sinceSeconds = 7 * DAY_IN_SECONDS, array $excludeActIds = []): ?array
     {
         if ($groupIds === []) {
             return [];
@@ -1658,10 +1662,13 @@ final class PeepSoGroupRepository
         );
 
         /** @var list<object{group_id: numeric-string, posts: numeric-string, actives: numeric-string, last_at: string|null}>|null $rows */
-        $rows = $wpdb->get_results($sql);
+        $rows = is_string($sql) ? self::trustedRows($sql) : null;
+        if ($rows === null) {
+            return null;
+        }
 
         $map = [];
-        foreach ($rows ?: [] as $row) {
+        foreach ($rows as $row) {
             $map[(int) $row->group_id] = (object) [
                 'posts'   => (int) $row->posts,
                 'actives' => (int) $row->actives,
